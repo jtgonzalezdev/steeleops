@@ -550,7 +550,12 @@ def manage_shifts():
     shifts = [row_to_dict(row) for row in cur.fetchall()]
     conn.close()
     return jsonify(shifts)
-
+conn = get_db()
+cur = get_cursor(conn)
+cur.execute("DROP TABLE IF EXISTS shifts")
+cur.execute("DROP TABLE IF EXISTS guards")
+conn.commit()
+conn.close()
 
 if __name__ == "__main__":
     init_db()
