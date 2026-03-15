@@ -690,7 +690,7 @@ def init_db():
         conn.executemany('INSERT INTO sites (company_id, name, client_company_name, address, notes, active) VALUES (?, ?, ?, ?, ?, ?)', sites)
     else:
         conn.execute('UPDATE sites SET company_id=? WHERE company_id IS NULL', (demo_company,))
-        conn.execute('UPDATE sites SET client_company_name=COALESCE(client_company_name, "")')
+        conn.execute('UPDATE sites SET client_company_name=COALESCE(client_company_name, '')')
 
     if fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM shifts') == 0:
         g1 = conn.execute("SELECT id FROM users WHERE username='guard1'").fetchone()['id']
