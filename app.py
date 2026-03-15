@@ -2233,7 +2233,7 @@ def init_db():
     if table_exists(conn, 'reports'):
         ensure_column(conn, 'reports', 'updated_at TEXT')
     if APP_ENV == 'production':
-        conn.execute("DELETE FROM users WHERE username IN ('superadmin','admin','guard1','guard2','demoadmin') AND email LIKE '%%.local'")
+        # conn.execute("DELETE FROM users WHERE username IN ('superadmin','admin','guard1','guard2','demoadmin') AND email LIKE '%%.local'")
         conn.execute("DELETE FROM companies WHERE name IN ('SteeleOps Demo','BlueLine Protective') AND id NOT IN (SELECT DISTINCT company_id FROM users WHERE company_id IS NOT NULL)")
     conn.commit(); conn.close()
 
