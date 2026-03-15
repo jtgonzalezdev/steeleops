@@ -148,6 +148,19 @@ def db():
     return ConnectionWrapper(conn, 'sqlite')
 
 
+def fetch_scalar(conn, query, params=(), column='cnt', default=0):
+    row = conn.execute(query, params).fetchone()
+    if not row:
+        return default
+    try:
+        return row[column]
+    except Exception:
+        try:
+            return row[0]
+        except Exception:
+            return default
+
+
 def table_exists(conn, name):
     if conn.backend == 'postgres':
         row = conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name=?", (name,)).fetchone()
@@ -571,14 +584,14 @@ def init_db():
             ensure_column(conn, 'reports', col)
 
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    if conn.execute('SELECT COUNT(*) FROM companies').fetchone()[0] == 0:
+    if fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM companies') == 0:
         conn.execute('INSERT INTO companies (name, tagline, created_at) VALUES (?, ?, ?)', ('SteeleOps Demo', 'Security Operations Simplified', now))
         conn.execute('INSERT INTO companies (name, tagline, created_at) VALUES (?, ?, ?)', ('BlueLine Protective', 'Security Operations Simplified', now))
 
     demo_company = conn.execute("SELECT id FROM companies WHERE name='SteeleOps Demo'").fetchone()['id']
     other_company = conn.execute("SELECT id FROM companies WHERE name='BlueLine Protective'").fetchone()['id']
 
-    if conn.execute('SELECT COUNT(*) FROM users').fetchone()[0] == 0:
+    if fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM users') == 0:
         users = [
             (None, 'superadmin', hash_password('admin123'), 'Platform Admin', 'superadmin', '', 'platform@steeleops.local', '', 0, 1, now),
             (demo_company, 'admin', hash_password('admin123'), 'SteeleOps Admin', 'company_admin', '210-555-0101', 'admin@demo.local', 'ADM-100', 28, 1, now),
@@ -602,7 +615,7 @@ def init_db():
             if row['role'] == 'admin':
                 conn.execute("UPDATE users SET role='company_admin' WHERE id=?", (row['id'],))
 
-    if conn.execute('SELECT COUNT(*) FROM sites').fetchone()[0] == 0:
+    if fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM sites') == 0:
         sites = [
             (demo_company, 'Steele Plaza', 'Steele Commercial', '1200 Main St, San Antonio, TX', 'Front desk coverage', 1),
             (demo_company, 'Riverfront Logistics', 'Riverfront Logistics', '900 Warehouse Rd, New Braunfels, TX', 'Truck gate patrol', 1),
@@ -613,7 +626,7 @@ def init_db():
         conn.execute('UPDATE sites SET company_id=? WHERE company_id IS NULL', (demo_company,))
         conn.execute('UPDATE sites SET client_company_name=COALESCE(client_company_name, "")')
 
-    if conn.execute('SELECT COUNT(*) FROM shifts').fetchone()[0] == 0:
+    if fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM shifts') == 0:
         g1 = conn.execute("SELECT id FROM users WHERE username='guard1'").fetchone()['id']
         g2 = conn.execute("SELECT id FROM users WHERE username='guard2'").fetchone()['id']
         s1 = conn.execute("SELECT id FROM sites WHERE name='Steele Plaza'").fetchone()['id']
@@ -949,18 +962,18 @@ def get_dashboard_context(user, view='week'):
     ''', (company_id,)).fetchall()
 
     stats = {
-        'guards_on_duty': conn.execute('''
-            SELECT COUNT(*) FROM shifts WHERE company_id=? AND date(shift_date)=date(?) AND clock_in_time IS NOT NULL AND clock_out_time IS NULL
-        ''', (company_id, today.isoformat())).fetchone()[0],
-        'open_incidents': conn.execute('''
-            SELECT COUNT(*) FROM reports WHERE company_id=? AND report_type='incident' AND status!='closed'
-        ''', (company_id,)).fetchone()[0],
-        'sites_active_today': conn.execute('''
-            SELECT COUNT(DISTINCT site_id) FROM shifts WHERE company_id=? AND shift_date=?
-        ''', (company_id, today.isoformat())).fetchone()[0],
-        'recent_reports': conn.execute('SELECT COUNT(*) FROM reports WHERE company_id=? AND date(created_at)>=date(?)', (company_id, (today - timedelta(days=7)).isoformat())).fetchone()[0],
-        'checkpoint_logs_today': conn.execute('SELECT COUNT(*) FROM patrol_checkpoints WHERE company_id=? AND date(check_time)=date(?)', (company_id, today.isoformat())).fetchone()[0],
-        'weekly_hours': conn.execute('SELECT COALESCE(SUM(worked_hours),0) FROM shifts WHERE company_id=? AND shift_date BETWEEN ? AND ?', (company_id, (today - timedelta(days=today.weekday())).isoformat(), (today - timedelta(days=today.weekday()) + timedelta(days=6)).isoformat())).fetchone()[0],
+        'guards_on_duty': fetch_scalar(conn, '''
+            SELECT COUNT(*) AS cnt FROM shifts WHERE company_id=? AND date(shift_date)=date(?) AND clock_in_time IS NOT NULL AND clock_out_time IS NULL
+        ''', (company_id, today.isoformat())),
+        'open_incidents': fetch_scalar(conn, '''
+            SELECT COUNT(*) AS cnt FROM reports WHERE company_id=? AND report_type='incident' AND status!='closed'
+        ''', (company_id,)),
+        'sites_active_today': fetch_scalar(conn, '''
+            SELECT COUNT(DISTINCT site_id) AS cnt FROM shifts WHERE company_id=? AND shift_date=?
+        ''', (company_id, today.isoformat())),
+        'recent_reports': fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM reports WHERE company_id=? AND date(created_at)>=date(?)', (company_id, (today - timedelta(days=7)).isoformat())),
+        'checkpoint_logs_today': fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM patrol_checkpoints WHERE company_id=? AND date(check_time)=date(?)', (company_id, today.isoformat())),
+        'weekly_hours': fetch_scalar(conn, 'SELECT COALESCE(SUM(worked_hours),0) AS cnt FROM shifts WHERE company_id=? AND shift_date BETWEEN ? AND ?', (company_id, (today - timedelta(days=today.weekday())).isoformat(), (today - timedelta(days=today.weekday()) + timedelta(days=6)).isoformat())),
     }
 
     overtime_rows = conn.execute('''
