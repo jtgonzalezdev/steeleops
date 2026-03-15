@@ -2589,6 +2589,9 @@ if __name__ == '__main__':
     create_admin_parser.add_argument('--email', default='')
     args = parser.parse_args()
     command = args.command or 'serve'
+    
+    PORT = int(os.environ.get("PORT", 10000))
+    
     if command == 'init-db':
         init_db(); print('Database initialized.')
     elif command == 'create-admin':
