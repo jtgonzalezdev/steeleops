@@ -1107,9 +1107,9 @@ def get_dashboard_context(user, view='week'):
 
     stats = {
         'guards_on_duty': fetch_scalar(conn, '''
-            SELECT COUNT(*) AS cnt
+            SELECT COUNT(DISTINCT g.id) AS cnt
             FROM guards g
-            JOIN guard_site_assignments gsa ON g.id=gsa.guard_id
+            JOIN guard_site_assignments gsa ON g.id=gsa.guard_id AND gsa.company_id=g.company_id
             WHERE g.company_id=? AND g.status='active'
         ''', (company_id,)),
         'open_incidents': fetch_scalar(conn, '''
@@ -1509,6 +1509,16 @@ def application(environ, start_response):
             (data.get('first_name') or guard['first_name']).strip(), (data.get('last_name') or guard['last_name']).strip(), data.get('phone', guard['phone'] or '').strip(), data.get('email', guard['email'] or '').strip(), data.get('license_number', guard['license_number'] or '').strip(), data.get('status', guard['status']) if data.get('status', guard['status']) in ('active', 'inactive') else guard['status'], data.get('training_status', guard['training_status'] or '').strip(), guard['id']
         ))
         conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='guard', target_id=guard['id'], message='guard profile updated', environ=environ)
+        return redirect(start_response, '/guards')
+    if path == '/admin/guard/deactivate' and method == 'POST':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        data, _ = parse_post(environ)
+        conn = db(); guard = conn.execute('SELECT * FROM guards WHERE id=? AND company_id=?', (data.get('guard_id'), user['company_id'])).fetchone()
+        if not guard:
+            conn.close(); return bad_request(start_response, 'Guard not found')
+        conn.execute("UPDATE guards SET status='inactive' WHERE id=? AND company_id=?", (guard['id'], user['company_id']))
+        conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='guard', target_id=guard['id'], message='guard deactivated', environ=environ)
         return redirect(start_response, '/guards')
     if path == '/admin/guard/assign' and method == 'POST':
         user, response = require_admin(environ, start_response)
@@ -1929,6 +1939,7 @@ DASHBOARD_HTML = r'''{% extends "layout.html" %}
         <div class="actions vertical">
           <form method="post" action="/admin/guard/assign" class="inline-form"><input type="hidden" name="guard_id" value="{{ guard.id }}"><select name="site_id"><option value="">Unassign</option>{% for site in sites %}<option value="{{ site.id }}" {% if guard.site_id == site.id %}selected{% endif %}>{{ site.name }}</option>{% endfor %}</select><button class="btn ghost" type="submit">Assign Site</button></form>
           <form method="post" action="/admin/guard/update" class="inline-form"><input type="hidden" name="guard_id" value="{{ guard.id }}"><input type="text" name="first_name" value="{{ guard.first_name }}" placeholder="First" required><input type="text" name="last_name" value="{{ guard.last_name }}" placeholder="Last" required><select name="status"><option value="active" {% if guard.status == 'active' %}selected{% endif %}>active</option><option value="inactive" {% if guard.status == 'inactive' %}selected{% endif %}>inactive</option></select><input type="text" name="training_status" value="{{ guard.training_status or '' }}" placeholder="Training"><button class="btn" type="submit">Save</button></form>
+          {% if guard.status == 'active' %}<form method="post" action="/admin/guard/deactivate" class="inline-form"><input type="hidden" name="guard_id" value="{{ guard.id }}"><button class="btn ghost" type="submit">Deactivate</button></form>{% endif %}
         </div>
       </div>
       {% else %}<div class="empty">No guards added yet.</div>{% endfor %}
@@ -2732,6 +2743,16 @@ def application(environ, start_response):
             (data.get('first_name') or guard['first_name']).strip(), (data.get('last_name') or guard['last_name']).strip(), data.get('phone', guard['phone'] or '').strip(), data.get('email', guard['email'] or '').strip(), data.get('license_number', guard['license_number'] or '').strip(), data.get('status', guard['status']) if data.get('status', guard['status']) in ('active', 'inactive') else guard['status'], data.get('training_status', guard['training_status'] or '').strip(), guard['id']
         ))
         conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='guard', target_id=guard['id'], message='guard profile updated', environ=environ)
+        return redirect(start_response, '/guards')
+    if path == '/admin/guard/deactivate' and method == 'POST':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        data, _ = parse_post(environ)
+        conn = db(); guard = conn.execute('SELECT * FROM guards WHERE id=? AND company_id=?', (data.get('guard_id'), user['company_id'])).fetchone()
+        if not guard:
+            conn.close(); return bad_request(start_response, 'Guard not found')
+        conn.execute("UPDATE guards SET status='inactive' WHERE id=? AND company_id=?", (guard['id'], user['company_id']))
+        conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='guard', target_id=guard['id'], message='guard deactivated', environ=environ)
         return redirect(start_response, '/guards')
     if path == '/admin/guard/assign' and method == 'POST':
         user, response = require_admin(environ, start_response)
