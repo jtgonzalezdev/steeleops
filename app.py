@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import io
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -182,6 +183,13 @@ def ensure_column(conn, table, column_def):
     if table_exists(conn, table) and col not in column_names(conn, table):
         cleaned = column_def.replace('INTEGER PRIMARY KEY AUTOINCREMENT', 'INTEGER').replace('AUTOINCREMENT', '').replace("CHECK(role IN ('superadmin', 'company_admin', 'guard'))", '')
         if conn.backend == 'postgres':
+            # PostgreSQL does not allow DEFAULT expressions that reference another
+            # column (e.g. "DEFAULT user_id") when adding a column.
+            cleaned = re.sub(
+                r'\s+DEFAULT\s+([A-Za-z_][A-Za-z0-9_]*)\b',
+                lambda m: m.group(0) if m.group(1).lower() in {'true', 'false', 'null', 'current_date', 'current_time', 'current_timestamp'} else '',
+                cleaned,
+            )
             cleaned = cleaned.replace('REAL', 'DOUBLE PRECISION')
         conn.execute(f'ALTER TABLE {table} ADD COLUMN {cleaned}')
 
