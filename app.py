@@ -696,7 +696,7 @@ def init_db():
         for col in ['company_id INTEGER', 'client_company_name TEXT', 'active INTEGER DEFAULT 1']:
             ensure_column(conn, 'sites', col)
     if table_exists(conn, 'guards'):
-        for col in ['company_id INTEGER', 'first_name TEXT', 'last_name TEXT', 'phone TEXT', 'email TEXT', 'license_number TEXT', 'status TEXT DEFAULT "active"', 'rating REAL DEFAULT 5', 'training_status TEXT', 'created_at TEXT']:
+        for col in ['company_id INTEGER', 'first_name TEXT', 'last_name TEXT', 'phone TEXT', 'email TEXT', 'license_number TEXT', "status TEXT DEFAULT 'active'", 'rating REAL DEFAULT 5', 'training_status TEXT', 'created_at TEXT']:
             ensure_column(conn, 'guards', col)
     if table_exists(conn, 'guard_site_assignments'):
         for col in ['company_id INTEGER', 'guard_id INTEGER', 'site_id INTEGER', 'assigned_at TEXT']:
@@ -706,7 +706,7 @@ def init_db():
             ensure_column(conn, 'shifts', col)
         sync_shift_assignment_schema(conn)
     if table_exists(conn, 'reports'):
-        for col in ['company_id INTEGER', 'status TEXT DEFAULT "open"', 'priority TEXT DEFAULT "medium"', 'photo_name TEXT', 'photo_path TEXT']:
+        for col in ['company_id INTEGER', "status TEXT DEFAULT 'open'", "priority TEXT DEFAULT 'medium'", 'photo_name TEXT', 'photo_path TEXT']:
             ensure_column(conn, 'reports', col)
 
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
