@@ -183,13 +183,14 @@ def ensure_column(conn, table, column_def):
     if table_exists(conn, table) and col not in column_names(conn, table):
         cleaned = column_def.replace('INTEGER PRIMARY KEY AUTOINCREMENT', 'INTEGER').replace('AUTOINCREMENT', '').replace("CHECK(role IN ('superadmin', 'company_admin', 'guard'))", '')
         default_source_col = None
+        # Cross-column defaults such as "DEFAULT user_id" are not portable and
+        # PostgreSQL rejects them during ALTER TABLE ... ADD COLUMN. Strip that
+        # default and backfill after the column is created instead.
+        default_match = re.search(r'\s+DEFAULT\s+([A-Za-z_][A-Za-z0-9_]*)\b', cleaned)
+        if default_match and default_match.group(1).lower() not in {'true', 'false', 'null', 'current_date', 'current_time', 'current_timestamp'}:
+            default_source_col = default_match.group(1)
+            cleaned = cleaned[:default_match.start()] + cleaned[default_match.end():]
         if conn.backend == 'postgres':
-            # PostgreSQL does not allow DEFAULT expressions that reference another
-            # column (e.g. "DEFAULT user_id") when adding a column.
-            default_match = re.search(r'\s+DEFAULT\s+([A-Za-z_][A-Za-z0-9_]*)\b', cleaned)
-            if default_match and default_match.group(1).lower() not in {'true', 'false', 'null', 'current_date', 'current_time', 'current_timestamp'}:
-                default_source_col = default_match.group(1)
-                cleaned = cleaned[:default_match.start()] + cleaned[default_match.end():]
             cleaned = cleaned.replace('REAL', 'DOUBLE PRECISION')
         conn.execute(f'ALTER TABLE {table} ADD COLUMN {cleaned}')
         if default_source_col and default_source_col in column_names(conn, table):
