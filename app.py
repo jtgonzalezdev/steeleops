@@ -1165,6 +1165,7 @@ def get_dashboard_context(user, view='week'):
         WHERE shifts.company_id=? AND COALESCE(shifts.user_id, shifts.guard_id) IS NULL AND shift_date>=?
         ORDER BY shift_date, start_time LIMIT 10
     ''', (company_id, today.isoformat())).fetchall()
+    my_open_shift_options = open_shift_alerts if user['role'] == 'guard' else []
 
     swap_requests = conn.execute('''
         SELECT ssr.*, s.shift_date, s.start_time, s.end_time, st.name as site_name,
@@ -1242,6 +1243,7 @@ def get_dashboard_context(user, view='week'):
         'range_end': range_end,
         'schedule_view': view,
         'open_shift_alerts': open_shift_alerts,
+        'my_open_shift_options': my_open_shift_options,
         'swap_requests': swap_requests,
         'time_corrections': time_corrections,
         'checkpoints': checkpoints,
@@ -1864,6 +1866,14 @@ DASHBOARD_HTML = r'''{% extends "layout.html" %}
         {% for shift in open_shift_alerts %}
           <div class="list-item"><strong>{{ shift.site_name }}</strong><span>{{ shift.shift_date }} · {{ shift.start_time }}-{{ shift.end_time }}</span></div>
         {% else %}<div class="empty">No open shift alerts.</div>{% endfor %}
+        {% if user.role == 'guard' %}
+        <hr>
+        <form method="post" action="/shift/claim" class="stack compact">
+          <h4>Claim Open Shift</h4>
+          <label>Open Shift<select name="shift_id">{% for shift in my_open_shift_options %}<option value="{{ shift.id }}">{{ shift.shift_date }} · {{ shift.site_name }} · {{ shift.start_time }}-{{ shift.end_time }}</option>{% endfor %}</select></label>
+          <button class="btn" type="submit" {% if not my_open_shift_options %}disabled{% endif %}>Claim Shift</button>
+        </form>
+        {% endif %}
         {% if user.role in ['company_admin', 'superadmin'] %}
         <hr>
         <form method="post" action="/admin/shift/new" class="stack compact">
@@ -2774,6 +2784,26 @@ def application(environ, start_response):
             worked = calculate_worked_hours(shift['clock_in_time'], timestamp)
             conn.execute('UPDATE shifts SET clock_out_time=?, status=?, worked_hours=?, overtime_alert=? WHERE id=?', (timestamp, 'completed', worked, 1 if worked > 8 else 0, shift_id)); message='clocked out'
         conn.commit(); conn.close(); log_audit('shift_time_event', actor_user_id=user['id'], company_id=user['company_id'], target_type='shift', target_id=shift_id, message=message, environ=environ); return redirect(start_response, '/dashboard')
+    if path == '/shift/claim' and method == 'POST':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        if user['role'] != 'guard':
+            return bad_request(start_response, 'Only guards can claim open shifts')
+        data, _ = parse_post(environ); shift_id = data.get('shift_id')
+        if not shift_id:
+            return bad_request(start_response, 'Missing shift')
+        conn = db()
+        shift = conn.execute('SELECT * FROM shifts WHERE id=? AND company_id=?', (shift_id, user['company_id'])).fetchone()
+        if not shift:
+            conn.close(); return bad_request(start_response, 'Shift not found')
+        if shift_assignment_value(shift) is not None or shift['status'] != 'open':
+            conn.close(); return bad_request(start_response, 'Shift is no longer open')
+        assignment_clause, assignment_cols = shift_assignment_update_clause(conn)
+        if assignment_clause:
+            conn.execute(f"UPDATE shifts SET {assignment_clause}, status='assigned' WHERE id=?", tuple([user['id']] * len(assignment_cols) + [shift_id]))
+        else:
+            conn.execute("UPDATE shifts SET status='assigned' WHERE id=?", (shift_id,))
+        conn.commit(); conn.close(); log_audit('shift_edit', actor_user_id=user['id'], company_id=user['company_id'], target_type='shift', target_id=shift_id, message='open shift claimed', environ=environ); return redirect(start_response, '/dashboard')
     if path == '/report/new' and method == 'POST':
         user, response = require_login(environ, start_response)
         if response: return response
@@ -2798,7 +2828,15 @@ def application(environ, start_response):
     if path == '/swap/request' and method == 'POST':
         user, response = require_login(environ, start_response)
         if response: return response
-        data, _ = parse_post(environ); conn = db(); conn.execute("INSERT INTO shift_swap_requests (company_id, shift_id, requested_by, requested_to, status, notes, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)", (user['company_id'], data.get('shift_id'), user['id'], data.get('requested_to') or None, data.get('notes', ''), datetime.now().strftime('%Y-%m-%d %H:%M:%S'))); conn.commit(); conn.close(); return redirect(start_response, '/dashboard')
+        data, _ = parse_post(environ); conn = db(); shift = conn.execute('SELECT * FROM shifts WHERE id=? AND company_id=?', (data.get('shift_id'), user['company_id'])).fetchone()
+        if not shift or shift_assignment_value(shift) != user['id']:
+            conn.close(); return bad_request(start_response, 'You can only swap your own assigned shifts')
+        requested_to = data.get('requested_to') or None
+        if requested_to:
+            requested_guard = conn.execute("SELECT id FROM users WHERE id=? AND company_id=? AND role='guard'", (requested_to, user['company_id'])).fetchone()
+            if not requested_guard:
+                conn.close(); return bad_request(start_response, 'Requested guard not found')
+        conn.execute("INSERT INTO shift_swap_requests (company_id, shift_id, requested_by, requested_to, status, notes, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)", (user['company_id'], data.get('shift_id'), user['id'], requested_to, data.get('notes', ''), datetime.now().strftime('%Y-%m-%d %H:%M:%S'))); conn.commit(); conn.close(); return redirect(start_response, '/dashboard')
     if path == '/swap/approve' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
@@ -2819,7 +2857,10 @@ def application(environ, start_response):
     if path == '/time-correction/request' and method == 'POST':
         user, response = require_login(environ, start_response)
         if response: return response
-        data, _ = parse_post(environ); conn = db(); conn.execute('INSERT INTO time_corrections (company_id, shift_id, requested_by, requested_clock_in, requested_clock_out, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], data.get('shift_id'), user['id'], data.get('requested_clock_in'), data.get('requested_clock_out'), data.get('reason', ''), datetime.now().strftime('%Y-%m-%d %H:%M:%S'))); conn.commit(); conn.close(); return redirect(start_response, '/dashboard')
+        data, _ = parse_post(environ); conn = db(); shift = conn.execute('SELECT * FROM shifts WHERE id=? AND company_id=?', (data.get('shift_id'), user['company_id'])).fetchone()
+        if not shift or shift_assignment_value(shift) != user['id']:
+            conn.close(); return bad_request(start_response, 'You can only request corrections for your own assigned shifts')
+        conn.execute('INSERT INTO time_corrections (company_id, shift_id, requested_by, requested_clock_in, requested_clock_out, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], data.get('shift_id'), user['id'], data.get('requested_clock_in'), data.get('requested_clock_out'), data.get('reason', ''), datetime.now().strftime('%Y-%m-%d %H:%M:%S'))); conn.commit(); conn.close(); return redirect(start_response, '/dashboard')
     if path == '/time-correction/approve' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
