@@ -1161,6 +1161,37 @@ def calculate_worked_hours(clock_in, clock_out):
     return round(max(0, (end_dt - start_dt).total_seconds() / 3600.0), 2)
 
 
+def process_shift_clock_action(user, shift_id, action):
+    if not shift_id or action not in {'in', 'out'}:
+        return False, 'Invalid clock action'
+    conn = db()
+    try:
+        shift = conn.execute('SELECT * FROM shifts WHERE id=?', (shift_id,)).fetchone()
+        if not shift or not require_company_access(user, shift['company_id']):
+            return False, 'Shift not accessible'
+        if user['role'] != 'guard' or shift_assignment_value(shift) != user['id']:
+            return False, 'Only the assigned guard can clock this shift'
+
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if action == 'in':
+            if shift['clock_in_time']:
+                return False, 'Shift already clocked in'
+            conn.execute('UPDATE shifts SET clock_in_time=?, status=? WHERE id=?', (timestamp, 'clocked_in', shift_id))
+            message = 'clocked in'
+        else:
+            if not shift['clock_in_time']:
+                return False, 'Shift must be clocked in before clocking out'
+            if shift['clock_out_time']:
+                return False, 'Shift already clocked out'
+            worked = calculate_worked_hours(shift['clock_in_time'], timestamp)
+            conn.execute('UPDATE shifts SET clock_out_time=?, status=?, worked_hours=?, overtime_alert=? WHERE id=?', (timestamp, 'completed', worked, 1 if worked > 8 else 0, shift_id))
+            message = 'clocked out'
+        conn.commit()
+    finally:
+        conn.close()
+    return True, message
+
+
 def company_filter_clause(user):
     if user['role'] == 'superadmin':
         return '', ()
@@ -2011,9 +2042,9 @@ DASHBOARD_HTML = r'''{% extends "layout.html" %}
             </div>
             <div class="actions">
               {% if not shift.clock_in_time and shift.user_id %}
-              <form method="post" action="/shift/clock"><input type="hidden" name="shift_id" value="{{ shift.id }}"><input type="hidden" name="action" value="in"><button class="btn">Clock In</button></form>
+              <form method="post" action="/clock-in"><input type="hidden" name="shift_id" value="{{ shift.id }}"><button class="btn">Clock In</button></form>
               {% elif shift.clock_in_time and not shift.clock_out_time and shift.user_id %}
-              <form method="post" action="/shift/clock"><input type="hidden" name="shift_id" value="{{ shift.id }}"><input type="hidden" name="action" value="out"><button class="btn primary">Clock Out</button></form>
+              <form method="post" action="/clock-out"><input type="hidden" name="shift_id" value="{{ shift.id }}"><button class="btn primary">Clock Out</button></form>
               {% endif %}
             </div>
           </div>
@@ -2054,13 +2085,7 @@ DASHBOARD_HTML = r'''{% extends "layout.html" %}
               <div class="small-muted">Clock In: {{ shift.clock_in_time or '—' }} | Clock Out: {{ shift.clock_out_time or '—' }}</div>
             </div>
             <div class="actions">
-              {% if user.role == 'guard' or user.role in ['company_admin', 'superadmin'] %}
-                {% if not shift.clock_in_time and shift.user_id %}
-                <form method="post" action="/shift/clock"><input type="hidden" name="shift_id" value="{{ shift.id }}"><input type="hidden" name="action" value="in"><button class="btn">Clock In</button></form>
-                {% elif shift.clock_in_time and not shift.clock_out_time and shift.user_id %}
-                <form method="post" action="/shift/clock"><input type="hidden" name="shift_id" value="{{ shift.id }}"><input type="hidden" name="action" value="out"><button class="btn primary">Clock Out</button></form>
-                {% endif %}
-              {% endif %}
+              <span class="small-muted">Assigned guard self-service only</span>
             </div>
           </div>
         {% else %}<div class="empty">No shifts available.</div>{% endfor %}
@@ -2928,20 +2953,24 @@ def application(environ, start_response):
             is_available = 1 if data.get(f'available_{weekday}') == 'on' else 0
             conn.execute('UPDATE availability SET available_start=?, available_end=?, is_available=? WHERE user_id=? AND weekday=?', (data.get(f'start_{weekday}', '08:00'), data.get(f'end_{weekday}', '20:00'), is_available, user['id'], weekday))
         conn.commit(); conn.close(); return redirect(start_response, '/profile')
+    if path in {'/clock-in', '/clock-out'} and method == 'POST':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        data, _ = parse_post(environ)
+        action = 'in' if path == '/clock-in' else 'out'
+        ok, message = process_shift_clock_action(user, data.get('shift_id'), action)
+        if not ok:
+            return bad_request(start_response, message)
+        log_audit('shift_time_event', actor_user_id=user['id'], company_id=user['company_id'], target_type='shift', target_id=data.get('shift_id'), message=message, environ=environ)
+        return redirect(start_response, '/dashboard')
     if path == '/shift/clock' and method == 'POST':
         user, response = require_login(environ, start_response)
         if response: return response
         data, _ = parse_post(environ); shift_id = data.get('shift_id'); action = data.get('action')
-        if not shift_id or action not in {'in', 'out'}: return bad_request(start_response)
-        conn = db(); shift = conn.execute('SELECT * FROM shifts WHERE id=?', (shift_id,)).fetchone()
-        if not shift or not require_company_access(user, shift['company_id']) or (user['role'] == 'guard' and shift_assignment_value(shift) != user['id']): conn.close(); return bad_request(start_response, 'Shift not accessible')
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        if action == 'in':
-            conn.execute('UPDATE shifts SET clock_in_time=?, status=? WHERE id=?', (timestamp, 'clocked_in', shift_id)); message='clocked in'
-        else:
-            worked = calculate_worked_hours(shift['clock_in_time'], timestamp)
-            conn.execute('UPDATE shifts SET clock_out_time=?, status=?, worked_hours=?, overtime_alert=? WHERE id=?', (timestamp, 'completed', worked, 1 if worked > 8 else 0, shift_id)); message='clocked out'
-        conn.commit(); conn.close(); log_audit('shift_time_event', actor_user_id=user['id'], company_id=user['company_id'], target_type='shift', target_id=shift_id, message=message, environ=environ); return redirect(start_response, '/dashboard')
+        ok, message = process_shift_clock_action(user, shift_id, action)
+        if not ok:
+            return bad_request(start_response, message)
+        log_audit('shift_time_event', actor_user_id=user['id'], company_id=user['company_id'], target_type='shift', target_id=shift_id, message=message, environ=environ); return redirect(start_response, '/dashboard')
     if path == '/shift/claim' and method == 'POST':
         user, response = require_login(environ, start_response)
         if response: return response
