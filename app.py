@@ -182,16 +182,18 @@ def ensure_column(conn, table, column_def):
     col = column_def.split()[0]
     if table_exists(conn, table) and col not in column_names(conn, table):
         cleaned = column_def.replace('INTEGER PRIMARY KEY AUTOINCREMENT', 'INTEGER').replace('AUTOINCREMENT', '').replace("CHECK(role IN ('superadmin', 'company_admin', 'guard'))", '')
+        default_source_col = None
         if conn.backend == 'postgres':
             # PostgreSQL does not allow DEFAULT expressions that reference another
             # column (e.g. "DEFAULT user_id") when adding a column.
-            cleaned = re.sub(
-                r'\s+DEFAULT\s+([A-Za-z_][A-Za-z0-9_]*)\b',
-                lambda m: m.group(0) if m.group(1).lower() in {'true', 'false', 'null', 'current_date', 'current_time', 'current_timestamp'} else '',
-                cleaned,
-            )
+            default_match = re.search(r'\s+DEFAULT\s+([A-Za-z_][A-Za-z0-9_]*)\b', cleaned)
+            if default_match and default_match.group(1).lower() not in {'true', 'false', 'null', 'current_date', 'current_time', 'current_timestamp'}:
+                default_source_col = default_match.group(1)
+                cleaned = cleaned[:default_match.start()] + cleaned[default_match.end():]
             cleaned = cleaned.replace('REAL', 'DOUBLE PRECISION')
         conn.execute(f'ALTER TABLE {table} ADD COLUMN {cleaned}')
+        if default_source_col and default_source_col in column_names(conn, table):
+            conn.execute(f'UPDATE {table} SET {col}={default_source_col} WHERE {col} IS NULL')
 
 def sync_shift_assignment_schema(conn):
     if not table_exists(conn, 'shifts'):
