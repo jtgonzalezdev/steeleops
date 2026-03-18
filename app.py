@@ -196,6 +196,38 @@ def ensure_column(conn, table, column_def):
         if default_source_col and default_source_col in column_names(conn, table):
             conn.execute(f'UPDATE {table} SET {col}={default_source_col} WHERE {col} IS NULL')
 
+
+def build_guard_name(full_name='', first_name='', last_name=''):
+    full_name = (full_name or '').strip()
+    if full_name:
+        return full_name
+    first_name = (first_name or '').strip()
+    last_name = (last_name or '').strip()
+    built_name = ' '.join(part for part in (first_name, last_name) if part).strip()
+    return built_name or 'Guard'
+
+
+def guard_name_parts(full_name='', first_name='', last_name=''):
+    name = build_guard_name(full_name=full_name, first_name=first_name, last_name=last_name)
+    parts = name.split(' ', 1)
+    return name, parts[0], parts[1] if len(parts) > 1 else ''
+
+
+def insert_guard(conn, company_id, full_name='', first_name='', last_name='', phone='', email='', license_number='', status='active', rating=5, training_status='', created_at=''):
+    guard_name, guard_first_name, guard_last_name = guard_name_parts(full_name=full_name, first_name=first_name, last_name=last_name)
+    params = [company_id]
+    columns = ['company_id']
+    values = ['?']
+    if 'name' in column_names(conn, 'guards'):
+        columns.append('name')
+        values.append('?')
+        params.append(guard_name)
+    columns.extend(['first_name', 'last_name', 'phone', 'email', 'license_number', 'status', 'rating', 'training_status', 'created_at'])
+    values.extend(['?', '?', '?', '?', '?', '?', '?', '?', '?'])
+    params.extend([guard_first_name, guard_last_name, (phone or '').strip(), (email or '').strip(), (license_number or '').strip(), status, rating, (training_status or '').strip(), created_at])
+    conn.execute(f"INSERT INTO guards ({', '.join(columns)}) VALUES ({', '.join(values)})", tuple(params))
+    return guard_name, guard_first_name, guard_last_name
+
 def sync_shift_assignment_schema(conn):
     if not table_exists(conn, 'shifts'):
         return
@@ -740,8 +772,10 @@ def init_db():
         for col in ['company_id INTEGER', 'client_id INTEGER', 'client_company_name TEXT', 'active INTEGER DEFAULT 1']:
             ensure_column(conn, 'sites', col)
     if table_exists(conn, 'guards'):
-        for col in ['company_id INTEGER', 'first_name TEXT', 'last_name TEXT', 'phone TEXT', 'email TEXT', 'license_number TEXT', "status TEXT DEFAULT 'active'", 'rating REAL DEFAULT 5', 'training_status TEXT', 'created_at TEXT']:
+        for col in ['company_id INTEGER', 'name TEXT', 'first_name TEXT', 'last_name TEXT', 'phone TEXT', 'email TEXT', 'license_number TEXT', "status TEXT DEFAULT 'active'", 'rating REAL DEFAULT 5', 'training_status TEXT', 'created_at TEXT']:
             ensure_column(conn, 'guards', col)
+        if 'name' in column_names(conn, 'guards'):
+            conn.execute("UPDATE guards SET name=COALESCE(NULLIF(TRIM(name), ''), NULLIF(TRIM(first_name || ' ' || last_name), ''), NULLIF(TRIM(first_name), ''), 'Guard') WHERE name IS NULL OR TRIM(name)=''")
     if table_exists(conn, 'guard_site_assignments'):
         for col in ['company_id INTEGER', 'guard_id INTEGER', 'site_id INTEGER', 'assigned_at TEXT']:
             ensure_column(conn, 'guard_site_assignments', col)
@@ -795,12 +829,18 @@ def init_db():
     if fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM guards') == 0:
         guard_users = conn.execute("SELECT company_id, full_name, phone, email, license_number, created_at FROM users WHERE role='guard' AND company_id IS NOT NULL").fetchall()
         for gu in guard_users:
-            names = (gu['full_name'] or '').strip().split(' ', 1)
-            first_name = names[0] if names and names[0] else 'Guard'
-            last_name = names[1] if len(names) > 1 else ''
-            conn.execute('INSERT INTO guards (company_id, first_name, last_name, phone, email, license_number, status, rating, training_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (
-                gu['company_id'], first_name, last_name, gu['phone'] or '', gu['email'] or '', gu['license_number'] or '', 'active', 5, 'pending', gu['created_at'] or now
-            ))
+            insert_guard(
+                conn,
+                gu['company_id'],
+                full_name=gu['full_name'],
+                phone=gu['phone'] or '',
+                email=gu['email'] or '',
+                license_number=gu['license_number'] or '',
+                status='active',
+                rating=5,
+                training_status='pending',
+                created_at=gu['created_at'] or now,
+            )
 
     if fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM sites') == 0:
         steele_client = conn.execute("SELECT id, name FROM clients WHERE company_id=? AND name='Steele Commercial'", (demo_company,)).fetchone()
@@ -1547,10 +1587,19 @@ def application(environ, start_response):
         if not first_name or not last_name:
             return bad_request(start_response, 'First and last name are required')
         conn = db()
-        conn.execute('INSERT INTO guards (company_id, first_name, last_name, phone, email, license_number, status, rating, training_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (
-            user['company_id'], first_name, last_name, data.get('phone', '').strip(), data.get('email', '').strip(), data.get('license_number', '').strip(),
-            data.get('status', 'active') if data.get('status') in ('active', 'inactive') else 'active', float(data.get('rating') or 5), (data.get('training_status') or '').strip(), datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        ))
+        insert_guard(
+            conn,
+            user['company_id'],
+            first_name=first_name,
+            last_name=last_name,
+            phone=data.get('phone', ''),
+            email=data.get('email', ''),
+            license_number=data.get('license_number', ''),
+            status=data.get('status', 'active') if data.get('status') in ('active', 'inactive') else 'active',
+            rating=float(data.get('rating') or 5),
+            training_status=data.get('training_status') or '',
+            created_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        )
         new_row = conn.execute('SELECT id FROM guards WHERE company_id=? ORDER BY id DESC LIMIT 1', (user['company_id'],)).fetchone()
         new_id = new_row['id'] if new_row else None
         conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='guard', target_id=new_id, message='guard profile created', environ=environ)
@@ -1562,9 +1611,16 @@ def application(environ, start_response):
         conn = db(); guard = conn.execute('SELECT * FROM guards WHERE id=? AND company_id=?', (data.get('guard_id'), user['company_id'])).fetchone()
         if not guard:
             conn.close(); return bad_request(start_response, 'Guard not found')
-        conn.execute('UPDATE guards SET first_name=?, last_name=?, phone=?, email=?, license_number=?, status=?, training_status=? WHERE id=?', (
-            (data.get('first_name') or guard['first_name']).strip(), (data.get('last_name') or guard['last_name']).strip(), data.get('phone', guard['phone'] or '').strip(), data.get('email', guard['email'] or '').strip(), data.get('license_number', guard['license_number'] or '').strip(), data.get('status', guard['status']) if data.get('status', guard['status']) in ('active', 'inactive') else guard['status'], data.get('training_status', guard['training_status'] or '').strip(), guard['id']
-        ))
+        guard_name, guard_first_name, guard_last_name = guard_name_parts(
+            first_name=data.get('first_name') or guard['first_name'],
+            last_name=data.get('last_name') or guard['last_name'],
+        )
+        guard_params = [guard_first_name, guard_last_name, data.get('phone', guard['phone'] or '').strip(), data.get('email', guard['email'] or '').strip(), data.get('license_number', guard['license_number'] or '').strip(), data.get('status', guard['status']) if data.get('status', guard['status']) in ('active', 'inactive') else guard['status'], data.get('training_status', guard['training_status'] or '').strip(), guard['id']]
+        guard_sql = 'UPDATE guards SET first_name=?, last_name=?, phone=?, email=?, license_number=?, status=?, training_status=? WHERE id=?'
+        if 'name' in column_names(conn, 'guards'):
+            guard_sql = 'UPDATE guards SET name=?, first_name=?, last_name=?, phone=?, email=?, license_number=?, status=?, training_status=? WHERE id=?'
+            guard_params.insert(0, guard_name)
+        conn.execute(guard_sql, tuple(guard_params))
         conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='guard', target_id=guard['id'], message='guard profile updated', environ=environ)
         return redirect(start_response, '/guards')
     if path == '/admin/guard/deactivate' and method == 'POST':
@@ -2792,10 +2848,19 @@ def application(environ, start_response):
         if not first_name or not last_name:
             return bad_request(start_response, 'First and last name are required')
         conn = db()
-        conn.execute('INSERT INTO guards (company_id, first_name, last_name, phone, email, license_number, status, rating, training_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (
-            user['company_id'], first_name, last_name, data.get('phone', '').strip(), data.get('email', '').strip(), data.get('license_number', '').strip(),
-            data.get('status', 'active') if data.get('status') in ('active', 'inactive') else 'active', float(data.get('rating') or 5), (data.get('training_status') or '').strip(), datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        ))
+        insert_guard(
+            conn,
+            user['company_id'],
+            first_name=first_name,
+            last_name=last_name,
+            phone=data.get('phone', ''),
+            email=data.get('email', ''),
+            license_number=data.get('license_number', ''),
+            status=data.get('status', 'active') if data.get('status') in ('active', 'inactive') else 'active',
+            rating=float(data.get('rating') or 5),
+            training_status=data.get('training_status') or '',
+            created_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        )
         new_row = conn.execute('SELECT id FROM guards WHERE company_id=? ORDER BY id DESC LIMIT 1', (user['company_id'],)).fetchone()
         new_id = new_row['id'] if new_row else None
         conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='guard', target_id=new_id, message='guard profile created', environ=environ)
@@ -2807,9 +2872,16 @@ def application(environ, start_response):
         conn = db(); guard = conn.execute('SELECT * FROM guards WHERE id=? AND company_id=?', (data.get('guard_id'), user['company_id'])).fetchone()
         if not guard:
             conn.close(); return bad_request(start_response, 'Guard not found')
-        conn.execute('UPDATE guards SET first_name=?, last_name=?, phone=?, email=?, license_number=?, status=?, training_status=? WHERE id=?', (
-            (data.get('first_name') or guard['first_name']).strip(), (data.get('last_name') or guard['last_name']).strip(), data.get('phone', guard['phone'] or '').strip(), data.get('email', guard['email'] or '').strip(), data.get('license_number', guard['license_number'] or '').strip(), data.get('status', guard['status']) if data.get('status', guard['status']) in ('active', 'inactive') else guard['status'], data.get('training_status', guard['training_status'] or '').strip(), guard['id']
-        ))
+        guard_name, guard_first_name, guard_last_name = guard_name_parts(
+            first_name=data.get('first_name') or guard['first_name'],
+            last_name=data.get('last_name') or guard['last_name'],
+        )
+        guard_params = [guard_first_name, guard_last_name, data.get('phone', guard['phone'] or '').strip(), data.get('email', guard['email'] or '').strip(), data.get('license_number', guard['license_number'] or '').strip(), data.get('status', guard['status']) if data.get('status', guard['status']) in ('active', 'inactive') else guard['status'], data.get('training_status', guard['training_status'] or '').strip(), guard['id']]
+        guard_sql = 'UPDATE guards SET first_name=?, last_name=?, phone=?, email=?, license_number=?, status=?, training_status=? WHERE id=?'
+        if 'name' in column_names(conn, 'guards'):
+            guard_sql = 'UPDATE guards SET name=?, first_name=?, last_name=?, phone=?, email=?, license_number=?, status=?, training_status=? WHERE id=?'
+            guard_params.insert(0, guard_name)
+        conn.execute(guard_sql, tuple(guard_params))
         conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='guard', target_id=guard['id'], message='guard profile updated', environ=environ)
         return redirect(start_response, '/guards')
     if path == '/admin/guard/deactivate' and method == 'POST':
