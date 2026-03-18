@@ -1105,13 +1105,23 @@ def get_dashboard_context(user, view='week'):
         range_start = today - timedelta(days=today.weekday())
         range_end = range_start + timedelta(days=6)
 
+    my_shifts = []
+    available_shifts = []
+
     if user['role'] == 'guard':
-        shifts = conn.execute('''
+        my_shifts = conn.execute('''
             SELECT shifts.*, COALESCE(shifts.user_id, shifts.guard_id) as user_id, COALESCE(shifts.guard_id, shifts.user_id) as guard_id, sites.name as site_name, sites.address, sites.client_company_name
             FROM shifts JOIN sites ON shifts.site_id = sites.id
             WHERE COALESCE(shifts.user_id, shifts.guard_id)=? AND shifts.company_id=?
             ORDER BY shift_date, start_time
         ''', (user['id'], company_id)).fetchall()
+        available_shifts = conn.execute('''
+            SELECT shifts.*, COALESCE(shifts.user_id, shifts.guard_id) as user_id, COALESCE(shifts.guard_id, shifts.user_id) as guard_id, sites.name as site_name, sites.address, sites.client_company_name
+            FROM shifts JOIN sites ON shifts.site_id = sites.id
+            WHERE shifts.company_id=? AND COALESCE(shifts.user_id, shifts.guard_id) IS NULL AND shifts.status='open' AND shifts.shift_date>=?
+            ORDER BY shift_date, start_time
+        ''', (company_id, today.isoformat())).fetchall()
+        shifts = my_shifts
         sites = conn.execute('SELECT * FROM sites WHERE company_id=? ORDER BY name', (company_id,)).fetchall()
         clients = conn.execute('SELECT * FROM clients WHERE company_id=? ORDER BY name', (company_id,)).fetchall()
         reports = conn.execute('''
@@ -1150,22 +1160,27 @@ def get_dashboard_context(user, view='week'):
         ORDER BY g.created_at DESC
     ''', (company_id,)).fetchall()
 
-    schedule_rows = conn.execute('''
-        SELECT shifts.*, COALESCE(shifts.user_id, shifts.guard_id) as user_id, COALESCE(shifts.guard_id, shifts.user_id) as guard_id, users.full_name, sites.name as site_name
-        FROM shifts
-        LEFT JOIN users ON COALESCE(shifts.user_id, shifts.guard_id)=users.id
-        JOIN sites ON shifts.site_id=sites.id
-        WHERE shifts.company_id=? AND shift_date BETWEEN ? AND ?
-        ORDER BY shift_date, start_time
-    ''', (company_id, range_start.isoformat(), range_end.isoformat())).fetchall()
+    if user['role'] == 'guard':
+        schedule_rows = [shift for shift in my_shifts if range_start.isoformat() <= shift['shift_date'] <= range_end.isoformat()]
+        open_shift_alerts = available_shifts[:10]
+        my_open_shift_options = available_shifts
+    else:
+        schedule_rows = conn.execute('''
+            SELECT shifts.*, COALESCE(shifts.user_id, shifts.guard_id) as user_id, COALESCE(shifts.guard_id, shifts.user_id) as guard_id, users.full_name, sites.name as site_name
+            FROM shifts
+            LEFT JOIN users ON COALESCE(shifts.user_id, shifts.guard_id)=users.id
+            JOIN sites ON shifts.site_id=sites.id
+            WHERE shifts.company_id=? AND shift_date BETWEEN ? AND ?
+            ORDER BY shift_date, start_time
+        ''', (company_id, range_start.isoformat(), range_end.isoformat())).fetchall()
 
-    open_shift_alerts = conn.execute('''
-        SELECT shifts.*, COALESCE(shifts.user_id, shifts.guard_id) as user_id, COALESCE(shifts.guard_id, shifts.user_id) as guard_id, sites.name as site_name
-        FROM shifts JOIN sites ON shifts.site_id=sites.id
-        WHERE shifts.company_id=? AND COALESCE(shifts.user_id, shifts.guard_id) IS NULL AND shift_date>=?
-        ORDER BY shift_date, start_time LIMIT 10
-    ''', (company_id, today.isoformat())).fetchall()
-    my_open_shift_options = open_shift_alerts if user['role'] == 'guard' else []
+        open_shift_alerts = conn.execute('''
+            SELECT shifts.*, COALESCE(shifts.user_id, shifts.guard_id) as user_id, COALESCE(shifts.guard_id, shifts.user_id) as guard_id, sites.name as site_name
+            FROM shifts JOIN sites ON shifts.site_id=sites.id
+            WHERE shifts.company_id=? AND COALESCE(shifts.user_id, shifts.guard_id) IS NULL AND shift_date>=?
+            ORDER BY shift_date, start_time LIMIT 10
+        ''', (company_id, today.isoformat())).fetchall()
+        my_open_shift_options = []
 
     swap_requests = conn.execute('''
         SELECT ssr.*, s.shift_date, s.start_time, s.end_time, st.name as site_name,
@@ -1232,6 +1247,8 @@ def get_dashboard_context(user, view='week'):
     return {
         'stats': stats,
         'shifts': shifts,
+        'my_shifts': my_shifts if user['role'] == 'guard' else [],
+        'available_shifts': available_shifts if user['role'] == 'guard' else [],
         'sites': sites,
         'clients': clients,
         'reports': reports,
@@ -1889,6 +1906,53 @@ DASHBOARD_HTML = r'''{% extends "layout.html" %}
     </section>
 
     <section class="grid two-col">
+      {% if user.role == 'guard' %}
+      <div class="card">
+        <div class="section-head"><h3>My Shifts</h3><span>Assigned shifts for your account</span></div>
+        {% for shift in my_shifts %}
+          <div class="list-item detailed">
+            <div>
+              <strong>{{ shift.site_name }}</strong>
+              <div class="small-muted">Date: {{ shift.shift_date }}</div>
+              <div class="small-muted">Time: {{ shift.start_time }} - {{ shift.end_time }}</div>
+              <div class="small-muted">Status: <span class="badge {{ shift.status }}">{{ shift.status }}</span></div>
+              <div class="small-muted">Clock In: {{ shift.clock_in_time or '—' }} | Clock Out: {{ shift.clock_out_time or '—' }}</div>
+            </div>
+            <div class="actions">
+              {% if not shift.clock_in_time and shift.user_id %}
+              <form method="post" action="/shift/clock"><input type="hidden" name="shift_id" value="{{ shift.id }}"><input type="hidden" name="action" value="in"><button class="btn">Clock In</button></form>
+              {% elif shift.clock_in_time and not shift.clock_out_time and shift.user_id %}
+              <form method="post" action="/shift/clock"><input type="hidden" name="shift_id" value="{{ shift.id }}"><input type="hidden" name="action" value="out"><button class="btn primary">Clock Out</button></form>
+              {% endif %}
+            </div>
+          </div>
+        {% else %}<div class="empty">No assigned shifts.</div>{% endfor %}
+      </div>
+      <div class="card">
+        <div class="section-head"><h3>Available Shifts</h3><span>Open same-company shifts you can claim</span></div>
+        {% for shift in available_shifts %}
+          <div class="list-item detailed">
+            <div>
+              <strong>{{ shift.site_name }}</strong>
+              <div class="small-muted">Date: {{ shift.shift_date }}</div>
+              <div class="small-muted">Time: {{ shift.start_time }} - {{ shift.end_time }}</div>
+              <div class="small-muted">Status: <span class="badge {{ shift.status }}">{{ shift.status }}</span></div>
+            </div>
+            <div class="actions">
+              <form method="post" action="/shift/claim"><input type="hidden" name="shift_id" value="{{ shift.id }}"><button class="btn primary" type="submit">Claim Shift</button></form>
+            </div>
+          </div>
+        {% else %}<div class="empty">No available shifts to claim.</div>{% endfor %}
+        <hr>
+        <form method="post" action="/time-correction/request" class="stack compact">
+          <h4>Time Correction Request</h4>
+          <label>Shift<select name="shift_id">{% for shift in my_shifts[:12] if shift.user_id %}<option value="{{ shift.id }}">{{ shift.shift_date }} · {{ shift.site_name }} · {{ shift.start_time }}</option>{% endfor %}</select></label>
+          <div class="row-2"><label>Requested Clock In<input type="datetime-local" name="requested_clock_in" required></label><label>Requested Clock Out<input type="datetime-local" name="requested_clock_out" required></label></div>
+          <label>Reason<textarea name="reason" rows="3"></textarea></label>
+          <button class="btn" type="submit" {% if not my_shifts %}disabled{% endif %}>Submit Request</button>
+        </form>
+      </div>
+      {% else %}
       <div class="card">
         <div class="section-head"><h3>Shift Actions & Time Tracking</h3><span>Clock events are tied to shifts</span></div>
         {% for shift in shifts[:8] %}
@@ -1924,6 +1988,7 @@ DASHBOARD_HTML = r'''{% extends "layout.html" %}
           <button class="btn" type="submit">Submit Request</button>
         </form>
       </div>
+      {% endif %}
     </section>
 
     <section class="grid two-col">
@@ -2776,7 +2841,7 @@ def application(environ, start_response):
         data, _ = parse_post(environ); shift_id = data.get('shift_id'); action = data.get('action')
         if not shift_id or action not in {'in', 'out'}: return bad_request(start_response)
         conn = db(); shift = conn.execute('SELECT * FROM shifts WHERE id=?', (shift_id,)).fetchone()
-        if not shift or not require_company_access(user, shift['company_id']) or (user['role'] == 'guard' and shift['user_id'] != user['id']): conn.close(); return bad_request(start_response, 'Shift not accessible')
+        if not shift or not require_company_access(user, shift['company_id']) or (user['role'] == 'guard' and shift_assignment_value(shift) != user['id']): conn.close(); return bad_request(start_response, 'Shift not accessible')
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if action == 'in':
             conn.execute('UPDATE shifts SET clock_in_time=?, status=? WHERE id=?', (timestamp, 'clocked_in', shift_id)); message='clocked in'
