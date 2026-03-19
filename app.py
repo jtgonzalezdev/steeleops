@@ -920,6 +920,20 @@ def init_db():
                 created_at=gu['created_at'] or now,
             )
 
+    guard_users = conn.execute("SELECT id, company_id, full_name FROM users WHERE role='guard' AND company_id IS NOT NULL AND (guard_id IS NULL OR guard_id=0)").fetchall()
+    for guard_user in guard_users:
+        full_name = (guard_user['full_name'] or '').strip()
+        if not full_name:
+            continue
+        guard = conn.execute("""
+            SELECT id FROM guards
+            WHERE company_id=? AND TRIM(COALESCE(name, first_name || ' ' || last_name))=?
+            ORDER BY id
+            LIMIT 1
+        """, (guard_user['company_id'], full_name)).fetchone()
+        if guard:
+            conn.execute('UPDATE users SET guard_id=? WHERE id=?', (guard['id'], guard_user['id']))
+
     if fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM sites') == 0:
         steele_client = conn.execute("SELECT id, name FROM clients WHERE company_id=? AND name='Steele Commercial'", (demo_company,)).fetchone()
         river_client = conn.execute("SELECT id, name FROM clients WHERE company_id=? AND name='Riverfront Logistics'", (demo_company,)).fetchone()
@@ -2645,6 +2659,62 @@ def consume_password_reset(token, new_password):
     conn.commit(); conn.close(); return True
 
 
+
+def company_selector_rows():
+    conn = db()
+    rows = conn.execute("""
+        SELECT c.id, c.name, c.tagline, COUNT(*) AS active_guard_count
+        FROM companies c
+        LEFT JOIN guards g ON g.company_id=c.id AND g.status='active'
+        GROUP BY c.id, c.name, c.tagline
+        ORDER BY c.name
+    """).fetchall()
+    conn.close()
+    return rows
+
+
+def get_guard_login_company(environ, current_user=None):
+    if current_user and current_user['company_id']:
+        return current_user['company_id']
+    query = parse_query(environ)
+    company_id = (query.get('company_id') or '').strip()
+    if not company_id.isdigit():
+        return None
+    return int(company_id)
+
+
+def guard_login_list_rows(company_id):
+    conn = db()
+    rows = conn.execute("""
+        SELECT g.*, s.name AS site_name
+        FROM guards g
+        JOIN users u ON u.guard_id=g.id AND u.company_id=g.company_id AND u.role='guard' AND u.active=1
+        LEFT JOIN guard_site_assignments gsa ON gsa.guard_id=g.id AND gsa.company_id=g.company_id
+        LEFT JOIN sites s ON s.id=gsa.site_id AND s.company_id=g.company_id
+        WHERE g.company_id=? AND g.status='active'
+        ORDER BY g.first_name, g.last_name, g.id
+    """, (company_id,)).fetchall()
+    company = conn.execute('SELECT * FROM companies WHERE id=?', (company_id,)).fetchone()
+    conn.close()
+    return company, rows
+
+
+def guard_login_record(company_id, guard_id):
+    conn = db()
+    row = conn.execute("""
+        SELECT g.*, s.name AS site_name, u.id AS user_id, u.username, u.password, u.active AS user_active
+        FROM guards g
+        JOIN users u ON u.guard_id=g.id AND u.company_id=g.company_id AND u.role='guard'
+        LEFT JOIN guard_site_assignments gsa ON gsa.guard_id=g.id AND gsa.company_id=g.company_id
+        LEFT JOIN sites s ON s.id=gsa.site_id AND s.company_id=g.company_id
+        WHERE g.company_id=? AND g.id=? AND g.status='active'
+        ORDER BY u.id
+        LIMIT 1
+    """, (company_id, guard_id)).fetchone()
+    company = conn.execute('SELECT * FROM companies WHERE id=?', (company_id,)).fetchone()
+    conn.close()
+    return company, row
+
 def forbidden(start_response, message='Forbidden'):
     start_response('403 Forbidden', response_headers(content_type='text/plain; charset=utf-8'))
     return [message.encode('utf-8')]
@@ -2775,7 +2845,7 @@ LOGIN_HTML = LOGIN_HTML.replace('''      <div class="demo-box">
         superadmin / admin123<br>
         admin / admin123<br>
         guard1 / guard123
-      </div>''', '''      <div class="helper-links"><a href="/password-reset">Forgot password?</a></div>
+      </div>''', '''      <div class="helper-links"><a href="/password-reset">Forgot password?</a><a href="/guard-login">Guard quick login</a></div>
       {% if show_demo_accounts %}<div class="demo-box">
         <strong>Demo Accounts</strong><br>
         superadmin / admin123<br>
@@ -2820,6 +2890,83 @@ PASSWORD_RESET_FORM_HTML = r'''{% extends "layout.html" %}
   </div>
 </div>
 {% endblock %}'''
+
+GUARD_LOGIN_LIST_HTML = r'''{% extends "layout.html" %}
+{% block body %}
+<div class="simple-shell guard-login-shell">
+  <div class="simple-header">
+    <div>
+      <div class="eyebrow">SteeleOps</div>
+      <h1>Guard Quick Login</h1>
+      <p class="small-muted">Select your name to continue.</p>
+    </div>
+    {% if current_user %}<a href="/dashboard" class="btn ghost">← Dashboard</a>{% endif %}
+  </div>
+  {% if error %}<div class="card"><div class="alert error">{{ error }}</div></div>{% endif %}
+  {% if not company %}
+  <div class="card narrow-shell">
+    <h3>Select Company</h3>
+    <p class="small-muted">Choose your company to view active guard accounts.</p>
+    <div class="guard-login-list">
+      {% for item in companies %}
+      <a class="list-item detailed guard-login-item" href="/guard-login?company_id={{ item.id }}">
+        <div>
+          <strong>{{ item.name }}</strong>
+          <div class="small-muted">{{ item.tagline or 'Security Operations Simplified' }}</div>
+        </div>
+        <span class="badge open">{{ item.active_guard_count }} guards</span>
+      </a>
+      {% endfor %}
+    </div>
+  </div>
+  {% else %}
+  <div class="card">
+    <div class="section-head"><h3>{{ company.name }}</h3><span>{{ guards|length }} active guards</span></div>
+    {% if guards %}
+    <div class="guard-login-list">
+      {% for guard in guards %}
+      <a class="list-item detailed guard-login-item" href="/guard-login/{{ guard.id }}?company_id={{ company.id }}">
+        <div>
+          <strong>{{ guard.first_name }} {{ guard.last_name }}</strong>
+          <div class="small-muted">{% if guard.site_name %}Assigned to {{ guard.site_name }}{% else %}No site assigned{% endif %}</div>
+        </div>
+        <span class="btn ghost">Continue</span>
+      </a>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">No active guards with linked login accounts are available for this company.</div>
+    {% endif %}
+  </div>
+  {% endif %}
+  <div class="helper-links"><a href="/login">Back to standard login</a></div>
+</div>
+{% endblock %}'''
+
+GUARD_LOGIN_PASSWORD_HTML = r'''{% extends "layout.html" %}
+{% block body %}
+<div class="simple-shell guard-login-shell">
+  <div class="simple-header">
+    <a href="/guard-login?company_id={{ company.id }}" class="btn ghost">← Back</a>
+    <div>
+      <div class="eyebrow">SteeleOps</div>
+      <h1>{{ guard.first_name }} {{ guard.last_name }}</h1>
+      <p class="small-muted">{% if guard.site_name %}{{ guard.site_name }}{% else %}No site assigned{% endif %}</p>
+    </div>
+  </div>
+  <div class="card narrow-shell">
+    <h3>Enter Password</h3>
+    <p class="small-muted">Use your existing SteeleOps password to sign in.</p>
+    {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+    <form method="post" action="/guard-login/{{ guard.id }}?company_id={{ company.id }}" class="stack">{{ csrf_input|safe }}
+      <label>Password<input type="password" name="password" required autofocus></label>
+      <button class="btn primary" type="submit">Sign In</button>
+    </form>
+    <div class="helper-links"><a href="/login">Use username login instead</a></div>
+  </div>
+</div>
+{% endblock %}'''
+
 STYLES_CSS += r'''
 .helper-links { margin-top: 14px; display: flex; gap: 12px; flex-wrap: wrap; }
 .helper-links a { color: var(--accent-2); }
@@ -2827,12 +2974,16 @@ STYLES_CSS += r'''
 .inline-form select { width: auto; min-width: 120px; }
 .actions.vertical { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
 .narrow-shell { max-width: 760px; margin: 0 auto; }
+.guard-login-shell { max-width: 1200px; margin: 0 auto; }
+.guard-login-list { display: grid; gap: 12px; }
+.guard-login-item { padding: 16px 0; align-items: center; border-radius: 18px; }
+.guard-login-item:hover { background: rgba(255,255,255,.03); padding-left: 12px; padding-right: 12px; }
 '''
 
 
 def ensure_assets():
     env.cache.clear()
-    templates = {'layout.html': LAYOUT_HTML, 'login.html': LOGIN_HTML, 'dashboard.html': DASHBOARD_HTML, 'profile.html': PROFILE_HTML, 'password_reset_request.html': PASSWORD_RESET_REQUEST_HTML, 'password_reset_form.html': PASSWORD_RESET_FORM_HTML}
+    templates = {'layout.html': LAYOUT_HTML, 'login.html': LOGIN_HTML, 'dashboard.html': DASHBOARD_HTML, 'profile.html': PROFILE_HTML, 'password_reset_request.html': PASSWORD_RESET_REQUEST_HTML, 'password_reset_form.html': PASSWORD_RESET_FORM_HTML, 'guard_login_list.html': GUARD_LOGIN_LIST_HTML, 'guard_login_password.html': GUARD_LOGIN_PASSWORD_HTML}
     for name, content in templates.items():
         with open(os.path.join(TEMPLATE_DIR, name), 'w', encoding='utf-8') as f:
             f.write(content)
@@ -2843,6 +2994,24 @@ def ensure_assets():
 def login_page(environ, start_response, error=None, message=None, reset_link=None):
     return html_response(start_response, render_page(environ, 'login.html', title='SteeleOps Login', error=error, message=message, reset_link=reset_link), extra_headers=csrf_headers(environ))
 
+
+
+def guard_login_list_page(environ, start_response, current_user=None, error=None):
+    company_id = get_guard_login_company(environ, current_user=current_user)
+    company = None
+    guards = []
+    companies = []
+    if company_id:
+        company, guards = guard_login_list_rows(company_id)
+        if not company:
+            error = 'Company not found.'
+    else:
+        companies = company_selector_rows()
+    return html_response(start_response, render_page(environ, 'guard_login_list.html', title='Guard Quick Login', current_user=current_user, company=company, guards=guards, companies=companies, error=error), extra_headers=csrf_headers(environ))
+
+
+def guard_login_password_page(environ, start_response, company, guard, error=None):
+    return html_response(start_response, render_page(environ, 'guard_login_password.html', title='Guard Quick Login', company=company, guard=guard, error=error), extra_headers=csrf_headers(environ))
 
 def password_reset_request_page(environ, start_response, error=None, message=None, reset_link=None):
     return html_response(start_response, render_page(environ, 'password_reset_request.html', title='Password Reset', error=error, message=message, reset_link=reset_link), extra_headers=csrf_headers(environ))
@@ -2895,6 +3064,37 @@ def application(environ, start_response):
         record_login_attempt(username, True, environ=environ, user_id=found['id'], company_id=found['company_id'])
         session_id = create_session(found['id'])
         return redirect(start_response, '/dashboard', [('Set-Cookie', cookie_header(session_id))])
+
+    if path == '/guard-login' and method == 'GET':
+        return guard_login_list_page(environ, start_response, current_user=user)
+    guard_match = re.match(r'^/guard-login/(\d+)$', path)
+    if guard_match and method == 'GET':
+        company_id = get_guard_login_company(environ, current_user=user)
+        if not company_id:
+            return guard_login_list_page(environ, start_response, current_user=user, error='Select a company first.')
+        company, guard = guard_login_record(company_id, int(guard_match.group(1)))
+        if not company or not guard or not guard['user_id'] or not guard['user_active']:
+            return not_found(start_response)
+        return guard_login_password_page(environ, start_response, company, guard)
+    if guard_match and method == 'POST':
+        company_id = get_guard_login_company(environ, current_user=user)
+        if not company_id:
+            return guard_login_list_page(environ, start_response, current_user=user, error='Select a company first.')
+        company, guard = guard_login_record(company_id, int(guard_match.group(1)))
+        if not company or not guard or not guard['user_id'] or not guard['user_active']:
+            return not_found(start_response)
+        data, _ = parse_post(environ)
+        password = data.get('password', '')
+        username = guard['username'] or f'guard:{guard["id"]}'
+        if not login_allowed(username):
+            return guard_login_password_page(environ, start_response, company, guard, error='Too many failed attempts. Please wait 15 minutes and try again.')
+        if not verify_password(password, guard['password']):
+            record_login_attempt(username, False, environ=environ, user_id=guard['user_id'], company_id=company_id)
+            return guard_login_password_page(environ, start_response, company, guard, error='Invalid password.')
+        record_login_attempt(username, True, environ=environ, user_id=guard['user_id'], company_id=company_id)
+        session_id = create_session(guard['user_id'])
+        return redirect(start_response, '/dashboard', [('Set-Cookie', cookie_header(session_id))])
+
     if path == '/password-reset' and method == 'GET':
         return password_reset_request_page(environ, start_response)
     if path == '/password-reset' and method == 'POST':
