@@ -1283,6 +1283,7 @@ def get_dashboard_context(user, view='week'):
         WHERE g.company_id=?
         ORDER BY g.created_at DESC
     ''', (company_id,)).fetchall()
+    active_sites = conn.execute('SELECT id, name FROM sites WHERE company_id=? AND active=1 ORDER BY name', (company_id,)).fetchall()
 
     if user['role'] == 'guard':
         schedule_rows = [shift for shift in my_shifts if range_start.isoformat() <= shift['shift_date'] <= range_end.isoformat()]
@@ -1374,6 +1375,7 @@ def get_dashboard_context(user, view='week'):
         'my_shifts': my_shifts if user['role'] == 'guard' else [],
         'available_shifts': available_shifts if user['role'] == 'guard' else [],
         'sites': sites,
+        'active_sites': active_sites,
         'clients': clients,
         'reports': reports,
         'recent_reports': recent_reports,
@@ -1771,6 +1773,13 @@ def application(environ, start_response):
             guard_params.insert(0, guard_name)
         try:
             conn.execute(guard_sql, tuple(guard_params))
+            site_id = (data.get('site_id') or '').strip()
+            conn.execute('DELETE FROM guard_site_assignments WHERE guard_id=? AND company_id=?', (guard['id'], user['company_id']))
+            if site_id:
+                site = conn.execute('SELECT id FROM sites WHERE id=? AND company_id=? AND active=1', (site_id, user['company_id'])).fetchone()
+                if not site:
+                    raise ValueError('Assigned site not found')
+                conn.execute('INSERT INTO guard_site_assignments (company_id, guard_id, site_id, assigned_at) VALUES (?, ?, ?, ?)', (user['company_id'], guard['id'], site_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
             updated_guard = conn.execute('SELECT * FROM guards WHERE id=? AND company_id=?', (guard['id'], user['company_id'])).fetchone()
             upsert_guard_login(conn, updated_guard, guard_login_payload(data, updated_guard, user['company_id']))
             conn.commit()
@@ -2266,8 +2275,7 @@ DASHBOARD_HTML = r'''{% extends "layout.html" %}
           <div class="small-muted">Login: {% if guard.login_user_id %}{{ guard.login_username }}{% if guard.login_email %} · {{ guard.login_email }}{% endif %}{% else %}No login account yet{% endif %}</div>
         </div>
         <div class="actions vertical">
-          <form method="post" action="/admin/guard/assign" class="inline-form"><input type="hidden" name="guard_id" value="{{ guard.id }}"><select name="site_id"><option value="">Unassign</option>{% for site in sites %}<option value="{{ site.id }}" {% if guard.site_id == site.id %}selected{% endif %}>{{ site.name }}</option>{% endfor %}</select><button class="btn ghost" type="submit">Assign Site</button></form>
-          <form method="post" action="/admin/guard/update" class="inline-form"><input type="hidden" name="guard_id" value="{{ guard.id }}"><input type="text" name="first_name" value="{{ guard.first_name }}" placeholder="First" required><input type="text" name="last_name" value="{{ guard.last_name }}" placeholder="Last" required><input type="email" name="email" value="{{ guard.login_email or guard.email or '' }}" placeholder="Email"><input type="text" name="phone" value="{{ guard.phone or '' }}" placeholder="Phone"><input type="text" name="license_number" value="{{ guard.license_number or '' }}" placeholder="License #"><select name="status"><option value="active" {% if guard.status == 'active' %}selected{% endif %}>active</option><option value="inactive" {% if guard.status == 'inactive' %}selected{% endif %}>inactive</option></select><input type="text" name="training_status" value="{{ guard.training_status or '' }}" placeholder="Training"><input type="text" name="username" value="{{ guard.login_username or '' }}" placeholder="Username"><input type="text" name="temporary_password" placeholder="Temporary password"><button class="btn" type="submit">Save</button></form>
+          <form method="post" action="/admin/guard/update" class="inline-form"><input type="hidden" name="guard_id" value="{{ guard.id }}"><input type="text" name="first_name" value="{{ guard.first_name }}" placeholder="First" required><input type="text" name="last_name" value="{{ guard.last_name }}" placeholder="Last" required><input type="email" name="email" value="{{ guard.login_email or guard.email or '' }}" placeholder="Email"><input type="text" name="phone" value="{{ guard.phone or '' }}" placeholder="Phone"><input type="text" name="license_number" value="{{ guard.license_number or '' }}" placeholder="License #"><select name="status"><option value="active" {% if guard.status == 'active' %}selected{% endif %}>active</option><option value="inactive" {% if guard.status == 'inactive' %}selected{% endif %}>inactive</option></select><input type="text" name="training_status" value="{{ guard.training_status or '' }}" placeholder="Training"><label>Assigned Site<select name="site_id"><option value="">Unassigned</option>{% for site in active_sites %}<option value="{{ site.id }}" {% if guard.site_id == site.id %}selected{% endif %}>{{ site.name }}</option>{% endfor %}</select></label><input type="text" name="username" value="{{ guard.login_username or '' }}" placeholder="Username"><input type="text" name="temporary_password" placeholder="Temporary password"><button class="btn" type="submit">Save</button></form>
           {% if guard.status == 'active' %}<form method="post" action="/admin/guard/deactivate" class="inline-form"><input type="hidden" name="guard_id" value="{{ guard.id }}"><button class="btn ghost" type="submit">Deactivate</button></form>{% endif %}
         </div>
       </div>
