@@ -1274,11 +1274,10 @@ def get_dashboard_context(user, view='week'):
         ''', (company_id,)).fetchall()
         recent_reports = reports[:8]
         guards = conn.execute("SELECT * FROM users WHERE company_id=? AND role='guard' ORDER BY full_name", (company_id,)).fetchall()
-    guards_module_rows = conn.execute('''
+    guards_module_rows = conn.execute(f'''
         SELECT g.*, gsa.site_id, s.name as assigned_site_name, u.id as login_user_id, u.username as login_username, u.email as login_email
         FROM guards g
-        LEFT JOIN guard_site_assignments gsa ON g.id=gsa.guard_id AND gsa.company_id=g.company_id
-        LEFT JOIN sites s ON gsa.site_id=s.id
+        {current_guard_assignment_join('g')}
         LEFT JOIN users u ON u.guard_id=g.id AND u.company_id=g.company_id AND u.role='guard'
         WHERE g.company_id=?
         ORDER BY g.created_at DESC
@@ -1804,10 +1803,10 @@ def application(environ, start_response):
         conn = db(); guard = conn.execute('SELECT * FROM guards WHERE id=? AND company_id=?', (data.get('guard_id'), user['company_id'])).fetchone()
         if not guard:
             conn.close(); return bad_request(start_response, 'Guard not found')
-        site_id = data.get('site_id')
+        site_id = (data.get('site_id') or '').strip()
         conn.execute('DELETE FROM guard_site_assignments WHERE guard_id=? AND company_id=?', (guard['id'], user['company_id']))
         if site_id:
-            site = conn.execute('SELECT id FROM sites WHERE id=? AND company_id=?', (site_id, user['company_id'])).fetchone()
+            site = conn.execute('SELECT id FROM sites WHERE id=? AND company_id=? AND active=1', (site_id, user['company_id'])).fetchone()
             if not site:
                 conn.close(); return bad_request(start_response, 'Site not found')
             conn.execute('INSERT INTO guard_site_assignments (company_id, guard_id, site_id, assigned_at) VALUES (?, ?, ?, ?)', (user['company_id'], guard['id'], site_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
@@ -2691,14 +2690,27 @@ def get_guard_login_company(environ, current_user=None):
     return int(company_id)
 
 
+def current_guard_assignment_join(guard_alias='g'):
+    return f"""
+        LEFT JOIN guard_site_assignments gsa ON gsa.id=(
+            SELECT gsa_current.id
+            FROM guard_site_assignments gsa_current
+            JOIN sites site_current ON site_current.id=gsa_current.site_id AND site_current.company_id=gsa_current.company_id
+            WHERE gsa_current.guard_id={guard_alias}.id AND gsa_current.company_id={guard_alias}.company_id
+            ORDER BY gsa_current.assigned_at DESC, gsa_current.id DESC
+            LIMIT 1
+        )
+        LEFT JOIN sites s ON s.id=gsa.site_id AND s.company_id={guard_alias}.company_id
+    """
+
+
 def guard_login_list_rows(company_id):
     conn = db()
-    rows = conn.execute("""
+    rows = conn.execute(f"""
         SELECT g.*, s.name AS site_name
         FROM guards g
         JOIN users u ON u.guard_id=g.id AND u.company_id=g.company_id AND u.role='guard' AND u.active=1
-        LEFT JOIN guard_site_assignments gsa ON gsa.guard_id=g.id AND gsa.company_id=g.company_id
-        LEFT JOIN sites s ON s.id=gsa.site_id AND s.company_id=g.company_id
+        {current_guard_assignment_join('g')}
         WHERE g.company_id=? AND g.status='active'
         ORDER BY g.first_name, g.last_name, g.id
     """, (company_id,)).fetchall()
@@ -2747,12 +2759,11 @@ def guard_login_site_guard_rows(company_id, site_id):
 
 def guard_login_record(company_id, guard_id):
     conn = db()
-    row = conn.execute("""
+    row = conn.execute(f"""
         SELECT g.*, s.name AS site_name, u.id AS user_id, u.username, u.password, u.active AS user_active
         FROM guards g
         JOIN users u ON u.guard_id=g.id AND u.company_id=g.company_id AND u.role='guard'
-        LEFT JOIN guard_site_assignments gsa ON gsa.guard_id=g.id AND gsa.company_id=g.company_id
-        LEFT JOIN sites s ON s.id=gsa.site_id AND s.company_id=g.company_id
+        {current_guard_assignment_join('g')}
         WHERE g.company_id=? AND g.id=? AND g.status='active'
         ORDER BY u.id
         LIMIT 1
@@ -3453,10 +3464,10 @@ def application(environ, start_response):
         conn = db(); guard = conn.execute('SELECT * FROM guards WHERE id=? AND company_id=?', (data.get('guard_id'), user['company_id'])).fetchone()
         if not guard:
             conn.close(); return bad_request(start_response, 'Guard not found')
-        site_id = data.get('site_id')
+        site_id = (data.get('site_id') or '').strip()
         conn.execute('DELETE FROM guard_site_assignments WHERE guard_id=? AND company_id=?', (guard['id'], user['company_id']))
         if site_id:
-            site = conn.execute('SELECT id FROM sites WHERE id=? AND company_id=?', (site_id, user['company_id'])).fetchone()
+            site = conn.execute('SELECT id FROM sites WHERE id=? AND company_id=? AND active=1', (site_id, user['company_id'])).fetchone()
             if not site:
                 conn.close(); return bad_request(start_response, 'Site not found')
             conn.execute('INSERT INTO guard_site_assignments (company_id, guard_id, site_id, assigned_at) VALUES (?, ?, ?, ?)', (user['company_id'], guard['id'], site_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
