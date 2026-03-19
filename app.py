@@ -2699,6 +2699,44 @@ def guard_login_list_rows(company_id):
     return company, rows
 
 
+def guard_login_site_rows(company_id):
+    conn = db()
+    company = conn.execute('SELECT * FROM companies WHERE id=?', (company_id,)).fetchone()
+    rows = conn.execute("""
+        SELECT s.id, s.name, COALESCE(NULLIF(c.name, ''), NULLIF(s.client_company_name, ''), '') AS client_name
+        FROM sites s
+        LEFT JOIN clients c ON c.id=s.client_id AND c.company_id=s.company_id
+        WHERE s.company_id=? AND s.active=1
+        ORDER BY s.name, s.id
+    """, (company_id,)).fetchall()
+    conn.close()
+    return company, rows
+
+
+def guard_login_site_guard_rows(company_id, site_id):
+    conn = db()
+    company = conn.execute('SELECT * FROM companies WHERE id=?', (company_id,)).fetchone()
+    site = conn.execute("""
+        SELECT s.id, s.name, COALESCE(NULLIF(c.name, ''), NULLIF(s.client_company_name, ''), '') AS client_name
+        FROM sites s
+        LEFT JOIN clients c ON c.id=s.client_id AND c.company_id=s.company_id
+        WHERE s.company_id=? AND s.id=? AND s.active=1
+        LIMIT 1
+    """, (company_id, site_id)).fetchone()
+    guards = []
+    if site:
+        guards = conn.execute("""
+            SELECT g.*
+            FROM guards g
+            JOIN users u ON u.guard_id=g.id AND u.company_id=g.company_id AND u.role='guard' AND u.active=1
+            JOIN guard_site_assignments gsa ON gsa.guard_id=g.id AND gsa.company_id=g.company_id AND gsa.site_id=?
+            WHERE g.company_id=? AND g.status='active'
+            ORDER BY g.first_name, g.last_name, g.id
+        """, (site_id, company_id)).fetchall()
+    conn.close()
+    return company, site, guards
+
+
 def guard_login_record(company_id, guard_id):
     conn = db()
     row = conn.execute("""
@@ -2898,18 +2936,17 @@ GUARD_LOGIN_LIST_HTML = r'''{% extends "layout.html" %}
     <div>
       <div class="eyebrow">SteeleOps</div>
       <h1>Guard Quick Login</h1>
-      <p class="small-muted">Select your name to continue.</p>
+      <p class="small-muted">Select your company to continue.</p>
     </div>
     {% if current_user %}<a href="/dashboard" class="btn ghost">← Dashboard</a>{% endif %}
   </div>
   {% if error %}<div class="card"><div class="alert error">{{ error }}</div></div>{% endif %}
-  {% if not company %}
   <div class="card narrow-shell">
     <h3>Select Company</h3>
-    <p class="small-muted">Choose your company to view active guard accounts.</p>
+    <p class="small-muted">Choose your company, then pick your site and name.</p>
     <div class="guard-login-list">
       {% for item in companies %}
-      <a class="list-item detailed guard-login-item" href="/guard-login?company_id={{ item.id }}">
+      <a class="list-item detailed guard-login-item" href="/guard-login/{{ item.id }}/sites">
         <div>
           <strong>{{ item.name }}</strong>
           <div class="small-muted">{{ item.tagline or 'Security Operations Simplified' }}</div>
@@ -2919,26 +2956,75 @@ GUARD_LOGIN_LIST_HTML = r'''{% extends "layout.html" %}
       {% endfor %}
     </div>
   </div>
-  {% else %}
+  <div class="helper-links"><a href="/login">Back to standard login</a></div>
+</div>
+{% endblock %}'''
+
+GUARD_LOGIN_SITE_LIST_HTML = r'''{% extends "layout.html" %}
+{% block body %}
+<div class="simple-shell guard-login-shell">
+  <div class="simple-header">
+    <a href="/guard-login" class="btn ghost">← Companies</a>
+    <div>
+      <div class="eyebrow">SteeleOps</div>
+      <h1>{{ company.name }}</h1>
+      <p class="small-muted">Step 2 of 3 · Select your site.</p>
+    </div>
+  </div>
+  {% if error %}<div class="card"><div class="alert error">{{ error }}</div></div>{% endif %}
+  <div class="card">
+    <div class="section-head"><h3>Active Sites</h3><span>{{ sites|length }} sites</span></div>
+    {% if sites %}
+    <div class="guard-login-list">
+      {% for site in sites %}
+      <a class="list-item detailed guard-login-item" href="/guard-login/{{ company.id }}/sites/{{ site.id }}">
+        <div>
+          <strong>{{ site.name }}</strong>
+          <div class="small-muted">{% if site.client_name %}{{ site.client_name }}{% else %}No client listed{% endif %}</div>
+        </div>
+        <span class="btn ghost">View guards</span>
+      </a>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">No active sites are available for this company.</div>
+    {% endif %}
+  </div>
+  <div class="helper-links"><a href="/login">Back to standard login</a></div>
+</div>
+{% endblock %}'''
+
+GUARD_LOGIN_GUARD_LIST_HTML = r'''{% extends "layout.html" %}
+{% block body %}
+<div class="simple-shell guard-login-shell">
+  <div class="simple-header">
+    <a href="/guard-login/{{ company.id }}/sites" class="btn ghost">← Sites</a>
+    <div>
+      <div class="eyebrow">SteeleOps</div>
+      <h1>{{ site.name }}</h1>
+      <p class="small-muted">Step 3 of 3 · Select your name to continue.</p>
+    </div>
+  </div>
+  {% if error %}<div class="card"><div class="alert error">{{ error }}</div></div>{% endif %}
   <div class="card">
     <div class="section-head"><h3>{{ company.name }}</h3><span>{{ guards|length }} active guards</span></div>
+    {% if site.client_name %}<p class="small-muted guard-login-meta">Client: {{ site.client_name }}</p>{% endif %}
     {% if guards %}
     <div class="guard-login-list">
       {% for guard in guards %}
       <a class="list-item detailed guard-login-item" href="/guard-login/{{ guard.id }}?company_id={{ company.id }}">
         <div>
           <strong>{{ guard.first_name }} {{ guard.last_name }}</strong>
-          <div class="small-muted">{% if guard.site_name %}Assigned to {{ guard.site_name }}{% else %}No site assigned{% endif %}</div>
+          <div class="small-muted">Assigned to {{ site.name }}</div>
         </div>
         <span class="btn ghost">Continue</span>
       </a>
       {% endfor %}
     </div>
     {% else %}
-    <div class="empty">No active guards with linked login accounts are available for this company.</div>
+    <div class="empty">No active guards with linked login accounts are assigned to this site.</div>
     {% endif %}
   </div>
-  {% endif %}
   <div class="helper-links"><a href="/login">Back to standard login</a></div>
 </div>
 {% endblock %}'''
@@ -2978,12 +3064,13 @@ STYLES_CSS += r'''
 .guard-login-list { display: grid; gap: 12px; }
 .guard-login-item { padding: 16px 0; align-items: center; border-radius: 18px; }
 .guard-login-item:hover { background: rgba(255,255,255,.03); padding-left: 12px; padding-right: 12px; }
+.guard-login-meta { margin: -4px 0 16px; }
 '''
 
 
 def ensure_assets():
     env.cache.clear()
-    templates = {'layout.html': LAYOUT_HTML, 'login.html': LOGIN_HTML, 'dashboard.html': DASHBOARD_HTML, 'profile.html': PROFILE_HTML, 'password_reset_request.html': PASSWORD_RESET_REQUEST_HTML, 'password_reset_form.html': PASSWORD_RESET_FORM_HTML, 'guard_login_list.html': GUARD_LOGIN_LIST_HTML, 'guard_login_password.html': GUARD_LOGIN_PASSWORD_HTML}
+    templates = {'layout.html': LAYOUT_HTML, 'login.html': LOGIN_HTML, 'dashboard.html': DASHBOARD_HTML, 'profile.html': PROFILE_HTML, 'password_reset_request.html': PASSWORD_RESET_REQUEST_HTML, 'password_reset_form.html': PASSWORD_RESET_FORM_HTML, 'guard_login_list.html': GUARD_LOGIN_LIST_HTML, 'guard_login_site_list.html': GUARD_LOGIN_SITE_LIST_HTML, 'guard_login_guard_list.html': GUARD_LOGIN_GUARD_LIST_HTML, 'guard_login_password.html': GUARD_LOGIN_PASSWORD_HTML}
     for name, content in templates.items():
         with open(os.path.join(TEMPLATE_DIR, name), 'w', encoding='utf-8') as f:
             f.write(content)
@@ -2998,16 +3085,18 @@ def login_page(environ, start_response, error=None, message=None, reset_link=Non
 
 def guard_login_list_page(environ, start_response, current_user=None, error=None):
     company_id = get_guard_login_company(environ, current_user=current_user)
-    company = None
-    guards = []
-    companies = []
     if company_id:
-        company, guards = guard_login_list_rows(company_id)
-        if not company:
-            error = 'Company not found.'
-    else:
-        companies = company_selector_rows()
-    return html_response(start_response, render_page(environ, 'guard_login_list.html', title='Guard Quick Login', current_user=current_user, company=company, guards=guards, companies=companies, error=error), extra_headers=csrf_headers(environ))
+        return redirect(start_response, f'/guard-login/{company_id}/sites')
+    companies = company_selector_rows()
+    return html_response(start_response, render_page(environ, 'guard_login_list.html', title='Guard Quick Login', current_user=current_user, companies=companies, error=error), extra_headers=csrf_headers(environ))
+
+
+def guard_login_site_list_page(environ, start_response, company, sites, error=None):
+    return html_response(start_response, render_page(environ, 'guard_login_site_list.html', title='Guard Quick Login', company=company, sites=sites, error=error), extra_headers=csrf_headers(environ))
+
+
+def guard_login_guard_list_page(environ, start_response, company, site, guards, error=None):
+    return html_response(start_response, render_page(environ, 'guard_login_guard_list.html', title='Guard Quick Login', company=company, site=site, guards=guards, error=error), extra_headers=csrf_headers(environ))
 
 
 def guard_login_password_page(environ, start_response, company, guard, error=None):
@@ -3067,6 +3156,21 @@ def application(environ, start_response):
 
     if path == '/guard-login' and method == 'GET':
         return guard_login_list_page(environ, start_response, current_user=user)
+    site_list_match = re.match(r'^/guard-login/(\d+)/sites$', path)
+    if site_list_match and method == 'GET':
+        company_id = int(site_list_match.group(1))
+        company, sites = guard_login_site_rows(company_id)
+        if not company:
+            return not_found(start_response)
+        return guard_login_site_list_page(environ, start_response, company, sites)
+    site_guard_match = re.match(r'^/guard-login/(\d+)/sites/(\d+)$', path)
+    if site_guard_match and method == 'GET':
+        company_id = int(site_guard_match.group(1))
+        site_id = int(site_guard_match.group(2))
+        company, site, guards = guard_login_site_guard_rows(company_id, site_id)
+        if not company or not site:
+            return not_found(start_response)
+        return guard_login_guard_list_page(environ, start_response, company, site, guards)
     guard_match = re.match(r'^/guard-login/(\d+)$', path)
     if guard_match and method == 'GET':
         company_id = get_guard_login_company(environ, current_user=user)
