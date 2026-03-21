@@ -311,16 +311,33 @@ def verify_password(password, stored):
     return hmac.compare_digest(candidate, digest)
 
 
+def normalize_pin(pin):
+    return ''.join(ch for ch in (pin or '').strip() if ch.isdigit())
+
+
+def is_valid_pin(pin):
+    return len(pin) == 4 and pin.isdigit()
+
+
+def guard_pin_value(data):
+    requested_pin = normalize_pin(data.get('pin'))
+    if not requested_pin and data.get('generate_pin'):
+        requested_pin = ''.join(secrets.choice('0123456789') for _ in range(4))
+    return requested_pin
+
+
 def guard_login_payload(data, guard, company_id):
     username = (data.get('username') or '').strip()
     email = (data.get('email') or '').strip()
     temporary_password = data.get('temporary_password') or ''
-    has_login_fields = any([username, email, temporary_password])
+    pin = guard_pin_value(data)
+    has_login_fields = any([username, email, temporary_password, pin])
     full_name = ('%s %s' % ((guard.get('first_name') or '').strip(), (guard.get('last_name') or '').strip())).strip() or 'Guard'
     return {
         'username': username,
         'email': email,
         'temporary_password': temporary_password,
+        'pin': pin,
         'has_login_fields': has_login_fields,
         'full_name': full_name,
         'company_id': company_id,
@@ -340,6 +357,8 @@ def validate_guard_login_payload(conn, payload, current_user_id=None, login_exis
                 raise ValueError('Email must be unique')
         if not login_exists and not payload['temporary_password']:
             raise ValueError('Temporary password is required to create a guard login')
+        if payload['pin'] and not is_valid_pin(payload['pin']):
+            raise ValueError('PIN must be exactly 4 digits')
 
 
 def upsert_guard_login(conn, guard, payload):
@@ -366,15 +385,17 @@ def upsert_guard_login(conn, guard, payload):
         )
         if payload['temporary_password']:
             conn.execute('UPDATE users SET password=? WHERE id=?', (hash_password(payload['temporary_password']), existing_user['id']))
+        if payload['pin']:
+            conn.execute('UPDATE users SET pin_hash=? WHERE id=?', (hash_password(payload['pin']), existing_user['id']))
         return existing_user['id'], False
 
     conn.execute(
         """
-        INSERT INTO users (company_id, guard_id, username, password, full_name, role, phone, email, license_number, hourly_rate, active, created_at)
-        VALUES (?, ?, ?, ?, ?, 'guard', ?, ?, ?, ?, ?, ?)
+        INSERT INTO users (company_id, guard_id, username, password, pin_hash, full_name, role, phone, email, license_number, hourly_rate, active, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'guard', ?, ?, ?, ?, ?, ?)
         """,
         (
-            payload['company_id'], guard['id'], payload['username'], hash_password(payload['temporary_password']), payload['full_name'],
+            payload['company_id'], guard['id'], payload['username'], hash_password(payload['temporary_password']), hash_password(payload['pin']) if payload['pin'] else None, payload['full_name'],
             user_phone, user_email, user_license, 18, active, datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         )
     )
@@ -471,6 +492,7 @@ def init_db():
         guard_id INTEGER,
         username TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL,
+        pin_hash TEXT,
         full_name TEXT NOT NULL,
         role TEXT NOT NULL,
         phone TEXT,
@@ -662,6 +684,7 @@ def init_db():
         guard_id INTEGER,
         username TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL,
+        pin_hash TEXT,
         full_name TEXT NOT NULL,
         role TEXT NOT NULL CHECK(role IN ('superadmin', 'company_admin', 'guard')),
         phone TEXT,
@@ -841,7 +864,7 @@ def init_db():
     if table_exists(conn, 'users'):
         for col in [
             'company_id INTEGER', 'guard_id INTEGER', 'phone TEXT', 'email TEXT', 'license_number TEXT', 'hourly_rate REAL DEFAULT 18',
-            'active INTEGER DEFAULT 1', 'created_at TEXT'
+            'active INTEGER DEFAULT 1', 'created_at TEXT', 'pin_hash TEXT'
         ]:
             ensure_column(conn, 'users', col)
     if table_exists(conn, 'clients'):
@@ -1281,7 +1304,7 @@ def get_dashboard_context(user, view='week'):
         recent_reports = reports[:8]
         guards = conn.execute("SELECT * FROM users WHERE company_id=? AND role='guard' ORDER BY full_name", (company_id,)).fetchall()
     guards_module_rows = conn.execute(f'''
-        SELECT g.*, gsa.site_id, s.name as assigned_site_name, u.id as login_user_id, u.username as login_username, u.email as login_email
+        SELECT g.*, gsa.site_id, s.name as assigned_site_name, u.id as login_user_id, u.username as login_username, u.email as login_email, u.pin_hash as login_pin_hash
         FROM guards g
         {current_guard_assignment_join('g')}
         LEFT JOIN users u ON u.guard_id=g.id AND u.company_id=g.company_id AND u.role='guard'
@@ -2259,7 +2282,8 @@ DASHBOARD_HTML = r'''{% extends "layout.html" %}
         <div class="row-2"><label>First Name<input type="text" name="first_name" required></label><label>Last Name<input type="text" name="last_name" required></label></div>
         <div class="row-3"><label>Email<input type="email" name="email" placeholder="Used for the guard login if you create one"></label><label>Phone<input type="text" name="phone"></label><label>License #<input type="text" name="license_number"></label></div>
         <div class="row-3"><label>Status<select name="status"><option value="active">active</option><option value="inactive">inactive</option></select></label><label>Training Status<input type="text" name="training_status" placeholder="pending"></label><label>Rating<input type="number" step="0.1" min="1" max="5" name="rating" value="5"></label></div>
-        <div class="row-2"><label>Username<input type="text" name="username" placeholder="Optional login username"></label><label>Temporary Password<input type="text" name="temporary_password" placeholder="Required when creating a login"></label></div>
+        <div class="row-3"><label>Username<input type="text" name="username" placeholder="Optional login username"></label><label>Temporary Password<input type="text" name="temporary_password" placeholder="Required when creating a login"></label><label>Set PIN<input type="text" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="4-digit PIN"></label></div>
+        <div class="helper-links inline-tools"><button class="btn ghost" type="submit" name="generate_pin" value="1">Generate random PIN</button><span class="small-muted">PIN is hashed and used by quick login.</span></div>
         <button class="btn primary" type="submit">Add Guard</button>
       </form>
       <hr>
@@ -2270,9 +2294,10 @@ DASHBOARD_HTML = r'''{% extends "layout.html" %}
           <div class="small-muted">{{ guard.email or 'No email' }} · {{ guard.phone or 'No phone' }} · {{ guard.status }} · {{ guard.training_status or 'training n/a' }} · Rating {{ guard.rating or 5 }}</div>
           <div class="small-muted">Assigned Site: {{ guard.assigned_site_name or 'Unassigned' }}</div>
           <div class="small-muted">Login: {% if guard.login_user_id %}{{ guard.login_username }}{% if guard.login_email %} · {{ guard.login_email }}{% endif %}{% else %}No login account yet{% endif %}</div>
+          <div class="small-muted">Quick PIN: {% if guard.login_pin_hash %}Configured{% else %}Not set{% endif %}</div>
         </div>
         <div class="actions vertical">
-          <form method="post" action="/admin/guard/update" class="inline-form"><input type="hidden" name="guard_id" value="{{ guard.id }}"><input type="text" name="first_name" value="{{ guard.first_name }}" placeholder="First" required><input type="text" name="last_name" value="{{ guard.last_name }}" placeholder="Last" required><input type="email" name="email" value="{{ guard.login_email or guard.email or '' }}" placeholder="Email"><input type="text" name="phone" value="{{ guard.phone or '' }}" placeholder="Phone"><input type="text" name="license_number" value="{{ guard.license_number or '' }}" placeholder="License #"><select name="status"><option value="active" {% if guard.status == 'active' %}selected{% endif %}>active</option><option value="inactive" {% if guard.status == 'inactive' %}selected{% endif %}>inactive</option></select><input type="text" name="training_status" value="{{ guard.training_status or '' }}" placeholder="Training"><label>Assigned Site<select name="site_id"><option value="">Unassigned</option>{% for site in active_sites %}<option value="{{ site.id }}" {% if guard.site_id == site.id %}selected{% endif %}>{{ site.name }}</option>{% endfor %}</select></label><input type="text" name="username" value="{{ guard.login_username or '' }}" placeholder="Username"><input type="text" name="temporary_password" placeholder="Temporary password"><button class="btn" type="submit">Save</button></form>
+          <form method="post" action="/admin/guard/update" class="inline-form"><input type="hidden" name="guard_id" value="{{ guard.id }}"><input type="text" name="first_name" value="{{ guard.first_name }}" placeholder="First" required><input type="text" name="last_name" value="{{ guard.last_name }}" placeholder="Last" required><input type="email" name="email" value="{{ guard.login_email or guard.email or '' }}" placeholder="Email"><input type="text" name="phone" value="{{ guard.phone or '' }}" placeholder="Phone"><input type="text" name="license_number" value="{{ guard.license_number or '' }}" placeholder="License #"><select name="status"><option value="active" {% if guard.status == 'active' %}selected{% endif %}>active</option><option value="inactive" {% if guard.status == 'inactive' %}selected{% endif %}>inactive</option></select><input type="text" name="training_status" value="{{ guard.training_status or '' }}" placeholder="Training"><label>Assigned Site<select name="site_id"><option value="">Unassigned</option>{% for site in active_sites %}<option value="{{ site.id }}" {% if guard.site_id == site.id %}selected{% endif %}>{{ site.name }}</option>{% endfor %}</select></label><input type="text" name="username" value="{{ guard.login_username or '' }}" placeholder="Username"><input type="text" name="temporary_password" placeholder="Temporary password"><input type="text" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="Set PIN"><button class="btn ghost" type="submit" name="generate_pin" value="1">Generate PIN</button><button class="btn" type="submit">Save</button></form>
           {% if guard.status == 'active' %}<form method="post" action="/admin/guard/deactivate" class="inline-form"><input type="hidden" name="guard_id" value="{{ guard.id }}"><button class="btn ghost" type="submit">Deactivate</button></form>{% endif %}
         </div>
       </div>
@@ -2774,7 +2799,7 @@ def guard_login_site_guard_rows(company_id, site_id):
 def guard_login_record(company_id, guard_id):
     conn = db()
     row = conn.execute(f"""
-        SELECT g.*, s.name AS site_name, u.id AS user_id, u.username, u.password, u.active AS user_active
+        SELECT g.*, s.name AS site_name, u.id AS user_id, u.username, u.password, u.pin_hash, u.active AS user_active
         FROM guards g
         JOIN users u ON u.guard_id=g.id AND u.company_id=g.company_id AND u.role='guard'
         {current_guard_assignment_join('g')}
@@ -3143,13 +3168,23 @@ GUARD_LOGIN_PASSWORD_HTML = r'''{% extends "layout.html" %}
     </div>
   </div>
   <div class="card narrow-shell">
-    <h3>Enter Password</h3>
-    <p class="small-muted">Use your existing SteeleOps password to sign in.</p>
+    <h3>Enter PIN</h3>
+    <p class="small-muted">Use your 4-digit quick login PIN. Password login is still available below if needed.</p>
     {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
-    <form method="post" action="/guard-login/{{ guard.id }}?company_id={{ company.id }}" class="stack">{{ csrf_input|safe }}
-      <label>Password<input type="password" name="password" required autofocus></label>
-      <button class="btn primary" type="submit">Sign In</button>
+    {% if message %}<div class="alert success">{{ message }}</div>{% endif %}
+    <form method="post" action="/guard-login/{{ guard.id }}?company_id={{ company.id }}" class="stack guard-pin-form">{{ csrf_input|safe }}
+      <input type="hidden" name="login_method" value="pin">
+      <label>PIN<input class="pin-input" type="password" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="••••" required autofocus></label>
+      <button class="btn primary" type="submit">Sign In with PIN</button>
     </form>
+    <details class="card subtle-card fallback-card">
+      <summary>Use password instead</summary>
+      <form method="post" action="/guard-login/{{ guard.id }}?company_id={{ company.id }}" class="stack top-gap">{{ csrf_input|safe }}
+        <input type="hidden" name="login_method" value="password">
+        <label>Password<input type="password" name="password" required></label>
+        <button class="btn ghost" type="submit">Sign In with Password</button>
+      </form>
+    </details>
     <div class="helper-links"><a href="/login">Use username login instead</a></div>
   </div>
 </div>
@@ -3167,6 +3202,13 @@ STYLES_CSS += r'''
 .guard-login-item { padding: 16px 0; align-items: center; border-radius: 18px; }
 .guard-login-item:hover { background: rgba(255,255,255,.03); padding-left: 12px; padding-right: 12px; }
 .guard-login-meta { margin: -4px 0 16px; }
+.inline-tools { align-items: center; }
+.guard-pin-form { gap: 14px; }
+.pin-input { text-align: center; letter-spacing: .65em; font-size: 1.5rem; font-weight: 700; padding-left: 1.1em; }
+.fallback-card { margin-top: 14px; padding: 14px 16px; }
+.fallback-card summary { cursor: pointer; font-weight: 600; }
+.top-gap { margin-top: 12px; }
+.subtle-card { background: rgba(255,255,255,.02); border: 1px solid var(--line); border-radius: 18px; }
 '''
 
 
@@ -3201,8 +3243,8 @@ def guard_login_guard_list_page(environ, start_response, company, site, guards, 
     return html_response(start_response, render_page(environ, 'guard_login_guard_list.html', title='Guard Quick Login', company=company, site=site, guards=guards, error=error), extra_headers=csrf_headers(environ))
 
 
-def guard_login_password_page(environ, start_response, company, guard, error=None):
-    return html_response(start_response, render_page(environ, 'guard_login_password.html', title='Guard Quick Login', company=company, guard=guard, error=error), extra_headers=csrf_headers(environ))
+def guard_login_password_page(environ, start_response, company, guard, error=None, message=None):
+    return html_response(start_response, render_page(environ, 'guard_login_password.html', title='Guard Quick Login', company=company, guard=guard, error=error, message=message), extra_headers=csrf_headers(environ))
 
 def password_reset_request_page(environ, start_response, error=None, message=None, reset_link=None):
     return html_response(start_response, render_page(environ, 'password_reset_request.html', title='Password Reset', error=error, message=message, reset_link=reset_link), extra_headers=csrf_headers(environ))
@@ -3302,13 +3344,22 @@ def application(environ, start_response):
         if not company or not guard or not guard['user_id'] or not guard['user_active']:
             return not_found(start_response)
         data, _ = parse_post(environ)
+        pin = normalize_pin(data.get('pin', ''))
         password = data.get('password', '')
+        use_password = data.get('login_method') == 'password'
         username = guard['username'] or f'guard:{guard["id"]}'
         if not login_allowed(username):
             return guard_login_password_page(environ, start_response, company, guard, error='Too many failed attempts. Please wait 15 minutes and try again.')
-        if not verify_password(password, guard['password']):
-            record_login_attempt(username, False, environ=environ, user_id=guard['user_id'], company_id=company_id)
-            return guard_login_password_page(environ, start_response, company, guard, error='Invalid password.')
+        if use_password:
+            if not verify_password(password, guard['password']):
+                record_login_attempt(username, False, environ=environ, user_id=guard['user_id'], company_id=company_id)
+                return guard_login_password_page(environ, start_response, company, guard, error='Invalid password.')
+        else:
+            if not guard['pin_hash']:
+                return guard_login_password_page(environ, start_response, company, guard, error='No PIN is set for this guard yet. Use password login instead.')
+            if not is_valid_pin(pin) or not verify_password(pin, guard['pin_hash']):
+                record_login_attempt(username, False, environ=environ, user_id=guard['user_id'], company_id=company_id)
+                return guard_login_password_page(environ, start_response, company, guard, error='Invalid PIN.')
         record_login_attempt(username, True, environ=environ, user_id=guard['user_id'], company_id=company_id)
         session_id = create_session(guard['user_id'])
         return redirect(start_response, '/dashboard', [('Set-Cookie', cookie_header(session_id))])
