@@ -2,6 +2,7 @@ import csv
 import hashlib
 import hmac
 import io
+import json
 import os
 import re
 import secrets
@@ -996,6 +997,11 @@ def html_response(start_response, body, status='200 OK', extra_headers=None):
     return [body]
 
 
+def json_response(start_response, payload, status='200 OK'):
+    start_response(status, response_headers(content_type='application/json; charset=utf-8'))
+    return [json.dumps(payload, default=str, indent=2).encode('utf-8')]
+
+
 def redirect(start_response, location, extra_headers=None):
     headers = [('Location', location)]
     if extra_headers:
@@ -1772,13 +1778,7 @@ def application(environ, start_response):
             guard_params.insert(0, guard_name)
         try:
             conn.execute(guard_sql, tuple(guard_params))
-            site_id = (data.get('site_id') or '').strip()
-            conn.execute('DELETE FROM guard_site_assignments WHERE guard_id=? AND company_id=?', (guard['id'], user['company_id']))
-            if site_id:
-                site = conn.execute('SELECT id FROM sites WHERE id=? AND company_id=? AND active=1', (site_id, user['company_id'])).fetchone()
-                if not site:
-                    raise ValueError('Assigned site not found')
-                conn.execute('INSERT INTO guard_site_assignments (company_id, guard_id, site_id, assigned_at) VALUES (?, ?, ?, ?)', (user['company_id'], guard['id'], site_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            save_guard_site_assignment(conn, user['company_id'], guard['id'], data.get('site_id'))
             updated_guard = conn.execute('SELECT * FROM guards WHERE id=? AND company_id=?', (guard['id'], user['company_id'])).fetchone()
             upsert_guard_login(conn, updated_guard, guard_login_payload(data, updated_guard, user['company_id']))
             conn.commit()
@@ -1803,14 +1803,12 @@ def application(environ, start_response):
         conn = db(); guard = conn.execute('SELECT * FROM guards WHERE id=? AND company_id=?', (data.get('guard_id'), user['company_id'])).fetchone()
         if not guard:
             conn.close(); return bad_request(start_response, 'Guard not found')
-        site_id = (data.get('site_id') or '').strip()
-        conn.execute('DELETE FROM guard_site_assignments WHERE guard_id=? AND company_id=?', (guard['id'], user['company_id']))
-        if site_id:
-            site = conn.execute('SELECT id FROM sites WHERE id=? AND company_id=? AND active=1', (site_id, user['company_id'])).fetchone()
-            if not site:
-                conn.close(); return bad_request(start_response, 'Site not found')
-            conn.execute('INSERT INTO guard_site_assignments (company_id, guard_id, site_id, assigned_at) VALUES (?, ?, ?, ?)', (user['company_id'], guard['id'], site_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-        conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='guard', target_id=guard['id'], message='guard assignment updated', environ=environ)
+        try:
+            save_guard_site_assignment(conn, user['company_id'], guard['id'], data.get('site_id'))
+            conn.commit()
+        except ValueError as exc:
+            conn.rollback(); conn.close(); return bad_request(start_response, str(exc))
+        conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='guard', target_id=guard['id'], message='guard assignment updated', environ=environ)
         return redirect(start_response, '/guards')
     if path == '/admin/guard/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
@@ -2704,6 +2702,22 @@ def current_guard_assignment_join(guard_alias='g'):
     """
 
 
+def save_guard_site_assignment(conn, company_id, guard_id, site_id):
+    normalized_site_id = (site_id or '').strip()
+    conn.execute('DELETE FROM guard_site_assignments WHERE guard_id=? AND company_id=?', (guard_id, company_id))
+    if not normalized_site_id:
+        return None
+    site = conn.execute('SELECT id FROM sites WHERE id=? AND company_id=? AND active=1', (normalized_site_id, company_id)).fetchone()
+    if not site:
+        raise ValueError('Assigned site not found')
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    conn.execute(
+        'INSERT INTO guard_site_assignments (company_id, guard_id, site_id, assigned_at) VALUES (?, ?, ?, ?)',
+        (company_id, guard_id, normalized_site_id, timestamp)
+    )
+    return int(normalized_site_id)
+
+
 def guard_login_list_rows(company_id):
     conn = db()
     rows = conn.execute(f"""
@@ -2745,26 +2759,14 @@ def guard_login_site_guard_rows(company_id, site_id):
     """, (company_id, site_id)).fetchone()
     guards = []
     if site:
-        guards = conn.execute("""
+        guards = conn.execute(f"""
             SELECT g.*
             FROM guards g
-            JOIN (
-                SELECT gsa.guard_id, gsa.site_id
-                FROM guard_site_assignments gsa
-                WHERE gsa.company_id=?
-                  AND gsa.id=(
-                      SELECT gsa_current.id
-                      FROM guard_site_assignments gsa_current
-                      WHERE gsa_current.company_id=gsa.company_id
-                        AND gsa_current.guard_id=gsa.guard_id
-                      ORDER BY gsa_current.assigned_at DESC, gsa_current.id DESC
-                      LIMIT 1
-                  )
-            ) latest_gsa ON latest_gsa.guard_id=g.id AND latest_gsa.site_id=?
             JOIN users u ON u.guard_id=g.id AND u.company_id=g.company_id AND u.role='guard' AND u.active=1
-            WHERE g.company_id=? AND g.status='active'
+            {current_guard_assignment_join('g')}
+            WHERE g.company_id=? AND g.status='active' AND gsa.site_id=?
             ORDER BY g.first_name, g.last_name, g.id
-        """, (company_id, site_id, company_id)).fetchall()
+        """, (company_id, site_id)).fetchall()
     conn.close()
     return company, site, guards
 
@@ -2783,6 +2785,75 @@ def guard_login_record(company_id, guard_id):
     company = conn.execute('SELECT * FROM companies WHERE id=?', (company_id,)).fetchone()
     conn.close()
     return company, row
+
+
+def guard_site_debug_payload(company_id, guard_id, selected_site_id=None):
+    conn = db()
+    guard = conn.execute('SELECT * FROM guards WHERE id=? AND company_id=?', (guard_id, company_id)).fetchone()
+    users = conn.execute("""
+        SELECT *
+        FROM users
+        WHERE company_id=? AND role='guard' AND guard_id=?
+        ORDER BY id
+    """, (company_id, guard_id)).fetchall()
+    assignments = conn.execute("""
+        SELECT gsa.*, s.name AS site_name, s.active AS site_active
+        FROM guard_site_assignments gsa
+        LEFT JOIN sites s ON s.id=gsa.site_id AND s.company_id=gsa.company_id
+        WHERE gsa.company_id=? AND gsa.guard_id=?
+        ORDER BY gsa.assigned_at DESC, gsa.id DESC
+    """, (company_id, guard_id)).fetchall()
+    latest_assignment = conn.execute("""
+        SELECT gsa.*, s.name AS site_name, s.active AS site_active
+        FROM guard_site_assignments gsa
+        LEFT JOIN sites s ON s.id=gsa.site_id AND s.company_id=gsa.company_id
+        WHERE gsa.id=(
+            SELECT gsa_current.id
+            FROM guard_site_assignments gsa_current
+            JOIN sites site_current ON site_current.id=gsa_current.site_id AND site_current.company_id=gsa_current.company_id
+            WHERE gsa_current.guard_id=? AND gsa_current.company_id=?
+            ORDER BY gsa_current.assigned_at DESC, gsa_current.id DESC
+            LIMIT 1
+        )
+    """, (guard_id, company_id)).fetchone()
+    selected_site = None
+    if selected_site_id:
+        selected_site = conn.execute('SELECT * FROM sites WHERE id=? AND company_id=?', (selected_site_id, company_id)).fetchone()
+    linked_user = users[0] if users else None
+    should_appear = bool(
+        guard
+        and guard['status'] == 'active'
+        and linked_user
+        and linked_user['active']
+        and latest_assignment
+        and (selected_site_id is None or latest_assignment['site_id'] == selected_site_id)
+    )
+    payload = {
+        'selected_company_id': company_id,
+        'selected_site_id': selected_site_id,
+        'selected_site': dict(selected_site) if selected_site else None,
+        'guard': dict(guard) if guard else None,
+        'linked_user': dict(linked_user) if linked_user else None,
+        'all_linked_users': [dict(row) for row in users],
+        'assignment_rows': [dict(row) for row in assignments],
+        'latest_assignment_row': dict(latest_assignment) if latest_assignment else None,
+        'quick_login': {
+            'should_appear': should_appear,
+            'checks': {
+                'guard_found': bool(guard),
+                'guard_active': bool(guard and guard['status'] == 'active'),
+                'linked_user_found': bool(linked_user),
+                'linked_user_has_guard_id': bool(linked_user and linked_user['guard_id'] == guard_id),
+                'linked_user_active': bool(linked_user and linked_user['active']),
+                'latest_assignment_found': bool(latest_assignment),
+                'latest_assignment_matches_selected_site': bool(
+                    latest_assignment and (selected_site_id is None or latest_assignment['site_id'] == selected_site_id)
+                ),
+            },
+        },
+    }
+    conn.close()
+    return payload
 
 def forbidden(start_response, message='Forbidden'):
     start_response('403 Forbidden', response_headers(content_type='text/plain; charset=utf-8'))
@@ -3202,6 +3273,18 @@ def application(environ, start_response):
         if not company or not site:
             return not_found(start_response)
         return guard_login_guard_list_page(environ, start_response, company, site, guards)
+    debug_guard_match = re.match(r'^/debug/guard-site-check/(\d+)$', path)
+    if debug_guard_match and method == 'GET':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        company_id = user['company_id']
+        selected_site_id = (query.get('site_id') or '').strip()
+        payload = guard_site_debug_payload(
+            company_id,
+            int(debug_guard_match.group(1)),
+            int(selected_site_id) if selected_site_id.isdigit() else None,
+        )
+        return json_response(start_response, payload)
     guard_match = re.match(r'^/guard-login/(\d+)$', path)
     if guard_match and method == 'GET':
         company_id = get_guard_login_company(environ, current_user=user)
@@ -3452,6 +3535,7 @@ def application(environ, start_response):
             guard_params.insert(0, guard_name)
         try:
             conn.execute(guard_sql, tuple(guard_params))
+            save_guard_site_assignment(conn, user['company_id'], guard['id'], data.get('site_id'))
             updated_guard = conn.execute('SELECT * FROM guards WHERE id=? AND company_id=?', (guard['id'], user['company_id'])).fetchone()
             upsert_guard_login(conn, updated_guard, guard_login_payload(data, updated_guard, user['company_id']))
             conn.commit()
@@ -3476,14 +3560,12 @@ def application(environ, start_response):
         conn = db(); guard = conn.execute('SELECT * FROM guards WHERE id=? AND company_id=?', (data.get('guard_id'), user['company_id'])).fetchone()
         if not guard:
             conn.close(); return bad_request(start_response, 'Guard not found')
-        site_id = (data.get('site_id') or '').strip()
-        conn.execute('DELETE FROM guard_site_assignments WHERE guard_id=? AND company_id=?', (guard['id'], user['company_id']))
-        if site_id:
-            site = conn.execute('SELECT id FROM sites WHERE id=? AND company_id=? AND active=1', (site_id, user['company_id'])).fetchone()
-            if not site:
-                conn.close(); return bad_request(start_response, 'Site not found')
-            conn.execute('INSERT INTO guard_site_assignments (company_id, guard_id, site_id, assigned_at) VALUES (?, ?, ?, ?)', (user['company_id'], guard['id'], site_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-        conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='guard', target_id=guard['id'], message='guard assignment updated', environ=environ)
+        try:
+            save_guard_site_assignment(conn, user['company_id'], guard['id'], data.get('site_id'))
+            conn.commit()
+        except ValueError as exc:
+            conn.rollback(); conn.close(); return bad_request(start_response, str(exc))
+        conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='guard', target_id=guard['id'], message='guard assignment updated', environ=environ)
         return redirect(start_response, '/guards')
     if path == '/admin/guard/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
