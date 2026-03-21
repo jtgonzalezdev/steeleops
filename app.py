@@ -1095,6 +1095,65 @@ def require_admin(environ, start_response):
     return user, None
 
 
+def sidebar_nav_items(user, active_path):
+    items = [
+        {'label': 'Dashboard', 'href': '/dashboard', 'active': active_path == '/dashboard'},
+        {'label': 'Weekly Schedule', 'href': '/weekly-schedule', 'active': active_path == '/weekly-schedule'},
+        {'label': 'Monthly Schedule', 'href': '/monthly-schedule', 'active': active_path == '/monthly-schedule'},
+        {'label': 'My Profile', 'href': '/profile', 'active': active_path == '/profile'},
+    ]
+    if user['role'] in {'company_admin', 'superadmin'}:
+        items.extend([
+            {'label': 'Guards', 'href': '/guards', 'active': active_path == '/guards'},
+            {'label': 'Payroll', 'href': '/payroll', 'active': active_path == '/payroll'},
+            {'label': 'Reports', 'href': '/reports', 'active': active_path == '/reports'},
+        ])
+    items.append({'label': 'Logout', 'href': '/logout', 'active': False})
+    return items
+
+
+def dashboard_page(environ, start_response, user, active_path='/dashboard', view='week', title='SteeleOps Control Center', **extra_context):
+    context = get_dashboard_context(user, view)
+    context.update(extra_context)
+    context.setdefault('active_path', active_path)
+    context.setdefault('nav_items', sidebar_nav_items(user, active_path))
+    context.setdefault('page_title', title)
+    return html_response(
+        start_response,
+        render_page(environ, 'dashboard.html', title=title, user=user, **context),
+        extra_headers=csrf_headers(environ),
+    )
+
+
+def profile_page(environ, start_response, user, message=None, error=None):
+    conn = db()
+    upcoming_shifts = conn.execute("""
+        SELECT shifts.*, sites.name as site_name
+        FROM shifts JOIN sites ON shifts.site_id=sites.id
+        WHERE shifts.company_id=? AND COALESCE(shifts.user_id, shifts.guard_id)=? AND shifts.shift_date>=?
+        ORDER BY shifts.shift_date, shifts.start_time LIMIT 8
+    """, (user['company_id'], user['id'], date.today().isoformat())).fetchall()
+    availability = conn.execute('SELECT * FROM availability WHERE user_id=? ORDER BY weekday', (user['id'],)).fetchall()
+    conn.close()
+    return html_response(
+        start_response,
+        render_page(
+            environ,
+            'profile.html',
+            title='Profile',
+            user=user,
+            upcoming_shifts=upcoming_shifts,
+            availability=availability,
+            message=message,
+            error=error,
+            nav_items=sidebar_nav_items(user, '/profile'),
+            active_path='/profile',
+            page_title='Guard Profile',
+        ),
+        extra_headers=csrf_headers(environ),
+    )
+
+
 def parse_multipart(environ, content_type):
     try:
         size = int(environ.get('CONTENT_LENGTH', '0') or 0)
@@ -1439,18 +1498,6 @@ def get_dashboard_context(user, view='week'):
 
 def login_page(start_response, error=None):
     return html_response(start_response, render('login.html', title='SteeleOps Login', error=error))
-
-
-def profile_page(start_response, user, message=None, error=None):
-    conn = db()
-    company_id = user['company_id']
-    upcoming_shifts = conn.execute('''
-        SELECT shifts.*, COALESCE(shifts.user_id, shifts.guard_id) as user_id, COALESCE(shifts.guard_id, shifts.user_id) as guard_id, sites.name as site_name FROM shifts JOIN sites ON shifts.site_id=sites.id
-        WHERE COALESCE(shifts.user_id, shifts.guard_id)=? AND shifts.company_id=? AND shifts.shift_date>=? ORDER BY shift_date, start_time LIMIT 8
-    ''', (user['id'], company_id, date.today().isoformat())).fetchall() if company_id else []
-    availability = conn.execute('SELECT * FROM availability WHERE user_id=? ORDER BY weekday', (user['id'],)).fetchall() if company_id else []
-    conn.close()
-    return html_response(start_response, render('profile.html', title='Profile', user=user, upcoming_shifts=upcoming_shifts, availability=availability, message=message, error=error))
 
 
 def export_reports_pdf(company_id):
@@ -2006,16 +2053,9 @@ DASHBOARD_HTML = r'''{% extends "layout.html" %}
       </div>
     </div>
     <div class="nav-links">
-      <a href="/dashboard">Dashboard</a>
-      <a href="/dashboard?view=week">Weekly Schedule</a>
-      <a href="/dashboard?view=month">Monthly Schedule</a>
-      <a href="/profile">My Profile</a>
-      {% if user.role in ['company_admin', 'superadmin'] %}
-      <a href="/guards">Guards</a>
-      <a href="/admin/payroll">Payroll Ready</a>
-      <a href="/admin/reports/export">Export Reports PDF</a>
-      {% endif %}
-      <a href="/logout">Logout</a>
+      {% for item in nav_items %}
+      <a href="{{ item.href }}" class="{% if item.active %}active{% endif %}">{{ item.label }}</a>
+      {% endfor %}
     </div>
   </aside>
 
@@ -2023,7 +2063,7 @@ DASHBOARD_HTML = r'''{% extends "layout.html" %}
     <section class="topbar card">
       <div>
         <div class="eyebrow">SteeleOps Platform</div>
-        <h1>SteeleOps Control Center</h1>
+        <h1>{{ page_title or 'SteeleOps Control Center' }}</h1>
         <p class="small-muted">Security Operations Simplified</p>
       </div>
       <div class="user-chip">{{ user.full_name }} · {{ user.role.replace('_', ' ').title() }}</div>
@@ -2346,49 +2386,73 @@ DASHBOARD_HTML = r'''{% extends "layout.html" %}
 
 PROFILE_HTML = r'''{% extends "layout.html" %}
 {% block body %}
-<div class="simple-shell">
-  <div class="simple-header"><a href="/dashboard" class="btn ghost">← Back</a><h1>Guard Profile</h1></div>
-  <div class="grid two-col">
-    <div class="card">
-      <h3>Profile Details</h3>
-      {% if message %}<div class="alert success">{{ message }}</div>{% endif %}
-      {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
-      <form method="post" action="/profile/update" class="stack">
-        <label>Full Name<input type="text" name="full_name" value="{{ user.full_name }}"></label>
-        <div class="row-2"><label>Phone<input type="text" name="phone" value="{{ user.phone or '' }}"></label><label>Email<input type="email" name="email" value="{{ user.email or '' }}"></label></div>
-        <label>License Number<input type="text" name="license_number" value="{{ user.license_number or '' }}"></label>
-        <button class="btn primary">Save Profile</button>
-      </form>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      {% if user.company_logo %}<img src="/{{ user.company_logo }}" class="company-logo">{% else %}<div class="logo-box small">S</div>{% endif %}
+      <div>
+        <div class="eyebrow">SteeleOps</div>
+        <h2>Control Center</h2>
+        <div class="small-muted">{{ user.company_name or 'Platform' }}</div>
+      </div>
     </div>
-    <div class="card">
-      <h3>Change Password</h3>
-      <form method="post" action="/profile/password" class="stack">
-        <label>Current Password<input type="password" name="current_password"></label>
-        <label>New Password<input type="password" name="new_password"></label>
-        <button class="btn">Update Password</button>
-      </form>
-    </div>
-  </div>
-  <div class="grid two-col">
-    <div class="card">
-      <h3>Upcoming Assigned Shifts</h3>
-      {% for shift in upcoming_shifts %}<div class="list-item detailed"><div><strong>{{ shift.site_name }}</strong><div class="small-muted">{{ shift.shift_date }} · {{ shift.start_time }}-{{ shift.end_time }}</div></div><span class="badge {{ shift.status }}">{{ shift.status }}</span></div>{% else %}<div class="empty">No upcoming shifts.</div>{% endfor %}
-    </div>
-    <div class="card">
-      <h3>Guard Availability</h3>
-      <form method="post" action="/availability/save" class="stack compact">
-      {% set days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'] %}
-      {% for row in availability %}
-        <div class="availability-row">
-          <label class="checkbox-inline"><input type="checkbox" name="available_{{ row.weekday }}" {% if row.is_available %}checked{% endif %}> {{ days[row.weekday] }}</label>
-          <input type="time" name="start_{{ row.weekday }}" value="{{ row.available_start }}">
-          <input type="time" name="end_{{ row.weekday }}" value="{{ row.available_end }}">
-        </div>
+    <div class="nav-links">
+      {% for item in nav_items %}
+      <a href="{{ item.href }}" class="{% if item.active %}active{% endif %}">{{ item.label }}</a>
       {% endfor %}
-      <button class="btn primary">Save Availability</button>
-      </form>
     </div>
-  </div>
+  </aside>
+  <main class="content">
+    <section class="topbar card">
+      <div>
+        <div class="eyebrow">SteeleOps Platform</div>
+        <h1>{{ page_title or 'Guard Profile' }}</h1>
+        <p class="small-muted">Security Operations Simplified</p>
+      </div>
+      <div class="user-chip">{{ user.full_name }} · {{ user.role.replace('_', ' ').title() }}</div>
+    </section>
+    <div class="grid two-col">
+      <div class="card">
+        <h3>Profile Details</h3>
+        {% if message %}<div class="alert success">{{ message }}</div>{% endif %}
+        {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+        <form method="post" action="/profile/update" class="stack">
+          <label>Full Name<input type="text" name="full_name" value="{{ user.full_name }}"></label>
+          <div class="row-2"><label>Phone<input type="text" name="phone" value="{{ user.phone or '' }}"></label><label>Email<input type="email" name="email" value="{{ user.email or '' }}"></label></div>
+          <label>License Number<input type="text" name="license_number" value="{{ user.license_number or '' }}"></label>
+          <button class="btn primary">Save Profile</button>
+        </form>
+      </div>
+      <div class="card">
+        <h3>Change Password</h3>
+        <form method="post" action="/profile/password" class="stack">
+          <label>Current Password<input type="password" name="current_password"></label>
+          <label>New Password<input type="password" name="new_password"></label>
+          <button class="btn">Update Password</button>
+        </form>
+      </div>
+    </div>
+    <div class="grid two-col">
+      <div class="card">
+        <h3>Upcoming Assigned Shifts</h3>
+        {% for shift in upcoming_shifts %}<div class="list-item detailed"><div><strong>{{ shift.site_name }}</strong><div class="small-muted">{{ shift.shift_date }} · {{ shift.start_time }}-{{ shift.end_time }}</div></div><span class="badge {{ shift.status }}">{{ shift.status }}</span></div>{% else %}<div class="empty">No upcoming shifts.</div>{% endfor %}
+      </div>
+      <div class="card">
+        <h3>Guard Availability</h3>
+        <form method="post" action="/availability/save" class="stack compact">
+        {% set days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'] %}
+        {% for row in availability %}
+          <div class="availability-row">
+            <label class="checkbox-inline"><input type="checkbox" name="available_{{ row.weekday }}" {% if row.is_available %}checked{% endif %}> {{ days[row.weekday] }}</label>
+            <input type="time" name="start_{{ row.weekday }}" value="{{ row.available_start }}">
+            <input type="time" name="end_{{ row.weekday }}" value="{{ row.available_end }}">
+          </div>
+        {% endfor %}
+        <button class="btn primary">Save Availability</button>
+        </form>
+      </div>
+    </div>
+  </main>
 </div>
 {% endblock %}'''
 
@@ -2442,6 +2506,7 @@ button, .btn { display: inline-flex; justify-content: center; align-items: cente
 .nav-links { display: grid; gap: 8px; }
 .nav-links a { padding: 12px 14px; border-radius: 14px; color: #d8e6f6; }
 .nav-links a:hover { background: rgba(255,255,255,.05); }
+.nav-links a.active { background: rgba(61,153,255,.18); color: #fff; box-shadow: inset 0 0 0 1px rgba(61,153,255,.35); }
 .content { padding: 24px; display: grid; gap: 18px; }
 .card { background: linear-gradient(180deg, rgba(20,31,49,.94), rgba(13,21,34,.94)); border: 1px solid var(--line); border-radius: 24px; padding: 20px; box-shadow: var(--shadow); }
 .topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
@@ -2899,6 +2964,75 @@ def forbidden(start_response, message='Forbidden'):
     return [message.encode('utf-8')]
 
 
+def run_missed_clock_check(company_id, actor_user_id=None, environ=None):
+    conn = db()
+    now_dt = datetime.now()
+    created_count = 0
+    sent_count = 0
+    skipped_count = 0
+    alerts = []
+    try:
+        shifts = conn.execute("""
+            SELECT shifts.*, users.full_name, sites.name as site_name
+            FROM shifts
+            LEFT JOIN users ON COALESCE(shifts.user_id, shifts.guard_id)=users.id
+            JOIN sites ON shifts.site_id=sites.id
+            WHERE shifts.company_id=? AND COALESCE(shifts.user_id, shifts.guard_id) IS NOT NULL
+            ORDER BY shifts.shift_date, shifts.start_time
+        """, (company_id,)).fetchall()
+        for shift in shifts:
+            alert_kind = None
+            due_at = None
+            clock_in_due, clock_out_due = missed_clock_alert_thresholds(shift['shift_date'], shift['start_time'], shift['end_time'])
+            if not shift['clock_in_time'] and now_dt >= clock_in_due:
+                alert_kind = 'missed_clock_in'
+                due_at = clock_in_due
+            elif shift['clock_in_time'] and not shift['clock_out_time'] and now_dt >= clock_out_due:
+                alert_kind = 'missed_clock_out'
+                due_at = clock_out_due
+            if not alert_kind:
+                skipped_count += 1
+                continue
+            existing = conn.execute(
+                """
+                SELECT id FROM audit_logs
+                WHERE company_id=? AND event_type='missed_clock_check_alert'
+                  AND target_type='shift' AND target_id=? AND message=?
+                LIMIT 1
+                """,
+                (company_id, str(shift['id']), alert_kind),
+            ).fetchone() if table_exists(conn, 'audit_logs') else None
+            if existing:
+                skipped_count += 1
+                continue
+            alert_message = (
+                f"{alert_kind} for shift #{shift['id']} "
+                f"({shift['full_name'] or 'Assigned guard'}) at {shift['site_name']} "
+                f"due {due_at.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            alerts.append(alert_message)
+            created_count += 1
+            sent_count += 1
+            log_audit(
+                'missed_clock_check_alert',
+                actor_user_id=actor_user_id,
+                company_id=company_id,
+                target_type='shift',
+                target_id=str(shift['id']),
+                message=alert_kind,
+                environ=environ,
+                metadata={'alert': alert_message},
+            )
+        return {
+            'created_count': created_count,
+            'sent_count': sent_count,
+            'skipped_count': skipped_count,
+            'alerts': alerts,
+        }
+    finally:
+        conn.close()
+
+
 def render_page(environ, template_name, **context):
     context.setdefault('csrf_input', csrf_hidden_input(environ))
     context.setdefault('show_demo_accounts', APP_ENV != 'production')
@@ -3268,15 +3402,6 @@ def password_reset_form_page(environ, start_response, token='', error=None, mess
     return html_response(start_response, render_page(environ, 'password_reset_form.html', title='Reset Password', token=token, error=error, message=message), extra_headers=csrf_headers(environ))
 
 
-def profile_page(environ, start_response, user, message=None, error=None):
-    conn = db()
-    company_id = user['company_id']
-    upcoming_shifts = conn.execute('SELECT shifts.*, COALESCE(shifts.user_id, shifts.guard_id) as user_id, COALESCE(shifts.guard_id, shifts.user_id) as guard_id, sites.name as site_name FROM shifts JOIN sites ON shifts.site_id=sites.id WHERE COALESCE(shifts.user_id, shifts.guard_id)=? AND shifts.company_id=? AND shifts.shift_date>=? ORDER BY shift_date, start_time LIMIT 8', (user['id'], company_id, date.today().isoformat())).fetchall() if company_id else []
-    availability = conn.execute('SELECT * FROM availability WHERE user_id=? ORDER BY weekday', (user['id'],)).fetchall() if company_id else []
-    conn.close()
-    return html_response(start_response, render_page(environ, 'profile.html', title='Profile', user=user, upcoming_shifts=upcoming_shifts, availability=availability, message=message, error=error), extra_headers=csrf_headers(environ))
-
-
 def _new_report_id(conn):
     if conn.backend == 'sqlite':
         return conn.execute('SELECT last_insert_rowid() AS id').fetchone()['id']
@@ -3410,8 +3535,15 @@ def application(environ, start_response):
     if path == '/dashboard':
         user, response = require_login(environ, start_response)
         if response: return response
-        ctx = get_dashboard_context(user, query.get('view', 'week'))
-        return html_response(start_response, render_page(environ, 'dashboard.html', title='SteeleOps Control Center', user=user, **ctx), extra_headers=csrf_headers(environ))
+        return dashboard_page(environ, start_response, user, active_path='/dashboard', view='week', title='SteeleOps Control Center')
+    if path == '/weekly-schedule':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        return dashboard_page(environ, start_response, user, active_path='/weekly-schedule', view='week', title='Weekly Schedule')
+    if path == '/monthly-schedule':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        return dashboard_page(environ, start_response, user, active_path='/monthly-schedule', view='month', title='Monthly Schedule')
     if path == '/profile':
         user, response = require_login(environ, start_response)
         if response: return response
@@ -3548,8 +3680,7 @@ def application(environ, start_response):
     if path == '/guards':
         user, response = require_admin(environ, start_response)
         if response: return response
-        html = render_page(environ, 'dashboard.html', title='SteeleOps Guards', user=user, **get_dashboard_context(user, query.get('view', 'week')))
-        return html_response(start_response, html, extra_headers=csrf_headers(environ))
+        return dashboard_page(environ, start_response, user, active_path='/guards', view='week', title='Guards')
     if path == '/admin/guards/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
@@ -3669,10 +3800,18 @@ def application(environ, start_response):
         user, response = require_admin(environ, start_response)
         if response: return response
         pdf = export_reports_pdf(user['company_id']); log_audit('reports_exported_pdf', actor_user_id=user['id'], company_id=user['company_id'], target_type='report', target_id='export', message='PDF report export generated', environ=environ); start_response('200 OK', response_headers([('Content-Disposition', 'attachment; filename="steeleops_reports.pdf"')], 'application/pdf')); return [pdf]
-    if path == '/admin/payroll':
+    if path == '/reports':
         user, response = require_admin(environ, start_response)
         if response: return response
-        start_date = query.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat()); end_date = query.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat()); rows = payroll_rows(user['company_id'], start_date, end_date, query.get('guard_id')); html = render_page(environ, 'dashboard.html', title='SteeleOps Control Center', user=user, **get_dashboard_context(user, query.get('view', 'week')), payroll_rows=rows, payroll_start=start_date, payroll_end=end_date); return html_response(start_response, html, extra_headers=csrf_headers(environ))
+        return dashboard_page(environ, start_response, user, active_path='/reports', view='week', title='Reports')
+    if path in {'/admin/run-missed-clock-check', '/admin/run-missed-clock-check/'} and method in {'GET', 'POST'}:
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        return json_response(start_response, run_missed_clock_check(user['company_id'], actor_user_id=user['id'], environ=environ))
+    if path in {'/payroll', '/admin/payroll'}:
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        start_date = query.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat()); end_date = query.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat()); rows = payroll_rows(user['company_id'], start_date, end_date, query.get('guard_id')); return dashboard_page(environ, start_response, user, active_path='/payroll', view='week', title='Payroll', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date)
     if path == '/admin/payroll/export.csv':
         user, response = require_admin(environ, start_response)
         if response: return response
