@@ -1196,6 +1196,20 @@ def calculate_shift_hours_from_strings(start_time, end_time):
     return round((end_dt - start_dt).total_seconds() / 3600.0, 2)
 
 
+def shift_boundary_datetimes(shift_date, start_time, end_time):
+    start_dt = datetime.strptime(f'{shift_date} {start_time}', '%Y-%m-%d %H:%M')
+    end_dt = datetime.strptime(f'{shift_date} {end_time}', '%Y-%m-%d %H:%M')
+    if end_dt <= start_dt:
+        end_dt += timedelta(days=1)
+    return start_dt, end_dt
+
+
+def missed_clock_alert_thresholds(shift_date, start_time, end_time):
+    start_dt, end_dt = shift_boundary_datetimes(shift_date, start_time, end_time)
+    grace = timedelta(minutes=10)
+    return start_dt + grace, end_dt + grace
+
+
 def calculate_worked_hours(clock_in, clock_out):
     if not (clock_in and clock_out):
         return 0
