@@ -2748,11 +2748,23 @@ def guard_login_site_guard_rows(company_id, site_id):
         guards = conn.execute("""
             SELECT g.*
             FROM guards g
+            JOIN (
+                SELECT gsa.guard_id, gsa.site_id
+                FROM guard_site_assignments gsa
+                WHERE gsa.company_id=?
+                  AND gsa.id=(
+                      SELECT gsa_current.id
+                      FROM guard_site_assignments gsa_current
+                      WHERE gsa_current.company_id=gsa.company_id
+                        AND gsa_current.guard_id=gsa.guard_id
+                      ORDER BY gsa_current.assigned_at DESC, gsa_current.id DESC
+                      LIMIT 1
+                  )
+            ) latest_gsa ON latest_gsa.guard_id=g.id AND latest_gsa.site_id=?
             JOIN users u ON u.guard_id=g.id AND u.company_id=g.company_id AND u.role='guard' AND u.active=1
-            JOIN guard_site_assignments gsa ON gsa.guard_id=g.id AND gsa.company_id=g.company_id AND gsa.site_id=?
             WHERE g.company_id=? AND g.status='active'
             ORDER BY g.first_name, g.last_name, g.id
-        """, (site_id, company_id)).fetchall()
+        """, (company_id, site_id, company_id)).fetchall()
     conn.close()
     return company, site, guards
 
