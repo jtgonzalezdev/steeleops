@@ -1597,6 +1597,7 @@ def payroll_csv(company_id, start_date, end_date):
 
 def application(environ, start_response):
     init_db()
+    start_missed_clock_scheduler_once()
     path = environ.get('PATH_INFO', '/')
     method = environ.get('REQUEST_METHOD', 'GET').upper()
     user = get_current_user(environ)
@@ -2660,6 +2661,8 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
 import argparse
 import json
 import re as _re
+import socket
+import threading
 try:
     import boto3
 except Exception:
@@ -2676,6 +2679,19 @@ S3_PUBLIC_BASE_URL = os.getenv('S3_PUBLIC_BASE_URL', '').rstrip('/')
 RESET_TOKEN_HOURS = int(os.getenv('RESET_TOKEN_HOURS', '2'))
 ALLOW_BROWSER_PASSWORD_RESET_LINKS = os.getenv('ALLOW_BROWSER_PASSWORD_RESET_LINKS', '1' if APP_ENV != 'production' else '0') == '1'
 APP_BASE_URL = os.getenv('APP_BASE_URL', '').rstrip('/')
+MISSED_CLOCK_SCHEDULER_ENABLED = os.getenv('MISSED_CLOCK_SCHEDULER_ENABLED', '1') == '1'
+MISSED_CLOCK_SCHEDULER_INTERVAL_SECONDS = int(os.getenv('MISSED_CLOCK_SCHEDULER_INTERVAL_SECONDS', '600'))
+MISSED_CLOCK_SCHEDULER_STALE_SECONDS = int(
+    os.getenv(
+        'MISSED_CLOCK_SCHEDULER_STALE_SECONDS',
+        str(max(MISSED_CLOCK_SCHEDULER_INTERVAL_SECONDS * 2, MISSED_CLOCK_SCHEDULER_INTERVAL_SECONDS + 300)),
+    )
+)
+MISSED_CLOCK_SCHEDULER_LOCK_NAME = 'missed_clock_check_scheduler'
+SCHEDULER_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}"
+_scheduler_start_lock = threading.Lock()
+_missed_clock_scheduler_thread = None
+_missed_clock_scheduler_stop = threading.Event()
 
 
 def parse_cookies(environ):
@@ -3124,6 +3140,101 @@ def run_missed_clock_check_for_companies(company_ids, environ=None):
     return totals
 
 
+def utc_now_string():
+    return datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+
+
+def scheduler_environ():
+    return {
+        'REMOTE_ADDR': '127.0.0.1',
+        'HTTP_USER_AGENT': f'SteeleOpsScheduler/{SCHEDULER_INSTANCE_ID}',
+    }
+
+
+def acquire_scheduler_leadership(lock_name=MISSED_CLOCK_SCHEDULER_LOCK_NAME):
+    conn = db()
+    now_str = utc_now_string()
+    stale_before = (datetime.utcnow() - timedelta(seconds=MISSED_CLOCK_SCHEDULER_STALE_SECONDS)).strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        existing = conn.execute(
+            'SELECT owner_id, heartbeat_at FROM app_runtime_locks WHERE lock_name=?',
+            (lock_name,),
+        ).fetchone() if table_exists(conn, 'app_runtime_locks') else None
+        if not existing:
+            conn.execute(
+                'INSERT INTO app_runtime_locks (lock_name, owner_id, acquired_at, heartbeat_at) VALUES (?, ?, ?, ?)',
+                (lock_name, SCHEDULER_INSTANCE_ID, now_str, now_str),
+            )
+            conn.commit()
+            return True
+        owner_id = (existing['owner_id'] or '').strip()
+        heartbeat_at = (existing['heartbeat_at'] or '').strip()
+        if owner_id == SCHEDULER_INSTANCE_ID or not heartbeat_at or heartbeat_at <= stale_before:
+            conn.execute(
+                'UPDATE app_runtime_locks SET owner_id=?, heartbeat_at=?, acquired_at=CASE WHEN owner_id=? THEN acquired_at ELSE ? END WHERE lock_name=?',
+                (SCHEDULER_INSTANCE_ID, now_str, SCHEDULER_INSTANCE_ID, now_str, lock_name),
+            )
+            conn.commit()
+            return True
+        conn.rollback()
+        return False
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def run_missed_clock_scheduler_cycle():
+    if not acquire_scheduler_leadership():
+        print(
+            f'[missed_clock_scheduler] skipped instance={SCHEDULER_INSTANCE_ID} reason=leader-held-by-another-process',
+            flush=True,
+        )
+        return None
+    company_ids = requested_company_ids({})
+    totals = run_missed_clock_check_for_companies(company_ids, environ=scheduler_environ())
+    print(
+        '[missed_clock_scheduler] ' +
+        f"instance={SCHEDULER_INSTANCE_ID} companies_processed={totals['companies_processed']} " +
+        f"created_count={totals['created_count']} sent_count={totals['sent_count']} " +
+        f"skipped_count={totals['skipped_count']}",
+        flush=True,
+    )
+    return totals
+
+
+def missed_clock_scheduler_loop():
+    print(
+        '[missed_clock_scheduler] ' +
+        f'background thread started instance={SCHEDULER_INSTANCE_ID} interval_seconds={MISSED_CLOCK_SCHEDULER_INTERVAL_SECONDS}',
+        flush=True,
+    )
+    while not _missed_clock_scheduler_stop.is_set():
+        try:
+            run_missed_clock_scheduler_cycle()
+        except Exception as exc:
+            print(f'[missed_clock_scheduler] error instance={SCHEDULER_INSTANCE_ID} detail={exc}', flush=True)
+        if _missed_clock_scheduler_stop.wait(MISSED_CLOCK_SCHEDULER_INTERVAL_SECONDS):
+            break
+
+
+def start_missed_clock_scheduler_once():
+    global _missed_clock_scheduler_thread
+    if not MISSED_CLOCK_SCHEDULER_ENABLED:
+        return False
+    with _scheduler_start_lock:
+        if _missed_clock_scheduler_thread and _missed_clock_scheduler_thread.is_alive():
+            return False
+        _missed_clock_scheduler_thread = threading.Thread(
+            target=missed_clock_scheduler_loop,
+            name='missed-clock-scheduler',
+            daemon=True,
+        )
+        _missed_clock_scheduler_thread.start()
+        return True
+
+
 def run_missed_clock_check(company_id, actor_user_id=None, environ=None):
     conn = db()
     now_dt = datetime.now()
@@ -3232,6 +3343,12 @@ def init_db():
             FOREIGN KEY(actor_user_id) REFERENCES users(id),
             FOREIGN KEY(company_id) REFERENCES companies(id)
         );
+        CREATE TABLE IF NOT EXISTS app_runtime_locks (
+            lock_name TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            acquired_at TEXT NOT NULL,
+            heartbeat_at TEXT NOT NULL
+        );
         ''')
     else:
         conn.cursor().executescript('''
@@ -3257,6 +3374,12 @@ def init_db():
             created_at TEXT NOT NULL,
             FOREIGN KEY(actor_user_id) REFERENCES users(id),
             FOREIGN KEY(company_id) REFERENCES companies(id)
+        );
+        CREATE TABLE IF NOT EXISTS app_runtime_locks (
+            lock_name TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            acquired_at TEXT NOT NULL,
+            heartbeat_at TEXT NOT NULL
         );
         ''')
     if table_exists(conn, 'reports'):
@@ -4022,5 +4145,6 @@ if __name__ == '__main__':
         create_admin_account(args.company, args.username, args.password, args.full_name, args.email); print(f'Created company admin {args.username} for {args.company}.')
     else:
         init_db(); print(f'SteeleOps running on http://{HOST}:{PORT}')
+        start_missed_clock_scheduler_once()
         with make_server(HOST, PORT, application) as httpd:
             httpd.serve_forever()
