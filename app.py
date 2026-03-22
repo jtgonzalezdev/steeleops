@@ -2092,6 +2092,84 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
       <div class="stat card"><div class="stat-label">Checkpoint Logs Today</div><div class="stat-number">{{ stats.checkpoint_logs_today }}</div></div>
     </section>
 
+    {% if user.role in ['company_admin', 'superadmin'] %}
+    <section class="card admin-action-card">
+      <div class="section-head">
+        <div>
+          <h3>Admin · Alert Tools</h3>
+          <div class="small-muted">Trigger the missed clock check and review alert counts without leaving the dashboard.</div>
+        </div>
+      </div>
+      <form id="missed-clock-check-form" class="stack compact">{{ csrf_input|safe }}
+        <div class="actions">
+          <button class="btn primary" type="submit" id="run-missed-clock-check-btn">Run Missed Clock Check</button>
+          <span class="small-muted">Use this to verify alert generation and SMS send attempts.</span>
+        </div>
+      </form>
+      <div id="missed-clock-check-feedback" class="stack compact" hidden></div>
+    </section>
+    <script>
+    (function () {
+      var form = document.getElementById('missed-clock-check-form');
+      if (!form) return;
+      var button = document.getElementById('run-missed-clock-check-btn');
+      var feedback = document.getElementById('missed-clock-check-feedback');
+      function renderMessage(type, html) {
+        feedback.hidden = false;
+        feedback.innerHTML = '<div class="alert ' + type + '">' + html + '</div>';
+      }
+      form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        var csrf = form.querySelector('input[name="csrf_token"]');
+        var originalLabel = button.textContent;
+        button.disabled = true;
+        button.textContent = 'Running...';
+        fetch('/admin/run-missed-clock-check', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+          body: new URLSearchParams({ csrf_token: csrf ? csrf.value : '' }).toString()
+        })
+          .then(function (response) {
+            return response.text().then(function (body) {
+              var data = {};
+              if (body) {
+                try { data = JSON.parse(body); } catch (error) {
+                  if (!response.ok) throw new Error('Request failed.');
+                  throw new Error('Unexpected response from server.');
+                }
+              }
+              if (!response.ok) {
+                throw new Error((data && (data.error || data.message)) || 'Request failed.');
+              }
+              return data;
+            });
+          })
+          .then(function (data) {
+            var alerts = Array.isArray(data.alerts) ? data.alerts : [];
+            var items = alerts.length
+              ? '<ul class="result-list">' + alerts.map(function (alert) { return '<li>' + alert + '</li>'; }).join('') + '</ul>'
+              : '<div class="small-muted">No new missed clock alerts were created.</div>';
+            renderMessage('success',
+              '<strong>Missed clock check completed.</strong>' +
+              '<div class="result-grid">' +
+                '<div><span class="small-muted">Alerts created</span><strong>' + (data.created_count || 0) + '</strong></div>' +
+                '<div><span class="small-muted">SMS sent</span><strong>' + (data.sent_count || 0) + '</strong></div>' +
+                '<div><span class="small-muted">Skipped</span><strong>' + (data.skipped_count || 0) + '</strong></div>' +
+              '</div>' + items
+            );
+          })
+          .catch(function (error) {
+            renderMessage('error', '<strong>Unable to run missed clock check.</strong><div>' + error.message + '</div>');
+          })
+          .finally(function () {
+            button.disabled = false;
+            button.textContent = originalLabel;
+          });
+      });
+    }());
+    </script>
+    {% endif %}
+
     <section class="grid two-col">
       <div class="card">
         <div class="section-head"><h3>{{ schedule_view.title() }} Schedule View</h3><span>{{ range_start }} to {{ range_end }}</span></div>
@@ -3384,6 +3462,11 @@ STYLES_CSS += r'''
 .fallback-card summary { cursor: pointer; font-weight: 600; }
 .top-gap { margin-top: 12px; }
 .subtle-card { background: rgba(255,255,255,.02); border: 1px solid var(--line); border-radius: 18px; }
+.admin-action-card .section-head { align-items: flex-start; }
+.result-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+.result-grid > div { padding: 12px; border-radius: 14px; border: 1px solid var(--line); background: rgba(255,255,255,.03); display: grid; gap: 4px; }
+.result-grid strong { font-size: 1.2rem; }
+.result-list { margin: 12px 0 0; padding-left: 18px; display: grid; gap: 6px; }
 '''
 
 
@@ -3831,10 +3914,11 @@ def application(environ, start_response):
         user, response = require_admin(environ, start_response)
         if response: return response
         return app_page(environ, start_response, user, 'reports.html', active_path='/reports', view='week', title='Reports')
-    if path in {'/admin/run-missed-clock-check', '/admin/run-missed-clock-check/'} and method in {'GET', 'POST'}:
+    if path in {'/admin/run-missed-clock-check', '/admin/run-missed-clock-check/'} and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
-        return json_response(start_response, run_missed_clock_check(user['company_id'], actor_user_id=user['id'], environ=environ))
+        result = run_missed_clock_check(user['company_id'], actor_user_id=user['id'], environ=environ)
+        return json_response(start_response, result)
     if path in {'/payroll', '/admin/payroll'}:
         user, response = require_admin(environ, start_response)
         if response: return response
