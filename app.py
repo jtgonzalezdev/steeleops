@@ -54,8 +54,13 @@ env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=select_autoe
 def ensure_assets():
     templates = {
         'layout.html': LAYOUT_HTML,
+        'app_shell.html': APP_SHELL_HTML,
         'login.html': LOGIN_HTML,
         'dashboard.html': DASHBOARD_HTML,
+        'schedule.html': SCHEDULE_HTML,
+        'guards.html': GUARDS_HTML,
+        'reports.html': REPORTS_HTML,
+        'payroll.html': PAYROLL_HTML,
         'profile.html': PROFILE_HTML,
     }
     for name, content in templates.items():
@@ -1112,7 +1117,7 @@ def sidebar_nav_items(user, active_path):
     return items
 
 
-def dashboard_page(environ, start_response, user, active_path='/dashboard', view='week', title='SteeleOps Control Center', **extra_context):
+def app_page(environ, start_response, user, template_name, active_path='/dashboard', view='week', title='SteeleOps Control Center', **extra_context):
     context = get_dashboard_context(user, view)
     context.update(extra_context)
     context.setdefault('active_path', active_path)
@@ -1120,9 +1125,13 @@ def dashboard_page(environ, start_response, user, active_path='/dashboard', view
     context.setdefault('page_title', title)
     return html_response(
         start_response,
-        render_page(environ, 'dashboard.html', title=title, user=user, **context),
+        render_page(environ, template_name, title=title, user=user, **context),
         extra_headers=csrf_headers(environ),
     )
+
+
+def dashboard_page(environ, start_response, user, active_path='/dashboard', view='week', title='SteeleOps Control Center', **extra_context):
+    return app_page(environ, start_response, user, 'dashboard.html', active_path=active_path, view=view, title=title, **extra_context)
 
 
 def profile_page(environ, start_response, user, message=None, error=None):
@@ -2040,7 +2049,7 @@ LOGIN_HTML = r'''{% extends "layout.html" %}
 </div>
 {% endblock %}'''
 
-DASHBOARD_HTML = r'''{% extends "layout.html" %}
+APP_SHELL_HTML = r'''{% extends "layout.html" %}
 {% block body %}
 <div class="app-shell">
   <aside class="sidebar">
@@ -2069,6 +2078,13 @@ DASHBOARD_HTML = r'''{% extends "layout.html" %}
       <div class="user-chip">{{ user.full_name }} · {{ user.role.replace('_', ' ').title() }}</div>
     </section>
 
+    {% block page_content %}{% endblock %}
+  </main>
+</div>
+{% endblock %}'''
+
+DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
+{% block page_content %}
     <section class="grid stats-grid">
       <div class="stat card"><div class="stat-label">Guards On Duty</div><div class="stat-number">{{ stats.guards_on_duty }}</div></div>
       <div class="stat card"><div class="stat-label">Open Incidents</div><div class="stat-number">{{ stats.open_incidents }}</div></div>
@@ -2204,6 +2220,153 @@ DASHBOARD_HTML = r'''{% extends "layout.html" %}
       {% endif %}
     </section>
 
+    {% if user.role in ['company_admin', 'superadmin'] %}
+    <section class="grid two-col">
+      <div class="card">
+        <div class="section-head"><h3>Admin · Guards & Sites</h3><span>Create accounts and posts</span></div>
+        <form method="post" action="/admin/guard/new" class="stack compact">
+          <h4>Create Guard Account</h4>
+          <div class="row-2"><label>Full Name<input type="text" name="full_name" required></label><label>Username<input type="text" name="username" required></label></div>
+          <div class="row-2"><label>Password<input type="text" name="password" value="guard123"></label><label>Hourly Rate<input type="number" step="0.01" name="hourly_rate" value="18.00"></label></div>
+          <div class="row-3"><label>Email<input type="email" name="email"></label><label>Phone<input type="text" name="phone"></label><label>License #<input type="text" name="license_number"></label></div>
+          <button class="btn primary" type="submit">Create Guard</button>
+        </form>
+        <hr>
+        <form method="post" action="/admin/client/new" class="stack compact">
+          <h4>Create Client</h4>
+          <div class="row-2"><label>Client Name<input type="text" name="name" required></label><label>Contact Name<input type="text" name="contact_name"></label></div>
+          <div class="row-2"><label>Contact Email<input type="email" name="contact_email"></label><label>Contact Phone<input type="text" name="contact_phone"></label></div>
+          <label>Notes<textarea name="notes" rows="2"></textarea></label>
+          <button class="btn" type="submit">Add Client</button>
+        </form>
+        <hr>
+        <form method="post" action="/admin/site/new" class="stack compact">
+          <h4>Create Site</h4>
+          <div class="row-2"><label>Site Name<input type="text" name="name" required></label><label>Client<select name="client_id"><option value="">None</option>{% for client in clients %}<option value="{{ client.id }}">{{ client.name }}</option>{% endfor %}</select></label></div>
+          <label>Client Company Name<input type="text" name="client_company_name"></label>
+          <label>Address<input type="text" name="address"></label>
+          <label>Notes<textarea name="notes" rows="2"></textarea></label>
+          <button class="btn" type="submit">Add Site</button>
+        </form>
+      </div>
+      <div class="card">
+        <div class="section-head"><h3>Admin · Branding</h3><span>Company controls</span></div>
+        <form method="post" action="/admin/company/logo" enctype="multipart/form-data" class="stack compact">
+          <label>Upload Company Logo<input type="file" name="logo" accept="image/*"></label>
+          <button class="btn" type="submit">Save Logo</button>
+        </form>
+      </div>
+    </section>
+    {% endif %}
+
+    {% if user.role in ['company_admin', 'superadmin'] %}
+    <section class="card">
+      <div class="section-head"><h3>Pending Time Corrections</h3><span>Approval queue</span></div>
+      {% for item in time_corrections %}
+      <div class="list-item detailed">
+        <div>
+          <strong>{{ item.requested_by_name }}</strong>
+          <div class="small-muted">Shift {{ item.shift_date }} {{ item.start_time }}-{{ item.end_time }}</div>
+          <div class="small-muted">Requested: {{ item.requested_clock_in }} → {{ item.requested_clock_out }}</div>
+        </div>
+        <div class="actions">
+          <span class="badge {{ item.status }}">{{ item.status }}</span>
+          {% if item.status == 'pending' %}
+          <form method="post" action="/time-correction/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="approved"><button class="btn">Approve</button></form>
+          <form method="post" action="/time-correction/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="declined"><button class="btn ghost">Decline</button></form>
+          {% endif %}
+        </div>
+      </div>
+      {% else %}<div class="empty">No pending time corrections.</div>{% endfor %}
+    </section>
+    {% endif %}
+{% endblock %}'''
+
+SCHEDULE_HTML = r'''{% extends "app_shell.html" %}
+{% block page_content %}
+    <section class="grid two-col">
+      <div class="card">
+        <div class="section-head"><h3>{{ schedule_view.title() }} Schedule View</h3><span>{{ range_start }} to {{ range_end }}</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Date</th><th>Time</th><th>Guard</th><th>Site</th><th>Status</th><th>Hours</th></tr></thead>
+            <tbody>
+            {% for shift in schedule_rows %}
+              <tr>
+                <td>{{ shift.shift_date }}</td>
+                <td>{{ shift.start_time }} - {{ shift.end_time }}</td>
+                <td>{{ shift.full_name or 'Open Shift' }}</td>
+                <td>{{ shift.site_name }}</td>
+                <td><span class="badge {{ shift.status }}">{{ shift.status }}</span></td>
+                <td>{{ shift.worked_hours or shift.scheduled_hours }}</td>
+              </tr>
+            {% else %}<tr><td colspan="6">No schedule rows in this view.</td></tr>{% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="section-head"><h3>Open Shift Alerts</h3><span>Unassigned coverage needs</span></div>
+        {% for shift in open_shift_alerts %}
+          <div class="list-item"><strong>{{ shift.site_name }}</strong><span>{{ shift.shift_date }} · {{ shift.start_time }}-{{ shift.end_time }}</span></div>
+        {% else %}<div class="empty">No open shift alerts.</div>{% endfor %}
+        {% if user.role == 'guard' %}
+        <hr>
+        <form method="post" action="/shift/claim" class="stack compact">
+          <h4>Claim Open Shift</h4>
+          <label>Open Shift<select name="shift_id">{% for shift in my_open_shift_options %}<option value="{{ shift.id }}">{{ shift.shift_date }} · {{ shift.site_name }} · {{ shift.start_time }}-{{ shift.end_time }}</option>{% endfor %}</select></label>
+          <button class="btn" type="submit" {% if not my_open_shift_options %}disabled{% endif %}>Claim Shift</button>
+        </form>
+        {% endif %}
+        {% if user.role in ['company_admin', 'superadmin'] %}
+        <hr>
+        <form method="post" action="/admin/shift/new" class="stack compact">
+          <h4>Create Shift</h4>
+          <label>Site<select name="site_id">{% for site in sites %}<option value="{{ site.id }}">{{ site.name }}</option>{% endfor %}</select></label>
+          <label>Assign Guard<select name="user_id"><option value="">Open Shift</option>{% for guard in guards %}<option value="{{ guard.id }}">{{ guard.full_name }}</option>{% endfor %}</select></label>
+          <div class="row-2"><label>Date<input type="date" name="shift_date" required></label><label>Start<input type="time" name="start_time" required></label></div>
+          <div class="row-2"><label>End<input type="time" name="end_time" required></label><label>Notes<input type="text" name="notes"></label></div>
+          <button class="btn primary" type="submit">Create Shift</button>
+        </form>
+        {% endif %}
+      </div>
+    </section>
+{% endblock %}'''
+
+GUARDS_HTML = r'''{% extends "app_shell.html" %}
+{% block page_content %}
+    <section class="card" id="guards">
+      <div class="section-head"><h3>Guards</h3><span>View, add, edit, and assign</span></div>
+      <form method="post" action="/admin/guards/new" class="stack compact">
+        <h4>Add Guard</h4>
+        <div class="row-2"><label>First Name<input type="text" name="first_name" required></label><label>Last Name<input type="text" name="last_name" required></label></div>
+        <div class="row-3"><label>Email<input type="email" name="email" placeholder="Used for the guard login if you create one"></label><label>Phone<input type="text" name="phone"></label><label>License #<input type="text" name="license_number"></label></div>
+        <div class="row-3"><label>Status<select name="status"><option value="active">active</option><option value="inactive">inactive</option></select></label><label>Training Status<input type="text" name="training_status" placeholder="pending"></label><label>Rating<input type="number" step="0.1" min="1" max="5" name="rating" value="5"></label></div>
+        <div class="row-3"><label>Username<input type="text" name="username" placeholder="Optional login username"></label><label>Temporary Password<input type="text" name="temporary_password" placeholder="Required when creating a login"></label><label>Set PIN<input type="text" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="4-digit PIN"></label></div>
+        <div class="helper-links inline-tools"><button class="btn ghost" type="submit" name="generate_pin" value="1">Generate random PIN</button><span class="small-muted">PIN is hashed and used by quick login.</span></div>
+        <button class="btn primary" type="submit">Add Guard</button>
+      </form>
+      <hr>
+      {% for guard in guards_module_rows %}
+      <div class="list-item detailed">
+        <div>
+          <strong>{{ guard.first_name }} {{ guard.last_name }}</strong>
+          <div class="small-muted">{{ guard.email or 'No email' }} · {{ guard.phone or 'No phone' }} · {{ guard.status }} · {{ guard.training_status or 'training n/a' }} · Rating {{ guard.rating or 5 }}</div>
+          <div class="small-muted">Assigned Site: {{ guard.assigned_site_name or 'Unassigned' }}</div>
+          <div class="small-muted">Login: {% if guard.login_user_id %}{{ guard.login_username }}{% if guard.login_email %} · {{ guard.login_email }}{% endif %}{% else %}No login account yet{% endif %}</div>
+          <div class="small-muted">Quick PIN: {% if guard.login_pin_hash %}Configured{% else %}Not set{% endif %}</div>
+        </div>
+        <div class="actions vertical">
+          <form method="post" action="/admin/guard/update" class="inline-form"><input type="hidden" name="guard_id" value="{{ guard.id }}"><input type="text" name="first_name" value="{{ guard.first_name }}" placeholder="First" required><input type="text" name="last_name" value="{{ guard.last_name }}" placeholder="Last" required><input type="email" name="email" value="{{ guard.login_email or guard.email or '' }}" placeholder="Email"><input type="text" name="phone" value="{{ guard.phone or '' }}" placeholder="Phone"><input type="text" name="license_number" value="{{ guard.license_number or '' }}" placeholder="License #"><select name="status"><option value="active" {% if guard.status == 'active' %}selected{% endif %}>active</option><option value="inactive" {% if guard.status == 'inactive' %}selected{% endif %}>inactive</option></select><input type="text" name="training_status" value="{{ guard.training_status or '' }}" placeholder="Training"><label>Assigned Site<select name="site_id"><option value="">Unassigned</option>{% for site in active_sites %}<option value="{{ site.id }}" {% if guard.site_id == site.id %}selected{% endif %}>{{ site.name }}</option>{% endfor %}</select></label><input type="text" name="username" value="{{ guard.login_username or '' }}" placeholder="Username"><input type="text" name="temporary_password" placeholder="Temporary password"><input type="text" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="Set PIN"><button class="btn ghost" type="submit" name="generate_pin" value="1">Generate PIN</button><button class="btn" type="submit">Save</button></form>
+          {% if guard.status == 'active' %}<form method="post" action="/admin/guard/deactivate" class="inline-form"><input type="hidden" name="guard_id" value="{{ guard.id }}"><button class="btn ghost" type="submit">Deactivate</button></form>{% endif %}
+        </div>
+      </div>
+      {% else %}<div class="empty">No guards added yet.</div>{% endfor %}
+    </section>
+{% endblock %}'''
+
+REPORTS_HTML = r'''{% extends "app_shell.html" %}
+{% block page_content %}
     <section class="grid two-col">
       <div class="card">
         <div class="section-head"><h3>Incident & Daily Reports</h3><span>Photo upload supported for incidents</span></div>
@@ -2238,179 +2401,41 @@ DASHBOARD_HTML = r'''{% extends "layout.html" %}
         {% else %}<div class="empty">No reports yet.</div>{% endfor %}
       </div>
     </section>
+{% endblock %}'''
 
+PAYROLL_HTML = r'''{% extends "app_shell.html" %}
+{% block page_content %}
     <section class="grid two-col">
       <div class="card">
-        <div class="section-head"><h3>Patrol Checkpoints</h3><span>Mobile-friendly check-ins</span></div>
-        <form method="post" action="/checkpoint/new" class="stack compact">
-          <label>Site<select name="site_id">{% for site in sites %}<option value="{{ site.id }}">{{ site.name }}</option>{% endfor %}</select></label>
-          <div class="row-2"><label>Checkpoint Name<input type="text" name="checkpoint_name" required></label><label>Time<input type="datetime-local" name="check_time"></label></div>
-          <label>Notes<textarea name="notes" rows="3"></textarea></label>
-          <button class="btn" type="submit">Check In</button>
-        </form>
-        <hr>
-        {% for cp in checkpoints %}<div class="list-item detailed"><div><strong>{{ cp.checkpoint_name }}</strong><div class="small-muted">{{ cp.site_name }} · {{ cp.full_name }}</div></div><span>{{ cp.check_time }}</span></div>{% else %}<div class="empty">No checkpoint activity yet.</div>{% endfor %}
-      </div>
-      <div class="card">
-        <div class="section-head"><h3>Shift Swaps</h3><span>Requests and approvals</span></div>
-        <form method="post" action="/swap/request" class="stack compact">
-          <label>Shift<select name="shift_id">{% for shift in shifts[:12] if shift.user_id %}<option value="{{ shift.id }}">{{ shift.shift_date }} · {{ shift.site_name }} · {{ shift.start_time }}</option>{% endfor %}</select></label>
-          <label>Swap With<select name="requested_to"><option value="">Open request</option>{% for guard in guards %}<option value="{{ guard.id }}">{{ guard.full_name }}</option>{% endfor %}</select></label>
-          <label>Notes<textarea name="notes" rows="2"></textarea></label>
-          <button class="btn" type="submit">Submit Swap Request</button>
-        </form>
-        <hr>
-        {% for request in swap_requests %}
-          <div class="list-item detailed">
-            <div><strong>{{ request.site_name }}</strong><div class="small-muted">{{ request.shift_date }} · {{ request.start_time }}-{{ request.end_time }} · {{ request.requested_by_name }}</div></div>
-            <div class="actions">
-              <span class="badge {{ request.status }}">{{ request.status }}</span>
-              {% if user.role in ['company_admin', 'superadmin'] and request.status == 'pending' %}
-                <form method="post" action="/swap/approve"><input type="hidden" name="request_id" value="{{ request.id }}"><input type="hidden" name="decision" value="approved"><button class="btn">Approve</button></form>
-                <form method="post" action="/swap/approve"><input type="hidden" name="request_id" value="{{ request.id }}"><input type="hidden" name="decision" value="declined"><button class="btn ghost">Decline</button></form>
-              {% endif %}
-            </div>
-          </div>
-        {% else %}<div class="empty">No swap requests.</div>{% endfor %}
-      </div>
-    </section>
-
-    {% if user.role in ['company_admin', 'superadmin'] %}
-    <section class="grid two-col">
-      <div class="card">
-        <div class="section-head"><h3>Admin · Guards & Sites</h3><span>Create accounts and posts</span></div>
-        <form method="post" action="/admin/guard/new" class="stack compact">
-          <h4>Create Guard Account</h4>
-          <div class="row-2"><label>Full Name<input type="text" name="full_name" required></label><label>Username<input type="text" name="username" required></label></div>
-          <div class="row-2"><label>Password<input type="text" name="password" value="guard123"></label><label>Hourly Rate<input type="number" step="0.01" name="hourly_rate" value="18.00"></label></div>
-          <div class="row-3"><label>Email<input type="email" name="email"></label><label>Phone<input type="text" name="phone"></label><label>License #<input type="text" name="license_number"></label></div>
-          <button class="btn primary" type="submit">Create Guard</button>
-        </form>
-        <hr>
-        <form method="post" action="/admin/client/new" class="stack compact">
-          <h4>Create Client</h4>
-          <div class="row-2"><label>Client Name<input type="text" name="name" required></label><label>Contact Name<input type="text" name="contact_name"></label></div>
-          <div class="row-2"><label>Contact Email<input type="email" name="contact_email"></label><label>Contact Phone<input type="text" name="contact_phone"></label></div>
-          <label>Notes<textarea name="notes" rows="2"></textarea></label>
-          <button class="btn" type="submit">Add Client</button>
-        </form>
-        <hr>
-        <form method="post" action="/admin/site/new" class="stack compact">
-          <h4>Create Site</h4>
-          <div class="row-2"><label>Site Name<input type="text" name="name" required></label><label>Client<select name="client_id"><option value="">None</option>{% for client in clients %}<option value="{{ client.id }}">{{ client.name }}</option>{% endfor %}</select></label></div>
-          <label>Client Company Name<input type="text" name="client_company_name"></label>
-          <label>Address<input type="text" name="address"></label>
-          <label>Notes<textarea name="notes" rows="2"></textarea></label>
-          <button class="btn" type="submit">Add Site</button>
-        </form>
-      </div>
-      <div class="card">
-        <div class="section-head"><h3>Admin · Branding & Payroll</h3><span>Company controls</span></div>
-        <form method="post" action="/admin/company/logo" enctype="multipart/form-data" class="stack compact">
-          <label>Upload Company Logo<input type="file" name="logo" accept="image/*"></label>
-          <button class="btn" type="submit">Save Logo</button>
-        </form>
-        <hr>
+        <div class="section-head"><h3>Payroll Reporting</h3><span>Generate payroll-ready totals without dashboard widgets</span></div>
         <form method="get" action="/admin/payroll" class="stack compact">
           <div class="row-2"><label>Pay Period Start<input type="date" name="start" value="{{ payroll_start or '' }}"></label><label>Pay Period End<input type="date" name="end" value="{{ payroll_end or '' }}"></label></div>
           <button class="btn primary" type="submit">Generate Payroll Report</button>
         </form>
+        <div class="small-muted">Use this page to review payroll totals and export the CSV for your selected pay period.</div>
+      </div>
+      <div class="card">
+        <div class="section-head"><h3>Payroll Export</h3><span>Download payroll data for your accounting workflow</span></div>
         {% if payroll_rows is defined %}
-        <div class="table-wrap slim-gap">
-          <table>
-            <thead><tr><th>Guard</th><th>Hours</th><th>OT</th><th>Rate</th><th>Gross</th></tr></thead>
-            <tbody>{% for row in payroll_rows %}<tr><td>{{ row.full_name }}</td><td>{{ row.total_hours }}</td><td>{{ row.overtime_hours }}</td><td>${{ '%.2f'|format(row.hourly_rate or 0) }}</td><td>${{ '%.2f'|format(row.gross_pay or 0) }}</td></tr>{% endfor %}</tbody>
-          </table>
-        </div>
         <a class="btn" href="/admin/payroll/export.csv?start={{ payroll_start }}&end={{ payroll_end }}">Export Payroll CSV</a>
-        {% endif %}
+        {% else %}<div class="empty">Choose a pay period to enable CSV export.</div>{% endif %}
       </div>
     </section>
-    {% endif %}
-
-    {% if user.role in ['company_admin', 'superadmin'] %}
-    <section class="card" id="guards">
-      <div class="section-head"><h3>Guards</h3><span>View, add, edit, and assign</span></div>
-      <form method="post" action="/admin/guards/new" class="stack compact">
-        <h4>Add Guard</h4>
-        <div class="row-2"><label>First Name<input type="text" name="first_name" required></label><label>Last Name<input type="text" name="last_name" required></label></div>
-        <div class="row-3"><label>Email<input type="email" name="email" placeholder="Used for the guard login if you create one"></label><label>Phone<input type="text" name="phone"></label><label>License #<input type="text" name="license_number"></label></div>
-        <div class="row-3"><label>Status<select name="status"><option value="active">active</option><option value="inactive">inactive</option></select></label><label>Training Status<input type="text" name="training_status" placeholder="pending"></label><label>Rating<input type="number" step="0.1" min="1" max="5" name="rating" value="5"></label></div>
-        <div class="row-3"><label>Username<input type="text" name="username" placeholder="Optional login username"></label><label>Temporary Password<input type="text" name="temporary_password" placeholder="Required when creating a login"></label><label>Set PIN<input type="text" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="4-digit PIN"></label></div>
-        <div class="helper-links inline-tools"><button class="btn ghost" type="submit" name="generate_pin" value="1">Generate random PIN</button><span class="small-muted">PIN is hashed and used by quick login.</span></div>
-        <button class="btn primary" type="submit">Add Guard</button>
-      </form>
-      <hr>
-      {% for guard in guards_module_rows %}
-      <div class="list-item detailed">
-        <div>
-          <strong>{{ guard.first_name }} {{ guard.last_name }}</strong>
-          <div class="small-muted">{{ guard.email or 'No email' }} · {{ guard.phone or 'No phone' }} · {{ guard.status }} · {{ guard.training_status or 'training n/a' }} · Rating {{ guard.rating or 5 }}</div>
-          <div class="small-muted">Assigned Site: {{ guard.assigned_site_name or 'Unassigned' }}</div>
-          <div class="small-muted">Login: {% if guard.login_user_id %}{{ guard.login_username }}{% if guard.login_email %} · {{ guard.login_email }}{% endif %}{% else %}No login account yet{% endif %}</div>
-          <div class="small-muted">Quick PIN: {% if guard.login_pin_hash %}Configured{% else %}Not set{% endif %}</div>
-        </div>
-        <div class="actions vertical">
-          <form method="post" action="/admin/guard/update" class="inline-form"><input type="hidden" name="guard_id" value="{{ guard.id }}"><input type="text" name="first_name" value="{{ guard.first_name }}" placeholder="First" required><input type="text" name="last_name" value="{{ guard.last_name }}" placeholder="Last" required><input type="email" name="email" value="{{ guard.login_email or guard.email or '' }}" placeholder="Email"><input type="text" name="phone" value="{{ guard.phone or '' }}" placeholder="Phone"><input type="text" name="license_number" value="{{ guard.license_number or '' }}" placeholder="License #"><select name="status"><option value="active" {% if guard.status == 'active' %}selected{% endif %}>active</option><option value="inactive" {% if guard.status == 'inactive' %}selected{% endif %}>inactive</option></select><input type="text" name="training_status" value="{{ guard.training_status or '' }}" placeholder="Training"><label>Assigned Site<select name="site_id"><option value="">Unassigned</option>{% for site in active_sites %}<option value="{{ site.id }}" {% if guard.site_id == site.id %}selected{% endif %}>{{ site.name }}</option>{% endfor %}</select></label><input type="text" name="username" value="{{ guard.login_username or '' }}" placeholder="Username"><input type="text" name="temporary_password" placeholder="Temporary password"><input type="text" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="Set PIN"><button class="btn ghost" type="submit" name="generate_pin" value="1">Generate PIN</button><button class="btn" type="submit">Save</button></form>
-          {% if guard.status == 'active' %}<form method="post" action="/admin/guard/deactivate" class="inline-form"><input type="hidden" name="guard_id" value="{{ guard.id }}"><button class="btn ghost" type="submit">Deactivate</button></form>{% endif %}
-        </div>
-      </div>
-      {% else %}<div class="empty">No guards added yet.</div>{% endfor %}
-    </section>
-    {% endif %}
-
-    {% if user.role in ['company_admin', 'superadmin'] %}
     <section class="card">
-      <div class="section-head"><h3>Pending Time Corrections</h3><span>Approval queue</span></div>
-      {% for item in time_corrections %}
-      <div class="list-item detailed">
-        <div>
-          <strong>{{ item.requested_by_name }}</strong>
-          <div class="small-muted">Shift {{ item.shift_date }} {{ item.start_time }}-{{ item.end_time }}</div>
-          <div class="small-muted">Requested: {{ item.requested_clock_in }} → {{ item.requested_clock_out }}</div>
-        </div>
-        <div class="actions">
-          <span class="badge {{ item.status }}">{{ item.status }}</span>
-          {% if item.status == 'pending' %}
-          <form method="post" action="/time-correction/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="approved"><button class="btn">Approve</button></form>
-          <form method="post" action="/time-correction/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="declined"><button class="btn ghost">Decline</button></form>
-          {% endif %}
-        </div>
+      <div class="section-head"><h3>Payroll Summary</h3><span>{{ payroll_start or 'Select a start date' }}{% if payroll_end %} to {{ payroll_end }}{% endif %}</span></div>
+      {% if payroll_rows is defined %}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Guard</th><th>Hours</th><th>OT</th><th>Rate</th><th>Gross</th></tr></thead>
+          <tbody>{% for row in payroll_rows %}<tr><td>{{ row.full_name }}</td><td>{{ row.total_hours }}</td><td>{{ row.overtime_hours }}</td><td>${{ '%.2f'|format(row.hourly_rate or 0) }}</td><td>${{ '%.2f'|format(row.gross_pay or 0) }}</td></tr>{% else %}<tr><td colspan="5">No payroll rows found for this period.</td></tr>{% endfor %}</tbody>
+        </table>
       </div>
-      {% else %}<div class="empty">No pending time corrections.</div>{% endfor %}
+      {% else %}<div class="empty">Generate a report to view payroll totals.</div>{% endif %}
     </section>
-    {% endif %}
-  </main>
-</div>
 {% endblock %}'''
 
-PROFILE_HTML = r'''{% extends "layout.html" %}
-{% block body %}
-<div class="app-shell">
-  <aside class="sidebar">
-    <div class="sidebar-brand">
-      {% if user.company_logo %}<img src="/{{ user.company_logo }}" class="company-logo">{% else %}<div class="logo-box small">S</div>{% endif %}
-      <div>
-        <div class="eyebrow">SteeleOps</div>
-        <h2>Control Center</h2>
-        <div class="small-muted">{{ user.company_name or 'Platform' }}</div>
-      </div>
-    </div>
-    <div class="nav-links">
-      {% for item in nav_items %}
-      <a href="{{ item.href }}" class="{% if item.active %}active{% endif %}">{{ item.label }}</a>
-      {% endfor %}
-    </div>
-  </aside>
-  <main class="content">
-    <section class="topbar card">
-      <div>
-        <div class="eyebrow">SteeleOps Platform</div>
-        <h1>{{ page_title or 'Guard Profile' }}</h1>
-        <p class="small-muted">Security Operations Simplified</p>
-      </div>
-      <div class="user-chip">{{ user.full_name }} · {{ user.role.replace('_', ' ').title() }}</div>
-    </section>
+PROFILE_HTML = r'''{% extends "app_shell.html" %}
+{% block page_content %}
     <div class="grid two-col">
       <div class="card">
         <h3>Profile Details</h3>
@@ -2452,8 +2477,6 @@ PROFILE_HTML = r'''{% extends "layout.html" %}
         </form>
       </div>
     </div>
-  </main>
-</div>
 {% endblock %}'''
 
 STYLES_CSS = r'''
@@ -3152,6 +3175,10 @@ def export_reports_pdf(company_id):
 
 LOGIN_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>\n        {{ csrf_input|safe }}', LOGIN_HTML)
 DASHBOARD_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', DASHBOARD_HTML)
+SCHEDULE_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', SCHEDULE_HTML)
+GUARDS_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', GUARDS_HTML)
+REPORTS_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', REPORTS_HTML)
+PAYROLL_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', PAYROLL_HTML)
 PROFILE_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>\n        {{ csrf_input|safe }}', PROFILE_HTML)
 LOGIN_HTML = LOGIN_HTML.replace('''      <div class="demo-box">
         <strong>Demo Accounts</strong><br>
@@ -3165,9 +3192,9 @@ LOGIN_HTML = LOGIN_HTML.replace('''      <div class="demo-box">
         admin / admin123<br>
         guard1 / guard123
       </div>{% endif %}''')
-DASHBOARD_HTML = DASHBOARD_HTML.replace('src="/{{ user.company_logo }}"', 'src="{{ user.company_logo }}"')
-DASHBOARD_HTML = DASHBOARD_HTML.replace('src="/{{ report.photo_path }}"', 'src="{{ report.photo_path }}"')
-DASHBOARD_HTML = DASHBOARD_HTML.replace('<p>{{ report.summary }}</p>', '<p>{{ report.summary }}</p>{% if report.attachment_path %}<div class="small-muted"><a href="{{ report.attachment_path }}" target="_blank" rel="noopener">Download attachment</a></div>{% endif %}{% if user.role in [\'company_admin\', \'superadmin\'] %}<form method="post" action="/report/update" class="inline-form">{{ csrf_input|safe }}<input type="hidden" name="report_id" value="{{ report.id }}"><select name="status"><option value="open" {% if report.status == \'open\' %}selected{% endif %}>open</option><option value="pending" {% if report.status == \'pending\' %}selected{% endif %}>pending</option><option value="closed" {% if report.status == \'closed\' %}selected{% endif %}>closed</option></select><select name="priority"><option value="low" {% if report.priority == \'low\' %}selected{% endif %}>low</option><option value="medium" {% if report.priority == \'medium\' %}selected{% endif %}>medium</option><option value="high" {% if report.priority == \'high\' %}selected{% endif %}>high</option></select><button class="btn ghost" type="submit">Update</button></form>{% endif %}')
+APP_SHELL_HTML = APP_SHELL_HTML.replace('src="/{{ user.company_logo }}"', 'src="{{ user.company_logo }}"')
+REPORTS_HTML = REPORTS_HTML.replace('src="/{{ report.photo_path }}"', 'src="{{ report.photo_path }}"')
+REPORTS_HTML = REPORTS_HTML.replace('<p>{{ report.summary }}</p>', '<p>{{ report.summary }}</p>{% if report.attachment_path %}<div class="small-muted"><a href="{{ report.attachment_path }}" target="_blank" rel="noopener">Download attachment</a></div>{% endif %}{% if user.role in [\'company_admin\', \'superadmin\'] %}<form method="post" action="/report/update" class="inline-form">{{ csrf_input|safe }}<input type="hidden" name="report_id" value="{{ report.id }}"><select name="status"><option value="open" {% if report.status == \'open\' %}selected{% endif %}>open</option><option value="pending" {% if report.status == \'pending\' %}selected{% endif %}>pending</option><option value="closed" {% if report.status == \'closed\' %}selected{% endif %}>closed</option></select><select name="priority"><option value="low" {% if report.priority == \'low\' %}selected{% endif %}>low</option><option value="medium" {% if report.priority == \'medium\' %}selected{% endif %}>medium</option><option value="high" {% if report.priority == \'high\' %}selected{% endif %}>high</option></select><button class="btn ghost" type="submit">Update</button></form>{% endif %}')
 PROFILE_HTML = PROFILE_HTML.replace('<h3>Change Password</h3>', '<h3>Change Password</h3><div class="small-muted">You can also use the password reset flow from the login screen.</div>')
 PASSWORD_RESET_REQUEST_HTML = r'''{% extends "layout.html" %}
 {% block body %}
@@ -3362,7 +3389,7 @@ STYLES_CSS += r'''
 
 def ensure_assets():
     env.cache.clear()
-    templates = {'layout.html': LAYOUT_HTML, 'login.html': LOGIN_HTML, 'dashboard.html': DASHBOARD_HTML, 'profile.html': PROFILE_HTML, 'password_reset_request.html': PASSWORD_RESET_REQUEST_HTML, 'password_reset_form.html': PASSWORD_RESET_FORM_HTML, 'guard_login_list.html': GUARD_LOGIN_LIST_HTML, 'guard_login_site_list.html': GUARD_LOGIN_SITE_LIST_HTML, 'guard_login_guard_list.html': GUARD_LOGIN_GUARD_LIST_HTML, 'guard_login_password.html': GUARD_LOGIN_PASSWORD_HTML}
+    templates = {'layout.html': LAYOUT_HTML, 'app_shell.html': APP_SHELL_HTML, 'login.html': LOGIN_HTML, 'dashboard.html': DASHBOARD_HTML, 'schedule.html': SCHEDULE_HTML, 'guards.html': GUARDS_HTML, 'reports.html': REPORTS_HTML, 'payroll.html': PAYROLL_HTML, 'profile.html': PROFILE_HTML, 'password_reset_request.html': PASSWORD_RESET_REQUEST_HTML, 'password_reset_form.html': PASSWORD_RESET_FORM_HTML, 'guard_login_list.html': GUARD_LOGIN_LIST_HTML, 'guard_login_site_list.html': GUARD_LOGIN_SITE_LIST_HTML, 'guard_login_guard_list.html': GUARD_LOGIN_GUARD_LIST_HTML, 'guard_login_password.html': GUARD_LOGIN_PASSWORD_HTML}
     for name, content in templates.items():
         with open(os.path.join(TEMPLATE_DIR, name), 'w', encoding='utf-8') as f:
             f.write(content)
@@ -3539,11 +3566,11 @@ def application(environ, start_response):
     if path == '/weekly-schedule':
         user, response = require_login(environ, start_response)
         if response: return response
-        return dashboard_page(environ, start_response, user, active_path='/weekly-schedule', view='week', title='Weekly Schedule')
+        return app_page(environ, start_response, user, 'schedule.html', active_path='/weekly-schedule', view='week', title='Weekly Schedule')
     if path == '/monthly-schedule':
         user, response = require_login(environ, start_response)
         if response: return response
-        return dashboard_page(environ, start_response, user, active_path='/monthly-schedule', view='month', title='Monthly Schedule')
+        return app_page(environ, start_response, user, 'schedule.html', active_path='/monthly-schedule', view='month', title='Monthly Schedule')
     if path == '/profile':
         user, response = require_login(environ, start_response)
         if response: return response
@@ -3680,7 +3707,7 @@ def application(environ, start_response):
     if path == '/guards':
         user, response = require_admin(environ, start_response)
         if response: return response
-        return dashboard_page(environ, start_response, user, active_path='/guards', view='week', title='Guards')
+        return app_page(environ, start_response, user, 'guards.html', active_path='/guards', view='week', title='Guards')
     if path == '/admin/guards/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
@@ -3803,7 +3830,7 @@ def application(environ, start_response):
     if path == '/reports':
         user, response = require_admin(environ, start_response)
         if response: return response
-        return dashboard_page(environ, start_response, user, active_path='/reports', view='week', title='Reports')
+        return app_page(environ, start_response, user, 'reports.html', active_path='/reports', view='week', title='Reports')
     if path in {'/admin/run-missed-clock-check', '/admin/run-missed-clock-check/'} and method in {'GET', 'POST'}:
         user, response = require_admin(environ, start_response)
         if response: return response
@@ -3811,7 +3838,7 @@ def application(environ, start_response):
     if path in {'/payroll', '/admin/payroll'}:
         user, response = require_admin(environ, start_response)
         if response: return response
-        start_date = query.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat()); end_date = query.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat()); rows = payroll_rows(user['company_id'], start_date, end_date, query.get('guard_id')); return dashboard_page(environ, start_response, user, active_path='/payroll', view='week', title='Payroll', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date)
+        start_date = query.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat()); end_date = query.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat()); rows = payroll_rows(user['company_id'], start_date, end_date, query.get('guard_id')); return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date)
     if path == '/admin/payroll/export.csv':
         user, response = require_admin(environ, start_response)
         if response: return response
