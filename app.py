@@ -44,6 +44,7 @@ SESSION_COOKIE_NAME = os.getenv('SESSION_COOKIE_NAME', 'steeleops_session')
 SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_SECURE', '1' if APP_ENV == 'production' else '0') == '1'
 SESSION_TTL_HOURS = int(os.getenv('SESSION_TTL_HOURS', '24'))
 MAX_UPLOAD_MB = int(os.getenv('MAX_UPLOAD_MB', '8'))
+MISSED_CLOCK_INTERNAL_TOKEN = os.getenv('MISSED_CLOCK_INTERNAL_TOKEN', '').strip()
 USE_POSTGRES = DATABASE_URL.startswith('postgres://') or DATABASE_URL.startswith('postgresql://')
 if DATABASE_URL.startswith('postgres://'):
     DATABASE_URL = 'postgresql://' + DATABASE_URL[len('postgres://'):]
@@ -3065,6 +3066,64 @@ def forbidden(start_response, message='Forbidden'):
     return [message.encode('utf-8')]
 
 
+def require_internal_token(environ):
+    provided = (environ.get('HTTP_X_INTERNAL_TOKEN') or '').strip()
+    if not MISSED_CLOCK_INTERNAL_TOKEN:
+        return False, 'Internal token is not configured.'
+    if not provided:
+        return False, 'Missing internal token.'
+    if not hmac.compare_digest(provided, MISSED_CLOCK_INTERNAL_TOKEN):
+        return False, 'Invalid internal token.'
+    return True, None
+
+
+def requested_company_ids(environ):
+    query = parse_query(environ)
+    company_id = (query.get('company_id') or query.get('company') or '').strip()
+    conn = db()
+    try:
+        if company_id:
+            if not company_id.isdigit():
+                raise ValueError('company_id must be a numeric value.')
+            row = conn.execute('SELECT id FROM companies WHERE id=? LIMIT 1', (int(company_id),)).fetchone()
+            return [row['id']] if row else []
+        rows = conn.execute('SELECT id FROM companies ORDER BY id').fetchall()
+        return [row['id'] for row in rows]
+    finally:
+        conn.close()
+
+
+def run_missed_clock_check_for_companies(company_ids, environ=None):
+    totals = {
+        'companies_processed': 0,
+        'created_count': 0,
+        'sent_count': 0,
+        'skipped_count': 0,
+    }
+    for company_id in company_ids:
+        result = run_missed_clock_check(company_id, actor_user_id=None, environ=environ)
+        totals['companies_processed'] += 1
+        totals['created_count'] += result['created_count']
+        totals['sent_count'] += result['sent_count']
+        totals['skipped_count'] += result['skipped_count']
+    log_audit(
+        'missed_clock_check_scheduled_run',
+        company_id=company_ids[0] if len(company_ids) == 1 else None,
+        target_type='system',
+        target_id='all_companies' if len(company_ids) != 1 else company_ids[0],
+        message='scheduled missed clock check completed',
+        environ=environ,
+        metadata=totals,
+    )
+    print(
+        '[missed_clock_check_scheduled_run] ' +
+        f"companies_processed={totals['companies_processed']} created_count={totals['created_count']} " +
+        f"sent_count={totals['sent_count']} skipped_count={totals['skipped_count']}",
+        flush=True,
+    )
+    return totals
+
+
 def run_missed_clock_check(company_id, actor_user_id=None, environ=None):
     conn = db()
     now_dt = datetime.now()
@@ -3527,9 +3586,10 @@ def application(environ, start_response):
     if path.startswith('/static/') or path.startswith('/uploads/'):
         return serve_static(environ, start_response, path.lstrip('/'))
     if method == 'POST':
-        data, _files = parse_post(environ)
-        if not validate_csrf(environ, data):
-            return forbidden(start_response, 'Invalid or missing CSRF token.')
+        if path not in {'/internal/run-missed-clock-check', '/internal/run-missed-clock-check/'}:
+            data, _files = parse_post(environ)
+            if not validate_csrf(environ, data):
+                return forbidden(start_response, 'Invalid or missing CSRF token.')
     if path == '/':
         return redirect(start_response, '/dashboard' if user else '/login')
     if path == '/login' and method == 'GET':
@@ -3918,6 +3978,16 @@ def application(environ, start_response):
         user, response = require_admin(environ, start_response)
         if response: return response
         result = run_missed_clock_check(user['company_id'], actor_user_id=user['id'], environ=environ)
+        return json_response(start_response, result)
+    if path in {'/internal/run-missed-clock-check', '/internal/run-missed-clock-check/'} and method == 'POST':
+        allowed, error = require_internal_token(environ)
+        if not allowed:
+            return json_response(start_response, {'error': error}, status='403 Forbidden')
+        try:
+            company_ids = requested_company_ids(environ)
+        except ValueError as exc:
+            return json_response(start_response, {'error': str(exc)}, status='400 Bad Request')
+        result = run_missed_clock_check_for_companies(company_ids, environ=environ)
         return json_response(start_response, result)
     if path in {'/payroll', '/admin/payroll'}:
         user, response = require_admin(environ, start_response)
