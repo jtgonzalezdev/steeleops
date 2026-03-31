@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 from datetime import date, datetime, timedelta
 from email.utils import format_datetime
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 from wsgiref.simple_server import make_server
 
 try:
@@ -924,6 +924,9 @@ def init_db():
     if table_exists(conn, 'reports'):
         for col in ['company_id INTEGER', "status TEXT DEFAULT 'open'", "priority TEXT DEFAULT 'medium'", 'photo_name TEXT', 'photo_path TEXT']:
             ensure_column(conn, 'reports', col)
+    if table_exists(conn, 'time_off_requests'):
+        for col in ['reviewed_at TEXT', 'reviewed_by INTEGER']:
+            ensure_column(conn, 'time_off_requests', col)
 
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     if fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM companies') == 0:
@@ -1069,6 +1072,18 @@ def redirect(start_response, location, extra_headers=None):
     return [b'']
 
 
+def redirect_with_feedback(start_response, location, message=None, error=None, extra_headers=None):
+    params = []
+    if message:
+        params.append(('message', message))
+    if error:
+        params.append(('error', error))
+    if params:
+        separator = '&' if '?' in location else '?'
+        location = f"{location}{separator}{urlencode(params)}"
+    return redirect(start_response, location, extra_headers=extra_headers)
+
+
 def bad_request(start_response, message='Bad Request'):
     start_response('400 Bad Request', response_headers(content_type='text/plain; charset=utf-8'))
     return [message.encode('utf-8')]
@@ -1149,11 +1164,14 @@ def sidebar_nav_items(user, active_path):
 
 
 def app_page(environ, start_response, user, template_name, active_path='/dashboard', view='week', title='SteeleOps Control Center', **extra_context):
+    query = parse_query(environ)
     context = get_dashboard_context(user, view)
     context.update(extra_context)
     context.setdefault('active_path', active_path)
     context.setdefault('nav_items', sidebar_nav_items(user, active_path))
     context.setdefault('page_title', title)
+    context.setdefault('flash_message', query.get('message', ''))
+    context.setdefault('flash_error', query.get('error', ''))
     return html_response(
         start_response,
         render_page(environ, template_name, title=title, user=user, **context),
@@ -1469,16 +1487,18 @@ def get_dashboard_context(user, view='week'):
         ORDER BY tc.created_at DESC LIMIT 10
     ''', (company_id,)).fetchall()
     my_time_off_requests = conn.execute('''
-        SELECT tor.*, u.full_name as guard_name
+        SELECT tor.*, u.full_name as guard_name, reviewer.full_name as reviewed_by_name
         FROM time_off_requests tor
         JOIN users u ON tor.guard_id=u.id
+        LEFT JOIN users reviewer ON tor.reviewed_by=reviewer.id
         WHERE tor.company_id=? AND tor.guard_id=?
         ORDER BY tor.created_at DESC
     ''', (company_id, user['id'])).fetchall()
     admin_time_off_requests = conn.execute('''
-        SELECT tor.*, u.full_name as guard_name
+        SELECT tor.*, u.full_name as guard_name, reviewer.full_name as reviewed_by_name
         FROM time_off_requests tor
         JOIN users u ON tor.guard_id=u.id
+        LEFT JOIN users reviewer ON tor.reviewed_by=reviewer.id
         WHERE tor.company_id=?
         ORDER BY tor.created_at DESC
     ''', (company_id,)).fetchall()
@@ -2125,6 +2145,8 @@ APP_SHELL_HTML = r'''{% extends "layout.html" %}
       </div>
       <div class="user-chip">{{ user.full_name }} · {{ user.role.replace('_', ' ').title() }}</div>
     </section>
+    {% if flash_message %}<div class="alert success">{{ flash_message }}</div>{% endif %}
+    {% if flash_error %}<div class="alert error">{{ flash_error }}</div>{% endif %}
 
     {% block page_content %}{% endblock %}
   </main>
@@ -2313,7 +2335,7 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
           <button class="btn" type="submit" {% if not my_shifts %}disabled{% endif %}>Submit Request</button>
         </form>
         <hr>
-        <form method="post" action="/time-off/request" class="stack compact">
+        <form method="post" action="/time-off/request" class="stack compact" onsubmit="this.querySelector('button[type=submit]').disabled=true; this.querySelector('button[type=submit]').textContent='Submitting...';">
           <h4>Time Off Request</h4>
           <div class="row-2"><label>Start Date<input type="date" name="start_date" required></label><label>End Date<input type="date" name="end_date" required></label></div>
           <label>Type<select name="type"><option value="paid">Paid</option><option value="unpaid">Unpaid</option></select></label>
@@ -2328,6 +2350,7 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
               <strong>{{ item.start_date }} → {{ item.end_date }}</strong>
               <div class="small-muted">Type: {{ item.type }}</div>
               {% if item.reason %}<div class="small-muted">Reason: {{ item.reason }}</div>{% endif %}
+              {% if item.reviewed_at %}<div class="small-muted">Reviewed: {{ item.reviewed_at }}{% if item.reviewed_by_name %} by {{ item.reviewed_by_name }}{% endif %}</div>{% endif %}
             </div>
             <div class="actions"><span class="badge {{ item.status }}">{{ item.status }}</span></div>
           </div>
@@ -2433,12 +2456,13 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
           <strong>{{ item.guard_name }}</strong>
           <div class="small-muted">{{ item.start_date }} → {{ item.end_date }} · {{ item.type }}</div>
           {% if item.reason %}<div class="small-muted">Reason: {{ item.reason }}</div>{% endif %}
+          {% if item.reviewed_at %}<div class="small-muted">Reviewed: {{ item.reviewed_at }}{% if item.reviewed_by_name %} by {{ item.reviewed_by_name }}{% endif %}</div>{% endif %}
         </div>
         <div class="actions">
           <span class="badge {{ item.status }}">{{ item.status }}</span>
           {% if item.status == 'pending' %}
-          <form method="post" action="/time-off/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="approved"><button class="btn">Approve</button></form>
-          <form method="post" action="/time-off/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="denied"><button class="btn ghost">Deny</button></form>
+          <form method="post" action="/time-off/approve" onsubmit="return confirm('Approve this time off request?');"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="approved"><button class="btn">Approve</button></form>
+          <form method="post" action="/time-off/approve" onsubmit="return confirm('Deny this time off request?');"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="denied"><button class="btn ghost">Deny</button></form>
           {% endif %}
         </div>
       </div>
@@ -2717,7 +2741,7 @@ th { color: var(--muted); font-size: 13px; font-weight: 600; }
 .badge.open, .badge.assigned, .badge.clocked_in { background: rgba(78,164,255,.14); }
 .badge.pending, .badge.medium { background: rgba(245,158,11,.16); }
 .badge.closed, .badge.completed, .badge.approved, .badge.low { background: rgba(34,197,94,.16); }
-.badge.declined, .badge.high { background: rgba(239,68,68,.16); }
+.badge.declined, .badge.denied, .badge.high { background: rgba(239,68,68,.16); }
 .report-card { padding: 14px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.02); margin-bottom: 12px; }
 .report-top { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
 .report-photo { margin-top: 12px; border-radius: 16px; border: 1px solid var(--line); max-height: 220px; object-fit: cover; width: 100%; }
@@ -4065,42 +4089,55 @@ def application(environ, start_response):
         end_date = (data.get('end_date') or '').strip()
         request_type = (data.get('type') or '').strip().lower()
         if not start_date or not end_date:
-            return bad_request(start_response, 'Start date and end date are required')
+            return redirect_with_feedback(start_response, '/dashboard', error='Start date and end date are required for time off requests.')
         try:
             start_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
             end_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
         except ValueError:
-            return bad_request(start_response, 'Dates must use YYYY-MM-DD format')
+            return redirect_with_feedback(start_response, '/dashboard', error='Dates must use YYYY-MM-DD format.')
         if end_obj < start_obj:
-            return bad_request(start_response, 'End date cannot be before start date')
+            return redirect_with_feedback(start_response, '/dashboard', error='End date cannot be before start date.')
         if request_type not in {'paid', 'unpaid'}:
-            return bad_request(start_response, 'Type must be paid or unpaid')
+            return redirect_with_feedback(start_response, '/dashboard', error='Type must be paid or unpaid.')
         now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         conn = db()
+        duplicate = conn.execute('''
+            SELECT id
+            FROM time_off_requests
+            WHERE company_id=? AND guard_id=? AND start_date=? AND end_date=? AND type=? AND status='pending'
+        ''', (user['company_id'], user['id'], start_date, end_date, request_type)).fetchone()
+        if duplicate:
+            conn.close()
+            return redirect_with_feedback(start_response, '/dashboard', error='A matching pending time off request already exists.')
         conn.execute("INSERT INTO time_off_requests (company_id, guard_id, start_date, end_date, type, reason, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)", (user['company_id'], user['id'], start_date, end_date, request_type, (data.get('reason') or '').strip() or None, now_str, now_str))
         conn.commit(); conn.close()
         log_audit('time_off_request_created', actor_user_id=user['id'], company_id=user['company_id'], target_type='time_off_request', target_id='new', message='time off request submitted', environ=environ, metadata={'start_date': start_date, 'end_date': end_date, 'type': request_type})
-        return redirect(start_response, '/dashboard')
+        return redirect_with_feedback(start_response, '/dashboard', message='Time off request submitted.')
     if path == '/time-off/approve' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
         data, _ = parse_post(environ)
         decision = (data.get('decision') or '').strip().lower()
         if decision not in {'approved', 'denied'}:
-            return bad_request(start_response, 'Decision must be approved or denied')
+            return redirect_with_feedback(start_response, '/dashboard', error='Decision must be approved or denied.')
         conn = db()
         req = conn.execute('SELECT * FROM time_off_requests WHERE id=? AND company_id=?', (data.get('request_id'), user['company_id'])).fetchone()
         if not req:
-            conn.close(); return bad_request(start_response, 'Time off request not found')
-        conn.execute('UPDATE time_off_requests SET status=?, updated_at=? WHERE id=?', (decision, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), req['id']))
+            conn.close(); return redirect_with_feedback(start_response, '/dashboard', error='Time off request not found.')
+        if req['status'] != 'pending':
+            conn.close(); return redirect_with_feedback(start_response, '/dashboard', error='Only pending requests can be reviewed.')
+        reviewed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        conn.execute('UPDATE time_off_requests SET status=?, updated_at=?, reviewed_at=?, reviewed_by=? WHERE id=?', (decision, reviewed_at, reviewed_at, user['id'], req['id']))
         conn.commit(); conn.close()
         log_audit('time_off_request_reviewed', actor_user_id=user['id'], company_id=user['company_id'], target_type='time_off_request', target_id=req['id'], message=f'time off request {decision}', environ=environ)
-        return redirect(start_response, '/dashboard')
+        return redirect_with_feedback(start_response, '/dashboard', message=f"Time off request {decision}.")
     if path in {'/time-off/my', '/api/time-off/my'} and method == 'GET':
         user, response = require_login(environ, start_response)
         if response: return response
+        if user['role'] != 'guard':
+            return json_response(start_response, {'error': 'Only guards can view personal time off requests.'}, status='403 Forbidden')
         conn = db()
-        rows = conn.execute('SELECT id, guard_id, start_date, end_date, type, reason, status, created_at, updated_at FROM time_off_requests WHERE company_id=? AND guard_id=? ORDER BY created_at DESC', (user['company_id'], user['id'])).fetchall()
+        rows = conn.execute('SELECT id, guard_id, start_date, end_date, type, reason, status, created_at, updated_at, reviewed_at, reviewed_by FROM time_off_requests WHERE company_id=? AND guard_id=? ORDER BY created_at DESC', (user['company_id'], user['id'])).fetchall()
         conn.close()
         return json_response(start_response, {'items': [dict(row) for row in rows]})
     if path in {'/time-off/all', '/api/time-off/all'} and method == 'GET':
@@ -4108,9 +4145,10 @@ def application(environ, start_response):
         if response: return response
         conn = db()
         rows = conn.execute('''
-            SELECT tor.id, tor.guard_id, u.full_name as guard_name, tor.start_date, tor.end_date, tor.type, tor.reason, tor.status, tor.created_at, tor.updated_at
+            SELECT tor.id, tor.guard_id, u.full_name as guard_name, tor.start_date, tor.end_date, tor.type, tor.reason, tor.status, tor.created_at, tor.updated_at, tor.reviewed_at, tor.reviewed_by, reviewer.full_name as reviewed_by_name
             FROM time_off_requests tor
             JOIN users u ON tor.guard_id=u.id
+            LEFT JOIN users reviewer ON tor.reviewed_by=reviewer.id
             WHERE tor.company_id=?
             ORDER BY tor.created_at DESC
         ''', (user['company_id'],)).fetchall()
