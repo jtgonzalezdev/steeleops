@@ -1086,6 +1086,17 @@ def redirect_with_feedback(start_response, location, message=None, error=None, e
     return redirect(start_response, location, extra_headers=extra_headers)
 
 
+def dashboard_shift_form_location(form_data):
+    params = []
+    for key in ('site_id', 'user_id', 'shift_date', 'start_time', 'end_time', 'notes'):
+        value = (form_data.get(key) or '').strip() if isinstance(form_data.get(key), str) else (form_data.get(key) or '')
+        if value != '':
+            params.append((key, value))
+    if not params:
+        return '/dashboard'
+    return f"/dashboard?{urlencode(params)}"
+
+
 def bad_request(start_response, message='Bad Request'):
     start_response('400 Bad Request', response_headers(content_type='text/plain; charset=utf-8'))
     return [message.encode('utf-8')]
@@ -1170,7 +1181,8 @@ def sidebar_nav_items(user, active_path):
 
 def app_page(environ, start_response, user, template_name, active_path='/dashboard', view='week', title='SteeleOps Control Center', **extra_context):
     query = parse_query(environ)
-    context = get_dashboard_context(user, view)
+    shift_form_values = {k: query.get(k, '') for k in ('site_id', 'user_id', 'shift_date', 'start_time', 'end_time', 'notes', 'exclude_shift_id')}
+    context = get_dashboard_context(user, view, shift_form_values=shift_form_values)
     context.update(extra_context)
     context.setdefault('active_path', active_path)
     context.setdefault('nav_items', sidebar_nav_items(user, active_path))
@@ -1397,6 +1409,35 @@ def overlapping_shift_conflict_error(conflict_shift, guard_name=None):
     )
 
 
+def guard_availability_metadata(conn, company_id, guards, shift_date, start_time, end_time, exclude_shift_id=None):
+    metadata = {}
+    if not guards:
+        return metadata
+    for guard in guards:
+        guard_id = guard['id']
+        state = {'available': True, 'reason': '', 'overlap_shift': None}
+        approved_leave = approved_time_off_request_for_date(conn, company_id, guard_id, shift_date)
+        if approved_leave:
+            state['available'] = False
+            state['reason'] = 'approved_leave'
+        else:
+            overlap_shift = overlapping_shift_for_guard(
+                conn,
+                company_id,
+                guard_id,
+                shift_date,
+                start_time,
+                end_time,
+                exclude_shift_id=exclude_shift_id,
+            )
+            if overlap_shift:
+                state['available'] = False
+                state['reason'] = 'overlap_shift'
+                state['overlap_shift'] = overlap_shift
+        metadata[guard_id] = state
+    return metadata
+
+
 def approved_time_off_lookup_by_guard_and_date(conn, company_id, range_start, range_end):
     lookup = {}
     rows = conn.execute('''
@@ -1456,7 +1497,7 @@ def get_company_scope_id(user):
     return user['company_id']
 
 
-def get_dashboard_context(user, view='week'):
+def get_dashboard_context(user, view='week', shift_form_values=None):
     conn = db()
     company_id = get_company_scope_id(user)
     today = date.today()
@@ -1471,6 +1512,7 @@ def get_dashboard_context(user, view='week'):
     my_shifts = []
     available_shifts = []
 
+    shift_form_values = shift_form_values or {}
     if user['role'] == 'guard':
         my_shifts = conn.execute('''
             SELECT shifts.*, COALESCE(shifts.user_id, shifts.guard_id) as user_id, COALESCE(shifts.guard_id, shifts.user_id) as guard_id, sites.name as site_name, sites.address, sites.client_company_name
@@ -1514,6 +1556,43 @@ def get_dashboard_context(user, view='week'):
         ''', (company_id,)).fetchall()
         recent_reports = reports[:8]
         guards = conn.execute("SELECT * FROM users WHERE company_id=? AND role='guard' ORDER BY full_name", (company_id,)).fetchall()
+    shift_form = {
+        'site_id': (shift_form_values.get('site_id') or '').strip(),
+        'user_id': (shift_form_values.get('user_id') or '').strip(),
+        'shift_date': (shift_form_values.get('shift_date') or '').strip(),
+        'start_time': (shift_form_values.get('start_time') or '').strip(),
+        'end_time': (shift_form_values.get('end_time') or '').strip(),
+        'notes': (shift_form_values.get('notes') or '').strip(),
+    }
+    if user['role'] in {'company_admin', 'superadmin'} and not shift_form['shift_date']:
+        shift_form['shift_date'] = today.isoformat()
+    guard_option_rows = []
+    guard_availability = {}
+    if user['role'] in {'company_admin', 'superadmin'}:
+        guard_availability = guard_availability_metadata(
+            conn,
+            company_id,
+            guards,
+            shift_form.get('shift_date'),
+            shift_form.get('start_time'),
+            shift_form.get('end_time'),
+            exclude_shift_id=shift_form_values.get('exclude_shift_id'),
+        )
+        for guard in guards:
+            availability_state = guard_availability.get(guard['id']) or {'available': True, 'reason': '', 'overlap_shift': None}
+            label_suffix = ''
+            if availability_state['reason'] == 'approved_leave':
+                label_suffix = ' (On approved leave)'
+            elif availability_state['reason'] == 'overlap_shift' and availability_state.get('overlap_shift'):
+                overlap = availability_state['overlap_shift']
+                label_suffix = f" (Already scheduled {overlap['start_time']}-{overlap['end_time']})"
+            guard_option_rows.append({
+                'id': guard['id'],
+                'full_name': guard['full_name'],
+                'available': availability_state['available'],
+                'reason': availability_state['reason'],
+                'label_suffix': label_suffix,
+            })
     guards_module_rows = conn.execute(f'''
         SELECT g.*, gsa.site_id, s.name as assigned_site_name, u.id as login_user_id, u.username as login_username, u.email as login_email, u.pin_hash as login_pin_hash
         FROM guards g
@@ -1664,6 +1743,9 @@ def get_dashboard_context(user, view='week'):
         'checkpoints': checkpoints,
         'availability': availability,
         'overtime_alerts': overtime_alerts,
+        'shift_form': shift_form,
+        'guard_option_rows': guard_option_rows,
+        'guard_availability': guard_availability,
     }
 
 
@@ -2429,10 +2511,11 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
         <hr>
         <form method="post" action="/admin/shift/new" class="stack compact">
           <h4>Create Shift</h4>
-          <label>Site<select name="site_id">{% for site in sites %}<option value="{{ site.id }}">{{ site.name }}</option>{% endfor %}</select></label>
-          <label>Assign Guard<select name="user_id"><option value="">Open Shift</option>{% for guard in guards %}<option value="{{ guard.id }}">{{ guard.full_name }}</option>{% endfor %}</select></label>
-          <div class="row-2"><label>Date<input type="date" name="shift_date" required></label><label>Start<input type="time" name="start_time" required></label></div>
-          <div class="row-2"><label>End<input type="time" name="end_time" required></label><label>Notes<input type="text" name="notes"></label></div>
+          <label>Site<select name="site_id">{% for site in sites %}<option value="{{ site.id }}" {% if shift_form.site_id and shift_form.site_id|int == site.id %}selected{% endif %}>{{ site.name }}</option>{% endfor %}</select></label>
+          <label>Assign Guard<select name="user_id"><option value="">Open Shift</option>{% for guard_option in guard_option_rows %}<option value="{{ guard_option.id }}" {% if shift_form.user_id and shift_form.user_id|int == guard_option.id %}selected{% endif %} {% if not guard_option.available %}disabled{% endif %}>{{ guard_option.full_name }}{{ guard_option.label_suffix }}</option>{% endfor %}</select></label>
+          <div class="small-muted">Unavailable guards are disabled when they are on approved leave or already assigned to an overlapping shift.</div>
+          <div class="row-2"><label>Date<input type="date" name="shift_date" value="{{ shift_form.shift_date }}" required></label><label>Start<input type="time" name="start_time" value="{{ shift_form.start_time }}" required></label></div>
+          <div class="row-2"><label>End<input type="time" name="end_time" value="{{ shift_form.end_time }}" required></label><label>Notes<input type="text" name="notes" value="{{ shift_form.notes }}"></label></div>
           <button class="btn primary" type="submit">Create Shift</button>
         </form>
         {% endif %}
@@ -2665,10 +2748,11 @@ SCHEDULE_HTML = r'''{% extends "app_shell.html" %}
         <hr>
         <form method="post" action="/admin/shift/new" class="stack compact">
           <h4>Create Shift</h4>
-          <label>Site<select name="site_id">{% for site in sites %}<option value="{{ site.id }}">{{ site.name }}</option>{% endfor %}</select></label>
-          <label>Assign Guard<select name="user_id"><option value="">Open Shift</option>{% for guard in guards %}<option value="{{ guard.id }}">{{ guard.full_name }}</option>{% endfor %}</select></label>
-          <div class="row-2"><label>Date<input type="date" name="shift_date" required></label><label>Start<input type="time" name="start_time" required></label></div>
-          <div class="row-2"><label>End<input type="time" name="end_time" required></label><label>Notes<input type="text" name="notes"></label></div>
+          <label>Site<select name="site_id">{% for site in sites %}<option value="{{ site.id }}" {% if shift_form.site_id and shift_form.site_id|int == site.id %}selected{% endif %}>{{ site.name }}</option>{% endfor %}</select></label>
+          <label>Assign Guard<select name="user_id"><option value="">Open Shift</option>{% for guard_option in guard_option_rows %}<option value="{{ guard_option.id }}" {% if shift_form.user_id and shift_form.user_id|int == guard_option.id %}selected{% endif %} {% if not guard_option.available %}disabled{% endif %}>{{ guard_option.full_name }}{{ guard_option.label_suffix }}</option>{% endfor %}</select></label>
+          <div class="small-muted">Unavailable guards are disabled when they are on approved leave or already assigned to an overlapping shift.</div>
+          <div class="row-2"><label>Date<input type="date" name="shift_date" value="{{ shift_form.shift_date }}" required></label><label>Start<input type="time" name="start_time" value="{{ shift_form.start_time }}" required></label></div>
+          <div class="row-2"><label>End<input type="time" name="end_time" value="{{ shift_form.end_time }}" required></label><label>Notes<input type="text" name="notes" value="{{ shift_form.notes }}"></label></div>
           <button class="btn primary" type="submit">Create Shift</button>
         </form>
         {% endif %}
@@ -4593,6 +4677,7 @@ def application(environ, start_response):
         user, response = require_admin(environ, start_response)
         if response: return response
         data, _ = parse_post(environ)
+        redirect_location = dashboard_shift_form_location(data)
         scheduled_hours = calculate_shift_hours_from_strings(data.get('start_time'), data.get('end_time'))
         user_id = data.get('user_id') or None
         status = 'assigned' if user_id else 'open'
@@ -4604,7 +4689,7 @@ def application(environ, start_response):
                 conn.close()
                 return redirect_with_feedback(
                     start_response,
-                    '/dashboard',
+                    redirect_location,
                     error=approved_time_off_conflict_error(data.get('shift_date'), conflict, guard['full_name'] if guard else None),
                 )
             overlap_conflict = overlapping_shift_for_guard(
@@ -4620,7 +4705,7 @@ def application(environ, start_response):
                 conn.close()
                 return redirect_with_feedback(
                     start_response,
-                    '/dashboard',
+                    redirect_location,
                     error=overlapping_shift_conflict_error(overlap_conflict, guard['full_name'] if guard else None),
                 )
         shift_sql, shift_params = shift_insert_sql_and_params(
