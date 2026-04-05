@@ -1379,6 +1379,13 @@ def approved_time_off_conflict_error(shift_date, request_row, guard_name=None):
 def overlapping_shift_for_guard(conn, company_id, guard_id, shift_date, start_time, end_time, exclude_shift_id=None):
     if not (company_id and guard_id and shift_date and start_time and end_time):
         return None
+    if exclude_shift_id in ('', None):
+        exclude_shift_id = None
+    else:
+        try:
+            exclude_shift_id = int(exclude_shift_id)
+        except (TypeError, ValueError):
+            exclude_shift_id = None
     try:
         new_start, new_end = shift_boundary_datetimes(shift_date, start_time, end_time)
     except ValueError:
