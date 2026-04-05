@@ -1441,7 +1441,7 @@ def guard_availability_metadata(conn, company_id, guards, shift_date, start_time
 def approved_time_off_lookup_by_guard_and_date(conn, company_id, range_start, range_end):
     lookup = {}
     rows = conn.execute('''
-        SELECT guard_id, start_date, end_date
+        SELECT guard_id, start_date, end_date, type
         FROM time_off_requests
         WHERE company_id=? AND status='approved' AND end_date>=? AND start_date<=?
     ''', (company_id, range_start, range_end)).fetchall()
@@ -1451,7 +1451,11 @@ def approved_time_off_lookup_by_guard_and_date(conn, company_id, range_start, ra
         while cursor <= end:
             cursor_key = cursor.isoformat()
             if range_start <= cursor_key <= range_end:
-                lookup[(row['guard_id'], cursor_key)] = True
+                lookup[(row['guard_id'], cursor_key)] = {
+                    'start_date': row['start_date'],
+                    'end_date': row['end_date'],
+                    'type': row['type'],
+                }
             cursor += timedelta(days=1)
     return lookup
 
@@ -1634,9 +1638,31 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
     for shift in schedule_rows:
         shift_data = dict(shift)
         assigned_guard_id = shift_data.get('user_id') or shift_data.get('guard_id')
-        shift_data['has_approved_time_off'] = bool(
-            assigned_guard_id and approved_time_off_lookup.get((assigned_guard_id, shift_data.get('shift_date')))
-        )
+        approved_leave = approved_time_off_lookup.get((assigned_guard_id, shift_data.get('shift_date'))) if assigned_guard_id else None
+        overlap_shift = overlapping_shift_for_guard(
+            conn,
+            company_id,
+            assigned_guard_id,
+            shift_data.get('shift_date'),
+            shift_data.get('start_time'),
+            shift_data.get('end_time'),
+            exclude_shift_id=shift_data.get('id'),
+        ) if assigned_guard_id else None
+        shift_data['has_approved_time_off'] = bool(approved_leave)
+        shift_data['has_overlap_conflict'] = bool(overlap_shift)
+        shift_data['approved_time_off_detail'] = (
+            f"{(approved_leave.get('type') or 'approved').title()} leave "
+            f"{approved_leave.get('start_date')} to {approved_leave.get('end_date')}"
+        ) if approved_leave else ''
+        shift_data['overlap_conflict_detail'] = (
+            f"Overlaps {overlap_shift['shift_date']} {overlap_shift['start_time']}-{overlap_shift['end_time']}"
+        ) if overlap_shift else ''
+        if approved_leave:
+            shift_data['conflict_status'] = 'on_leave'
+        elif overlap_shift:
+            shift_data['conflict_status'] = 'overlap_conflict'
+        else:
+            shift_data['conflict_status'] = ''
         schedule_rows_with_time_off.append(shift_data)
     schedule_rows = schedule_rows_with_time_off
 
@@ -2483,10 +2509,17 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
                 <td>{{ shift.start_time }} - {{ shift.end_time }}</td>
                 <td>
                   {{ shift.full_name or 'Open Shift' }}
-                  {% if shift.has_approved_time_off %}<div class="small-muted">Approved time off</div>{% endif %}
+                  {% if shift.has_approved_time_off %}<div class="small-muted">{{ shift.approved_time_off_detail }}</div>{% elif shift.has_overlap_conflict %}<div class="small-muted">{{ shift.overlap_conflict_detail }}</div>{% endif %}
                 </td>
                 <td>{{ shift.site_name }}</td>
-                <td><span class="badge {{ shift.status }}">{{ shift.status }}</span></td>
+                <td>
+                  <span class="badge {{ shift.status }}">{{ shift.status }}</span>
+                  {% if shift.conflict_status == 'on_leave' %}
+                  <span class="badge conflict-leave" title="{{ shift.approved_time_off_detail }}">On Leave</span>
+                  {% elif shift.conflict_status == 'overlap_conflict' %}
+                  <span class="badge conflict-overlap" title="{{ shift.overlap_conflict_detail }}">Overlap Conflict</span>
+                  {% endif %}
+                </td>
                 <td>{{ shift.worked_hours or shift.scheduled_hours }}</td>
               </tr>
             {% else %}<tr><td colspan="6">No schedule rows in this view.</td></tr>{% endfor %}
@@ -2720,10 +2753,17 @@ SCHEDULE_HTML = r'''{% extends "app_shell.html" %}
                 <td>{{ shift.start_time }} - {{ shift.end_time }}</td>
                 <td>
                   {{ shift.full_name or 'Open Shift' }}
-                  {% if shift.has_approved_time_off %}<div class="small-muted">Approved time off</div>{% endif %}
+                  {% if shift.has_approved_time_off %}<div class="small-muted">{{ shift.approved_time_off_detail }}</div>{% elif shift.has_overlap_conflict %}<div class="small-muted">{{ shift.overlap_conflict_detail }}</div>{% endif %}
                 </td>
                 <td>{{ shift.site_name }}</td>
-                <td><span class="badge {{ shift.status }}">{{ shift.status }}</span></td>
+                <td>
+                  <span class="badge {{ shift.status }}">{{ shift.status }}</span>
+                  {% if shift.conflict_status == 'on_leave' %}
+                  <span class="badge conflict-leave" title="{{ shift.approved_time_off_detail }}">On Leave</span>
+                  {% elif shift.conflict_status == 'overlap_conflict' %}
+                  <span class="badge conflict-overlap" title="{{ shift.overlap_conflict_detail }}">Overlap Conflict</span>
+                  {% endif %}
+                </td>
                 <td>{{ shift.worked_hours or shift.scheduled_hours }}</td>
               </tr>
             {% else %}<tr><td colspan="6">No schedule rows in this view.</td></tr>{% endfor %}
@@ -3059,6 +3099,8 @@ th { color: var(--muted); font-size: 13px; font-weight: 600; }
 .badge.pending, .badge.medium { background: rgba(245,158,11,.16); }
 .badge.closed, .badge.completed, .badge.approved, .badge.low { background: rgba(34,197,94,.16); }
 .badge.declined, .badge.denied, .badge.high { background: rgba(239,68,68,.16); }
+.badge.conflict-leave { background: rgba(245,158,11,.22); border-color: rgba(245,158,11,.5); color: #fde68a; }
+.badge.conflict-overlap { background: rgba(239,68,68,.24); border-color: rgba(239,68,68,.5); color: #fecaca; }
 .report-card { padding: 14px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.02); margin-bottom: 12px; }
 .report-top { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
 .report-photo { margin-top: 12px; border-radius: 16px; border: 1px solid var(--line); max-height: 220px; object-fit: cover; width: 100%; }
