@@ -1364,6 +1364,39 @@ def approved_time_off_conflict_error(shift_date, request_row, guard_name=None):
     )
 
 
+def overlapping_shift_for_guard(conn, company_id, guard_id, shift_date, start_time, end_time, exclude_shift_id=None):
+    if not (company_id and guard_id and shift_date and start_time and end_time):
+        return None
+    try:
+        new_start, new_end = shift_boundary_datetimes(shift_date, start_time, end_time)
+    except ValueError:
+        return None
+    window_start = (new_start.date() - timedelta(days=1)).isoformat()
+    window_end = (new_end.date() + timedelta(days=1)).isoformat()
+    rows = conn.execute('''
+        SELECT id, shift_date, start_time, end_time
+        FROM shifts
+        WHERE company_id=?
+          AND COALESCE(user_id, guard_id)=?
+          AND (? IS NULL OR id<>?)
+          AND shift_date BETWEEN ? AND ?
+        ORDER BY shift_date, start_time
+    ''', (company_id, guard_id, exclude_shift_id, exclude_shift_id, window_start, window_end)).fetchall()
+    for row in rows:
+        existing_start, existing_end = shift_boundary_datetimes(row['shift_date'], row['start_time'], row['end_time'])
+        if existing_start < new_end and existing_end > new_start:
+            return row
+    return None
+
+
+def overlapping_shift_conflict_error(conflict_shift, guard_name=None):
+    guard_label = guard_name or 'Selected guard'
+    return (
+        f"{guard_label} already has another shift during that time "
+        f"({conflict_shift['shift_date']} {conflict_shift['start_time']}-{conflict_shift['end_time']})."
+    )
+
+
 def approved_time_off_lookup_by_guard_and_date(conn, company_id, range_start, range_end):
     lookup = {}
     rows = conn.execute('''
@@ -1902,7 +1935,7 @@ def application(environ, start_response):
         req = conn.execute('SELECT * FROM shift_swap_requests WHERE id=? AND company_id=?', (data.get('request_id'), user['company_id'])).fetchone()
         if req:
             if data.get('decision') == 'approved' and req['requested_to']:
-                target_shift = conn.execute('SELECT shift_date FROM shifts WHERE id=? AND company_id=?', (req['shift_id'], user['company_id'])).fetchone()
+                target_shift = conn.execute('SELECT id, shift_date, start_time, end_time FROM shifts WHERE id=? AND company_id=?', (req['shift_id'], user['company_id'])).fetchone()
                 conflict = approved_time_off_request_for_date(conn, user['company_id'], req['requested_to'], target_shift['shift_date'] if target_shift else None)
                 if conflict:
                     guard = conn.execute('SELECT full_name FROM users WHERE id=? AND company_id=?', (req['requested_to'], user['company_id'])).fetchone()
@@ -1911,6 +1944,23 @@ def application(environ, start_response):
                         start_response,
                         '/dashboard',
                         error=approved_time_off_conflict_error(target_shift['shift_date'], conflict, guard['full_name'] if guard else None),
+                    )
+                overlap_conflict = overlapping_shift_for_guard(
+                    conn,
+                    user['company_id'],
+                    req['requested_to'],
+                    target_shift['shift_date'] if target_shift else None,
+                    target_shift['start_time'] if target_shift else None,
+                    target_shift['end_time'] if target_shift else None,
+                    exclude_shift_id=req['shift_id'],
+                )
+                if overlap_conflict:
+                    guard = conn.execute('SELECT full_name FROM users WHERE id=? AND company_id=?', (req['requested_to'], user['company_id'])).fetchone()
+                    conn.close()
+                    return redirect_with_feedback(
+                        start_response,
+                        '/dashboard',
+                        error=overlapping_shift_conflict_error(overlap_conflict, guard['full_name'] if guard else None),
                     )
                 assignment_clause, _ = shift_assignment_update_clause(conn)
                 if assignment_clause:
@@ -2092,6 +2142,22 @@ def application(environ, start_response):
                     start_response,
                     '/dashboard',
                     error=approved_time_off_conflict_error(data.get('shift_date'), conflict, guard['full_name'] if guard else None),
+                )
+            overlap_conflict = overlapping_shift_for_guard(
+                conn,
+                user['company_id'],
+                user_id,
+                data.get('shift_date'),
+                data.get('start_time'),
+                data.get('end_time'),
+            )
+            if overlap_conflict:
+                guard = conn.execute('SELECT full_name FROM users WHERE id=? AND company_id=?', (user_id, user['company_id'])).fetchone()
+                conn.close()
+                return redirect_with_feedback(
+                    start_response,
+                    '/dashboard',
+                    error=overlapping_shift_conflict_error(overlap_conflict, guard['full_name'] if guard else None),
                 )
         shift_sql, shift_params = shift_insert_sql_and_params(
             conn,
@@ -4220,6 +4286,22 @@ def application(environ, start_response):
                 '/dashboard',
                 error=approved_time_off_conflict_error(shift['shift_date'], conflict, user['full_name']),
             )
+        overlap_conflict = overlapping_shift_for_guard(
+            conn,
+            user['company_id'],
+            user['id'],
+            shift['shift_date'],
+            shift['start_time'],
+            shift['end_time'],
+            exclude_shift_id=shift['id'],
+        )
+        if overlap_conflict:
+            conn.close()
+            return redirect_with_feedback(
+                start_response,
+                '/dashboard',
+                error=overlapping_shift_conflict_error(overlap_conflict, user['full_name']),
+            )
         assignment_clause, assignment_cols = shift_assignment_update_clause(conn)
         if assignment_clause:
             conn.execute(f"UPDATE shifts SET {assignment_clause}, status='assigned' WHERE id=?", tuple([user['id']] * len(assignment_cols) + [shift_id]))
@@ -4266,7 +4348,7 @@ def application(environ, start_response):
         if req:
             decision = data.get('decision')
             if decision == 'approved' and req['requested_to']:
-                target_shift = conn.execute('SELECT shift_date FROM shifts WHERE id=? AND company_id=?', (req['shift_id'], user['company_id'])).fetchone()
+                target_shift = conn.execute('SELECT id, shift_date, start_time, end_time FROM shifts WHERE id=? AND company_id=?', (req['shift_id'], user['company_id'])).fetchone()
                 conflict = approved_time_off_request_for_date(conn, user['company_id'], req['requested_to'], target_shift['shift_date'] if target_shift else None)
                 if conflict:
                     guard = conn.execute('SELECT full_name FROM users WHERE id=? AND company_id=?', (req['requested_to'], user['company_id'])).fetchone()
@@ -4275,6 +4357,23 @@ def application(environ, start_response):
                         start_response,
                         '/dashboard',
                         error=approved_time_off_conflict_error(target_shift['shift_date'], conflict, guard['full_name'] if guard else None),
+                    )
+                overlap_conflict = overlapping_shift_for_guard(
+                    conn,
+                    user['company_id'],
+                    req['requested_to'],
+                    target_shift['shift_date'] if target_shift else None,
+                    target_shift['start_time'] if target_shift else None,
+                    target_shift['end_time'] if target_shift else None,
+                    exclude_shift_id=req['shift_id'],
+                )
+                if overlap_conflict:
+                    guard = conn.execute('SELECT full_name FROM users WHERE id=? AND company_id=?', (req['requested_to'], user['company_id'])).fetchone()
+                    conn.close()
+                    return redirect_with_feedback(
+                        start_response,
+                        '/dashboard',
+                        error=overlapping_shift_conflict_error(overlap_conflict, guard['full_name'] if guard else None),
                     )
                 assignment_clause, assignment_cols = shift_assignment_update_clause(conn)
                 if assignment_clause:
@@ -4507,6 +4606,22 @@ def application(environ, start_response):
                     start_response,
                     '/dashboard',
                     error=approved_time_off_conflict_error(data.get('shift_date'), conflict, guard['full_name'] if guard else None),
+                )
+            overlap_conflict = overlapping_shift_for_guard(
+                conn,
+                user['company_id'],
+                user_id,
+                data.get('shift_date'),
+                data.get('start_time'),
+                data.get('end_time'),
+            )
+            if overlap_conflict:
+                guard = conn.execute('SELECT full_name FROM users WHERE id=? AND company_id=?', (user_id, user['company_id'])).fetchone()
+                conn.close()
+                return redirect_with_feedback(
+                    start_response,
+                    '/dashboard',
+                    error=overlapping_shift_conflict_error(overlap_conflict, guard['full_name'] if guard else None),
                 )
         shift_sql, shift_params = shift_insert_sql_and_params(
             conn,
