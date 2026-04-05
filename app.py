@@ -1343,6 +1343,45 @@ def calculate_worked_hours(clock_in, clock_out):
     return round(max(0, (end_dt - start_dt).total_seconds() / 3600.0), 2)
 
 
+def approved_time_off_request_for_date(conn, company_id, guard_id, shift_date):
+    if not (company_id and guard_id and shift_date):
+        return None
+    return conn.execute('''
+        SELECT id, start_date, end_date, type
+        FROM time_off_requests
+        WHERE company_id=? AND guard_id=? AND status='approved' AND start_date<=? AND end_date>=?
+        ORDER BY start_date DESC, id DESC
+        LIMIT 1
+    ''', (company_id, guard_id, shift_date, shift_date)).fetchone()
+
+
+def approved_time_off_conflict_error(shift_date, request_row, guard_name=None):
+    guard_label = guard_name or 'Selected guard'
+    leave_type = (request_row['type'] if request_row and request_row['type'] else 'approved').title()
+    return (
+        f"{guard_label} cannot be assigned on {shift_date}: "
+        f"{leave_type} time off is approved for {request_row['start_date']} to {request_row['end_date']}."
+    )
+
+
+def approved_time_off_lookup_by_guard_and_date(conn, company_id, range_start, range_end):
+    lookup = {}
+    rows = conn.execute('''
+        SELECT guard_id, start_date, end_date
+        FROM time_off_requests
+        WHERE company_id=? AND status='approved' AND end_date>=? AND start_date<=?
+    ''', (company_id, range_start, range_end)).fetchall()
+    for row in rows:
+        cursor = datetime.strptime(row['start_date'], '%Y-%m-%d').date()
+        end = datetime.strptime(row['end_date'], '%Y-%m-%d').date()
+        while cursor <= end:
+            cursor_key = cursor.isoformat()
+            if range_start <= cursor_key <= range_end:
+                lookup[(row['guard_id'], cursor_key)] = True
+            cursor += timedelta(days=1)
+    return lookup
+
+
 def process_shift_clock_action(user, shift_id, action):
     if not shift_id or action not in {'in', 'out'}:
         return False, 'Invalid clock action'
@@ -1473,6 +1512,21 @@ def get_dashboard_context(user, view='week'):
             ORDER BY shift_date, start_time LIMIT 10
         ''', (company_id, today.isoformat())).fetchall()
         my_open_shift_options = []
+    approved_time_off_lookup = approved_time_off_lookup_by_guard_and_date(
+        conn,
+        company_id,
+        range_start.isoformat(),
+        range_end.isoformat(),
+    )
+    schedule_rows_with_time_off = []
+    for shift in schedule_rows:
+        shift_data = dict(shift)
+        assigned_guard_id = shift_data.get('user_id') or shift_data.get('guard_id')
+        shift_data['has_approved_time_off'] = bool(
+            assigned_guard_id and approved_time_off_lookup.get((assigned_guard_id, shift_data.get('shift_date')))
+        )
+        schedule_rows_with_time_off.append(shift_data)
+    schedule_rows = schedule_rows_with_time_off
 
     swap_requests = conn.execute('''
         SELECT ssr.*, s.shift_date, s.start_time, s.end_time, st.name as site_name,
@@ -1848,6 +1902,16 @@ def application(environ, start_response):
         req = conn.execute('SELECT * FROM shift_swap_requests WHERE id=? AND company_id=?', (data.get('request_id'), user['company_id'])).fetchone()
         if req:
             if data.get('decision') == 'approved' and req['requested_to']:
+                target_shift = conn.execute('SELECT shift_date FROM shifts WHERE id=? AND company_id=?', (req['shift_id'], user['company_id'])).fetchone()
+                conflict = approved_time_off_request_for_date(conn, user['company_id'], req['requested_to'], target_shift['shift_date'] if target_shift else None)
+                if conflict:
+                    guard = conn.execute('SELECT full_name FROM users WHERE id=? AND company_id=?', (req['requested_to'], user['company_id'])).fetchone()
+                    conn.close()
+                    return redirect_with_feedback(
+                        start_response,
+                        '/dashboard',
+                        error=approved_time_off_conflict_error(target_shift['shift_date'], conflict, guard['full_name'] if guard else None),
+                    )
                 assignment_clause, _ = shift_assignment_update_clause(conn)
                 if assignment_clause:
                     conn.execute(f'UPDATE shifts SET {assignment_clause}, status="assigned" WHERE id=?', tuple([req['requested_to']] * len(shift_assignment_columns(conn)) + [req['shift_id']]))
@@ -2019,6 +2083,16 @@ def application(environ, start_response):
         user_id = data.get('user_id') or None
         status = 'assigned' if user_id else 'open'
         conn = db()
+        if user_id:
+            conflict = approved_time_off_request_for_date(conn, user['company_id'], user_id, data.get('shift_date'))
+            if conflict:
+                guard = conn.execute('SELECT full_name FROM users WHERE id=? AND company_id=?', (user_id, user['company_id'])).fetchone()
+                conn.close()
+                return redirect_with_feedback(
+                    start_response,
+                    '/dashboard',
+                    error=approved_time_off_conflict_error(data.get('shift_date'), conflict, guard['full_name'] if guard else None),
+                )
         shift_sql, shift_params = shift_insert_sql_and_params(
             conn,
             ['company_id', 'site_id', 'shift_date', 'start_time', 'end_time', 'status', 'scheduled_hours', 'worked_hours', 'overtime_alert', 'notes'],
@@ -2259,7 +2333,10 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
               <tr>
                 <td>{{ shift.shift_date }}</td>
                 <td>{{ shift.start_time }} - {{ shift.end_time }}</td>
-                <td>{{ shift.full_name or 'Open Shift' }}</td>
+                <td>
+                  {{ shift.full_name or 'Open Shift' }}
+                  {% if shift.has_approved_time_off %}<div class="small-muted">Approved time off</div>{% endif %}
+                </td>
                 <td>{{ shift.site_name }}</td>
                 <td><span class="badge {{ shift.status }}">{{ shift.status }}</span></td>
                 <td>{{ shift.worked_hours or shift.scheduled_hours }}</td>
@@ -2492,7 +2569,10 @@ SCHEDULE_HTML = r'''{% extends "app_shell.html" %}
               <tr>
                 <td>{{ shift.shift_date }}</td>
                 <td>{{ shift.start_time }} - {{ shift.end_time }}</td>
-                <td>{{ shift.full_name or 'Open Shift' }}</td>
+                <td>
+                  {{ shift.full_name or 'Open Shift' }}
+                  {% if shift.has_approved_time_off %}<div class="small-muted">Approved time off</div>{% endif %}
+                </td>
                 <td>{{ shift.site_name }}</td>
                 <td><span class="badge {{ shift.status }}">{{ shift.status }}</span></td>
                 <td>{{ shift.worked_hours or shift.scheduled_hours }}</td>
@@ -4132,6 +4212,14 @@ def application(environ, start_response):
             conn.close(); return bad_request(start_response, 'Shift not found')
         if shift_assignment_value(shift) is not None or shift['status'] != 'open':
             conn.close(); return bad_request(start_response, 'Shift is no longer open')
+        conflict = approved_time_off_request_for_date(conn, user['company_id'], user['id'], shift['shift_date'])
+        if conflict:
+            conn.close()
+            return redirect_with_feedback(
+                start_response,
+                '/dashboard',
+                error=approved_time_off_conflict_error(shift['shift_date'], conflict, user['full_name']),
+            )
         assignment_clause, assignment_cols = shift_assignment_update_clause(conn)
         if assignment_clause:
             conn.execute(f"UPDATE shifts SET {assignment_clause}, status='assigned' WHERE id=?", tuple([user['id']] * len(assignment_cols) + [shift_id]))
@@ -4178,6 +4266,16 @@ def application(environ, start_response):
         if req:
             decision = data.get('decision')
             if decision == 'approved' and req['requested_to']:
+                target_shift = conn.execute('SELECT shift_date FROM shifts WHERE id=? AND company_id=?', (req['shift_id'], user['company_id'])).fetchone()
+                conflict = approved_time_off_request_for_date(conn, user['company_id'], req['requested_to'], target_shift['shift_date'] if target_shift else None)
+                if conflict:
+                    guard = conn.execute('SELECT full_name FROM users WHERE id=? AND company_id=?', (req['requested_to'], user['company_id'])).fetchone()
+                    conn.close()
+                    return redirect_with_feedback(
+                        start_response,
+                        '/dashboard',
+                        error=approved_time_off_conflict_error(target_shift['shift_date'], conflict, guard['full_name'] if guard else None),
+                    )
                 assignment_clause, assignment_cols = shift_assignment_update_clause(conn)
                 if assignment_clause:
                     conn.execute(f"UPDATE shifts SET {assignment_clause}, status='assigned' WHERE id=?", tuple([req['requested_to']] * len(assignment_cols) + [req['shift_id']]))
@@ -4395,7 +4493,32 @@ def application(environ, start_response):
     if path == '/admin/shift/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
-        data, _ = parse_post(environ); scheduled_hours = calculate_shift_hours_from_strings(data.get('start_time'), data.get('end_time')); user_id = data.get('user_id') or None; status = 'assigned' if user_id else 'open'; conn = db(); shift_sql, shift_params = shift_insert_sql_and_params(conn, ['company_id', 'site_id', 'shift_date', 'start_time', 'end_time', 'status', 'scheduled_hours', 'worked_hours', 'overtime_alert', 'notes'], [user['company_id'], data.get('site_id'), data.get('shift_date'), data.get('start_time'), data.get('end_time'), status, scheduled_hours, 0, 0, data.get('notes', '')], user_id); conn.execute(shift_sql, shift_params); conn.commit(); conn.close(); log_audit('shift_edit', actor_user_id=user['id'], company_id=user['company_id'], target_type='shift', target_id='new', message='shift created', environ=environ, metadata={'site_id': data.get('site_id'), 'shift_date': data.get('shift_date')}); return redirect(start_response, '/dashboard')
+        data, _ = parse_post(environ)
+        scheduled_hours = calculate_shift_hours_from_strings(data.get('start_time'), data.get('end_time'))
+        user_id = data.get('user_id') or None
+        status = 'assigned' if user_id else 'open'
+        conn = db()
+        if user_id:
+            conflict = approved_time_off_request_for_date(conn, user['company_id'], user_id, data.get('shift_date'))
+            if conflict:
+                guard = conn.execute('SELECT full_name FROM users WHERE id=? AND company_id=?', (user_id, user['company_id'])).fetchone()
+                conn.close()
+                return redirect_with_feedback(
+                    start_response,
+                    '/dashboard',
+                    error=approved_time_off_conflict_error(data.get('shift_date'), conflict, guard['full_name'] if guard else None),
+                )
+        shift_sql, shift_params = shift_insert_sql_and_params(
+            conn,
+            ['company_id', 'site_id', 'shift_date', 'start_time', 'end_time', 'status', 'scheduled_hours', 'worked_hours', 'overtime_alert', 'notes'],
+            [user['company_id'], data.get('site_id'), data.get('shift_date'), data.get('start_time'), data.get('end_time'), status, scheduled_hours, 0, 0, data.get('notes', '')],
+            user_id,
+        )
+        conn.execute(shift_sql, shift_params)
+        conn.commit()
+        conn.close()
+        log_audit('shift_edit', actor_user_id=user['id'], company_id=user['company_id'], target_type='shift', target_id='new', message='shift created', environ=environ, metadata={'site_id': data.get('site_id'), 'shift_date': data.get('shift_date')})
+        return redirect(start_response, '/dashboard')
     if path == '/admin/company/logo' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
