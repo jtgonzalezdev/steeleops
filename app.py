@@ -63,6 +63,8 @@ def ensure_assets():
         'reports.html': REPORTS_HTML,
         'payroll.html': PAYROLL_HTML,
         'profile.html': PROFILE_HTML,
+        'admin_paystub_upload.html': ADMIN_PAYSTUB_UPLOAD_HTML,
+        'guard_paystubs.html': GUARD_PAYSTUBS_HTML,
     }
     for name, content in templates.items():
         path = os.path.join(TEMPLATE_DIR, name)
@@ -1157,8 +1159,11 @@ def sidebar_nav_items(user, active_path):
         items.extend([
             {'label': 'Guards', 'href': '/guards', 'active': active_path == '/guards'},
             {'label': 'Payroll', 'href': '/payroll', 'active': active_path == '/payroll'},
+            {'label': 'Paystubs', 'href': '/admin/paystubs/upload', 'active': active_path == '/admin/paystubs/upload'},
             {'label': 'Reports', 'href': '/reports', 'active': active_path == '/reports'},
         ])
+    if user['role'] == 'guard':
+        items.append({'label': 'My Paystubs', 'href': '/my/paystubs', 'active': active_path == '/my/paystubs'})
     items.append({'label': 'Logout', 'href': '/logout', 'active': False})
     return items
 
@@ -1274,6 +1279,9 @@ def parse_query(environ):
 
 
 def serve_static(environ, start_response, path):
+    normalized = path.lstrip('/').replace('\\', '/')
+    if normalized.startswith('uploads/paystubs/'):
+        return forbidden(start_response, 'Paystub files must be accessed through the secure paystub route.')
     file_path = os.path.join(BASE_DIR, path.lstrip('/'))
     if not os.path.isfile(file_path):
         return not_found(start_response)
@@ -2668,6 +2676,85 @@ PROFILE_HTML = r'''{% extends "app_shell.html" %}
     </div>
 {% endblock %}'''
 
+ADMIN_PAYSTUB_UPLOAD_HTML = r'''{% extends "app_shell.html" %}
+{% block page_content %}
+    <section class="grid two-col">
+      <div class="card">
+        <div class="section-head"><h3>Upload Guard Paystub</h3><span>PDF only</span></div>
+        <form method="post" action="/admin/paystubs/upload" enctype="multipart/form-data" class="stack">
+          {{ csrf_input|safe }}
+          <label>Guard
+            <select name="guard_id" required>
+              <option value="">Select guard</option>
+              {% for guard in guards %}
+              <option value="{{ guard.id }}">{{ guard.full_name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <div class="row-2">
+            <label>Pay Period Start<input type="date" name="pay_period_start"></label>
+            <label>Pay Period End<input type="date" name="pay_period_end"></label>
+          </div>
+          <label>Paystub PDF<input type="file" name="paystub_file" accept="application/pdf,.pdf" required></label>
+          <button class="btn primary" type="submit">Upload Paystub</button>
+        </form>
+      </div>
+      <div class="card">
+        <div class="section-head"><h3>Recent Uploads</h3><span>{{ recent_paystubs|length }} entries</span></div>
+        {% for row in recent_paystubs %}
+        <div class="list-item detailed">
+          <div>
+            <strong>{{ row.guard_name }}</strong>
+            <div class="small-muted">
+              {% if row.pay_period_start and row.pay_period_end %}
+                {{ row.pay_period_start }} to {{ row.pay_period_end }}
+              {% elif row.pay_period_start %}
+                Starting {{ row.pay_period_start }}
+              {% elif row.pay_period_end %}
+                Ending {{ row.pay_period_end }}
+              {% else %}
+                Pay period not provided
+              {% endif %}
+            </div>
+            <div class="small-muted">Uploaded {{ row.created_at }}</div>
+          </div>
+          <a class="btn ghost" href="/paystubs/{{ row.id }}/file" target="_blank" rel="noopener">View PDF</a>
+        </div>
+        {% else %}
+        <div class="empty">No paystubs uploaded yet.</div>
+        {% endfor %}
+      </div>
+    </section>
+{% endblock %}'''
+
+GUARD_PAYSTUBS_HTML = r'''{% extends "app_shell.html" %}
+{% block page_content %}
+    <section class="card">
+      <div class="section-head"><h3>My Paystubs</h3><span>{{ paystubs|length }} available</span></div>
+      {% for row in paystubs %}
+      <div class="list-item detailed">
+        <div>
+          <strong>
+            {% if row.pay_period_start and row.pay_period_end %}
+              {{ row.pay_period_start }} to {{ row.pay_period_end }}
+            {% elif row.pay_period_start %}
+              Starting {{ row.pay_period_start }}
+            {% elif row.pay_period_end %}
+              Ending {{ row.pay_period_end }}
+            {% else %}
+              Pay period not provided
+            {% endif %}
+          </strong>
+          <div class="small-muted">Uploaded {{ row.created_at }}</div>
+        </div>
+        <a class="btn" href="/paystubs/{{ row.id }}/file" target="_blank" rel="noopener">View / Download</a>
+      </div>
+      {% else %}
+      <div class="empty">No paystubs available yet.</div>
+      {% endfor %}
+    </section>
+{% endblock %}'''
+
 STYLES_CSS = r'''
 :root {
   --bg: #09111d;
@@ -2959,6 +3046,27 @@ def save_upload(file_info, folder='general'):
         return None, None
     backend = _S3StorageBackend() if STORAGE_BACKEND == 's3' else _LocalStorageBackend()
     return backend.save(file_info, folder)
+
+
+def is_pdf_upload(file_info):
+    if not file_info or not file_info.get('filename'):
+        return False
+    ext = os.path.splitext(os.path.basename(file_info['filename']))[1].lower()
+    content = file_info.get('content', b'') or b''
+    return ext == '.pdf' and content.startswith(b'%PDF-')
+
+
+def local_path_from_upload(upload_path):
+    normalized = (upload_path or '').strip()
+    if not normalized.startswith('/'):
+        normalized = '/' + normalized
+    if not normalized.startswith('/uploads/'):
+        return None
+    local_path = os.path.normpath(os.path.join(BASE_DIR, normalized.lstrip('/')))
+    upload_root = os.path.normpath(UPLOAD_DIR)
+    if not local_path.startswith(upload_root + os.sep):
+        return None
+    return local_path
 
 
 def build_absolute_url(environ, path):
@@ -3458,6 +3566,17 @@ def init_db():
             acquired_at TEXT NOT NULL,
             heartbeat_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS paystubs (
+            id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            guard_id INTEGER NOT NULL,
+            company_id INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            pay_period_start TEXT,
+            pay_period_end TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(guard_id) REFERENCES users(id),
+            FOREIGN KEY(company_id) REFERENCES companies(id)
+        );
         ''')
     else:
         conn.cursor().executescript('''
@@ -3489,6 +3608,17 @@ def init_db():
             owner_id TEXT NOT NULL,
             acquired_at TEXT NOT NULL,
             heartbeat_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS paystubs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guard_id INTEGER NOT NULL,
+            company_id INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            pay_period_start TEXT,
+            pay_period_end TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(guard_id) REFERENCES users(id),
+            FOREIGN KEY(company_id) REFERENCES companies(id)
         );
         ''')
     if table_exists(conn, 'reports'):
@@ -4281,6 +4411,136 @@ def application(environ, start_response):
         user, response = require_admin(environ, start_response)
         if response: return response
         return app_page(environ, start_response, user, 'reports.html', active_path='/reports', view='week', title='Reports')
+    if path == '/admin/paystubs/upload' and method == 'GET':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        conn = db()
+        guards = conn.execute("""
+            SELECT id, full_name
+            FROM users
+            WHERE company_id=? AND role='guard' AND active=1
+            ORDER BY full_name
+        """, (user['company_id'],)).fetchall()
+        recent_paystubs = conn.execute("""
+            SELECT p.id, p.pay_period_start, p.pay_period_end, p.created_at, u.full_name AS guard_name
+            FROM paystubs p
+            JOIN users u ON p.guard_id=u.id
+            WHERE p.company_id=?
+            ORDER BY p.created_at DESC, p.id DESC
+            LIMIT 20
+        """, (user['company_id'],)).fetchall()
+        conn.close()
+        return app_page(
+            environ,
+            start_response,
+            user,
+            'admin_paystub_upload.html',
+            active_path='/admin/paystubs/upload',
+            view='week',
+            title='Paystub Uploads',
+            guards=guards,
+            recent_paystubs=recent_paystubs,
+        )
+    if path == '/admin/paystubs/upload' and method == 'POST':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        data, files = parse_post(environ)
+        guard_id_raw = (data.get('guard_id') or '').strip()
+        if not guard_id_raw.isdigit():
+            return redirect_with_feedback(start_response, '/admin/paystubs/upload', error='Please select a valid guard.')
+        paystub_file = files.get('paystub_file')
+        if not paystub_file:
+            return redirect_with_feedback(start_response, '/admin/paystubs/upload', error='Please upload a paystub PDF.')
+        if not is_pdf_upload(paystub_file):
+            return redirect_with_feedback(start_response, '/admin/paystubs/upload', error='Only valid PDF files are allowed.')
+        uploaded_name, uploaded_path = save_upload(paystub_file, 'paystubs')
+        if not uploaded_path:
+            return redirect_with_feedback(start_response, '/admin/paystubs/upload', error='Upload failed. Check file size and try again.')
+        guard_id = int(guard_id_raw)
+        pay_period_start = (data.get('pay_period_start') or '').strip() or None
+        pay_period_end = (data.get('pay_period_end') or '').strip() or None
+        conn = db()
+        guard = conn.execute(
+            "SELECT id FROM users WHERE id=? AND company_id=? AND role='guard' AND active=1",
+            (guard_id, user['company_id']),
+        ).fetchone()
+        if not guard:
+            conn.close()
+            local_file_path = local_path_from_upload(uploaded_path)
+            if local_file_path and os.path.isfile(local_file_path):
+                os.remove(local_file_path)
+            return redirect_with_feedback(start_response, '/admin/paystubs/upload', error='Selected guard was not found for your company.')
+        created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        conn.execute(
+            'INSERT INTO paystubs (guard_id, company_id, file_path, pay_period_start, pay_period_end, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+            (guard_id, user['company_id'], uploaded_path, pay_period_start, pay_period_end, created_at),
+        )
+        conn.commit()
+        conn.close()
+        log_audit(
+            'paystub_uploaded',
+            actor_user_id=user['id'],
+            company_id=user['company_id'],
+            target_type='paystub',
+            target_id=uploaded_name or uploaded_path,
+            message='paystub uploaded',
+            environ=environ,
+            metadata={'guard_id': guard_id, 'pay_period_start': pay_period_start, 'pay_period_end': pay_period_end},
+        )
+        return redirect_with_feedback(start_response, '/admin/paystubs/upload', message='Paystub uploaded successfully.')
+    if path == '/my/paystubs' and method == 'GET':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        if user['role'] != 'guard':
+            return redirect_with_feedback(start_response, '/dashboard', error='Only guards can view personal paystubs.')
+        conn = db()
+        paystubs = conn.execute(
+            'SELECT id, file_path, pay_period_start, pay_period_end, created_at FROM paystubs WHERE company_id=? AND guard_id=? ORDER BY created_at DESC, id DESC',
+            (user['company_id'], user['id']),
+        ).fetchall()
+        conn.close()
+        return app_page(
+            environ,
+            start_response,
+            user,
+            'guard_paystubs.html',
+            active_path='/my/paystubs',
+            view='week',
+            title='My Paystubs',
+            paystubs=paystubs,
+        )
+    paystub_file_match = re.match(r'^/paystubs/(\d+)/file$', path)
+    if paystub_file_match and method == 'GET':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        paystub_id = int(paystub_file_match.group(1))
+        conn = db()
+        paystub = conn.execute('SELECT * FROM paystubs WHERE id=?', (paystub_id,)).fetchone()
+        conn.close()
+        if not paystub:
+            return not_found(start_response)
+        if user['role'] == 'guard':
+            if paystub['company_id'] != user['company_id'] or paystub['guard_id'] != user['id']:
+                return forbidden(start_response)
+        elif user['role'] in {'company_admin', 'superadmin'}:
+            if paystub['company_id'] != user['company_id']:
+                return forbidden(start_response)
+        else:
+            return forbidden(start_response)
+        local_file_path = local_path_from_upload(paystub['file_path'])
+        if local_file_path:
+            if not os.path.isfile(local_file_path):
+                return not_found(start_response)
+            start_response(
+                '200 OK',
+                response_headers(
+                    [('Content-Disposition', f'inline; filename=\"paystub_{paystub_id}.pdf\"')],
+                    'application/pdf'
+                ),
+            )
+            with open(local_file_path, 'rb') as f:
+                return [f.read()]
+        return redirect(start_response, paystub['file_path'])
     if path in {'/admin/run-missed-clock-check', '/admin/run-missed-clock-check/'} and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
