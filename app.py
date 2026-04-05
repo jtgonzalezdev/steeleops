@@ -3099,8 +3099,8 @@ th { color: var(--muted); font-size: 13px; font-weight: 600; }
 .badge.pending, .badge.medium { background: rgba(245,158,11,.16); }
 .badge.closed, .badge.completed, .badge.approved, .badge.low { background: rgba(34,197,94,.16); }
 .badge.declined, .badge.denied, .badge.high { background: rgba(239,68,68,.16); }
-.badge.conflict-leave { background: rgba(245,158,11,.22); border-color: rgba(245,158,11,.5); color: #fde68a; }
-.badge.conflict-overlap { background: rgba(239,68,68,.24); border-color: rgba(239,68,68,.5); color: #fecaca; }
+.badge.conflict-leave { background: rgba(239,68,68,.24); border-color: rgba(239,68,68,.5); color: #fecaca; }
+.badge.conflict-overlap { background: rgba(245,158,11,.22); border-color: rgba(245,158,11,.5); color: #fde68a; }
 .report-card { padding: 14px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.02); margin-bottom: 12px; }
 .report-top { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
 .report-photo { margin-top: 12px; border-radius: 16px; border: 1px solid var(--line); max-height: 220px; object-fit: cover; width: 100%; }
