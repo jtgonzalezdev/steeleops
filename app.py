@@ -36,7 +36,7 @@ os.makedirs(TEMPLATE_DIR, exist_ok=True)
 os.makedirs(STATIC_DIR, exist_ok=True)
 
 APP_ENV = os.getenv('APP_ENV', 'development').lower()
-DATABASE_URL = os.getenv('DATABASE_URL', '').strip()
+DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
 PORT = int(os.getenv('PORT', '8000'))
 HOST = os.getenv('HOST', '0.0.0.0' if APP_ENV == 'production' else '127.0.0.1')
 SECRET_KEY = os.getenv('SECRET_KEY', 'change-me-in-production')
@@ -150,7 +150,7 @@ def db():
     if USE_POSTGRES:
         if psycopg2 is None:
             raise RuntimeError('psycopg2-binary is required when DATABASE_URL points to PostgreSQL.')
-        raw = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        raw = psycopg2.connect(DATABASE_URL, sslmode='require', cursor_factory=psycopg2.extras.RealDictCursor)
         raw.autocommit = False
         return ConnectionWrapper(raw, 'postgres')
     conn = sqlite3.connect(DB_PATH)
