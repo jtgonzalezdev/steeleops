@@ -3138,6 +3138,7 @@ import json
 import re as _re
 import socket
 import threading
+import traceback
 try:
     import boto3
 except Exception:
@@ -3711,6 +3712,7 @@ def missed_clock_scheduler_loop():
             run_missed_clock_scheduler_cycle()
         except Exception as exc:
             print(f'[missed_clock_scheduler] error instance={SCHEDULER_INSTANCE_ID} detail={exc}', flush=True)
+            traceback.print_exc()
         if _missed_clock_scheduler_stop.wait(MISSED_CLOCK_SCHEDULER_INTERVAL_SECONDS):
             break
 
@@ -4955,12 +4957,20 @@ if __name__ == '__main__':
     
     PORT = int(os.environ.get("PORT", 10000))
     
-    if command == 'init-db':
-        init_db(); print('Database initialized.')
-    elif command == 'create-admin':
-        create_admin_account(args.company, args.username, args.password, args.full_name, args.email); print(f'Created company admin {args.username} for {args.company}.')
-    else:
-        init_db(); print(f'SteeleOps running on http://{HOST}:{PORT}')
-        start_missed_clock_scheduler_once()
-        with make_server(HOST, PORT, application) as httpd:
-            httpd.serve_forever()
+    try:
+        print(f'[startup] command={command} app_env={APP_ENV} backend={'postgres' if USE_POSTGRES else 'sqlite'} host={HOST} port={PORT}', flush=True)
+        if command == 'init-db':
+            init_db(); print('Database initialized.')
+        elif command == 'create-admin':
+            create_admin_account(args.company, args.username, args.password, args.full_name, args.email); print(f'Created company admin {args.username} for {args.company}.')
+        elif command == 'serve':
+            init_db(); print(f'SteeleOps running on http://{HOST}:{PORT}')
+            start_missed_clock_scheduler_once()
+            with make_server(HOST, PORT, application) as httpd:
+                httpd.serve_forever()
+        else:
+            raise ValueError(f'Unsupported command: {command}')
+    except Exception:
+        print('[startup] fatal error during boot', flush=True)
+        traceback.print_exc()
+        raise
