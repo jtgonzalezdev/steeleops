@@ -7,17 +7,17 @@ databases:
 services:
   - type: web
     name: steeleops
-    runtime: docker
+    runtime: python
     plan: starter
     autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:${PORT:-10000}
     healthCheckPath: /login
     envVars:
       - key: APP_ENV
         value: production
       - key: HOST
         value: 0.0.0.0
-      - key: PORT
-        value: 10000
       - key: SESSION_COOKIE_SECURE
         value: 1
       - key: SECRET_KEY

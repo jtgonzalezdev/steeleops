@@ -5106,6 +5106,9 @@ def application(environ, start_response):
     return not_found(start_response)
 
 
+app = application
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='SteeleOps server and utilities')
     sub = parser.add_subparsers(dest='command')
@@ -5120,7 +5123,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     command = args.command or 'serve'
     
-    PORT = int(os.environ.get("PORT", 10000))
+    PORT = int(os.environ.get("PORT", "10000"))
     
     try:
         print(f'[startup] command={command} app_env={APP_ENV} backend={'postgres' if USE_POSTGRES else 'sqlite'} host={HOST} port={PORT}', flush=True)
