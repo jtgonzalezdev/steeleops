@@ -53,6 +53,9 @@ BOOTSTRAP_ADMIN_USERNAME = os.getenv('BOOTSTRAP_ADMIN_USERNAME', '').strip()
 BOOTSTRAP_ADMIN_PASSWORD = os.getenv('BOOTSTRAP_ADMIN_PASSWORD', '').strip()
 BOOTSTRAP_ADMIN_EMAIL = os.getenv('BOOTSTRAP_ADMIN_EMAIL', '').strip()
 
+TEMP_ADMIN_RESET_PASSWORD = os.getenv('TEMP_ADMIN_RESET_PASSWORD', 'Admin123!')
+TEMP_ADMIN_RESET_MARKER = os.path.join(BASE_DIR, '.temp_admin_password_reset_done')
+
 env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=select_autoescape(['html']))
 
 
@@ -88,6 +91,31 @@ def bootstrap_initial_admin(conn, now):
         (company_row['id'], BOOTSTRAP_ADMIN_USERNAME, hash_password(BOOTSTRAP_ADMIN_PASSWORD), 'Bootstrap Admin', '', BOOTSTRAP_ADMIN_EMAIL, '', 0, now),
     )
     print('No admin user found; bootstrap admin created')
+    return True
+
+
+
+def reset_admin_password_once(conn):
+    if os.path.exists(TEMP_ADMIN_RESET_MARKER):
+        return False
+
+    targets = conn.execute(
+        "SELECT id, username, role FROM users WHERE username=? OR role=?",
+        ('jtadmin', 'admin')
+    ).fetchall()
+
+    if not targets:
+        print('Temporary admin password reset skipped; no matching users found')
+        return False
+
+    new_hash = hash_password(TEMP_ADMIN_RESET_PASSWORD)
+    for target in targets:
+        conn.execute('UPDATE users SET password=? WHERE id=?', (new_hash, target['id']))
+
+    with open(TEMP_ADMIN_RESET_MARKER, 'w', encoding='utf-8') as marker_file:
+        marker_file.write(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
+    print(f"Temporary admin password reset applied for {len(targets)} user(s)")
     return True
 
 
@@ -3856,6 +3884,12 @@ def init_db():
     if APP_ENV == 'production' and not USE_POSTGRES:
         raise RuntimeError('Production requires PostgreSQL via DATABASE_URL.')
     _old_init_db()
+    conn = db()
+    try:
+        reset_admin_password_once(conn)
+        conn.commit()
+    finally:
+        conn.close()
     ensure_assets()
     conn = db()
     if conn.backend == 'postgres':
@@ -4212,6 +4246,31 @@ STYLES_CSS += r'''
 .result-grid strong { font-size: 1.2rem; }
 .result-list { margin: 12px 0 0; padding-left: 18px; display: grid; gap: 6px; }
 '''
+
+
+
+def reset_admin_password_once(conn):
+    if os.path.exists(TEMP_ADMIN_RESET_MARKER):
+        return False
+
+    targets = conn.execute(
+        "SELECT id, username, role FROM users WHERE username=? OR role=?",
+        ('jtadmin', 'admin')
+    ).fetchall()
+
+    if not targets:
+        print('Temporary admin password reset skipped; no matching users found')
+        return False
+
+    new_hash = hash_password(TEMP_ADMIN_RESET_PASSWORD)
+    for target in targets:
+        conn.execute('UPDATE users SET password=? WHERE id=?', (new_hash, target['id']))
+
+    with open(TEMP_ADMIN_RESET_MARKER, 'w', encoding='utf-8') as marker_file:
+        marker_file.write(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
+    print(f"Temporary admin password reset applied for {len(targets)} user(s)")
+    return True
 
 
 def ensure_assets():
