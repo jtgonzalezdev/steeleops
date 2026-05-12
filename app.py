@@ -60,19 +60,7 @@ env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=select_autoe
 
 
 def bootstrap_initial_admin(conn, now):
-    user_count = fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM users')
-    admin_count = fetch_scalar(conn, "SELECT COUNT(*) AS cnt FROM users WHERE role IN ('superadmin', 'company_admin')")
-    if user_count > 0 or admin_count > 0:
-        print('Admin user exists; skipping bootstrap')
-        return False
-
-    if not BOOTSTRAP_ADMIN_USERNAME or not BOOTSTRAP_ADMIN_PASSWORD or not BOOTSTRAP_ADMIN_EMAIL:
-        print('No admin user found; bootstrap skipped because BOOTSTRAP_ADMIN_* environment variables are incomplete')
-        return False
-
-    existing = conn.execute('SELECT id FROM users WHERE username=? OR email=?', (BOOTSTRAP_ADMIN_USERNAME, BOOTSTRAP_ADMIN_EMAIL)).fetchone()
-    if existing:
-        print('Admin user exists; skipping bootstrap')
+    if not BOOTSTRAP_ADMIN_USERNAME or not BOOTSTRAP_ADMIN_PASSWORD:
         return False
 
     company_row = conn.execute('SELECT id FROM companies ORDER BY id LIMIT 1').fetchone()
@@ -83,14 +71,26 @@ def bootstrap_initial_admin(conn, now):
         )
         company_row = conn.execute('SELECT id FROM companies ORDER BY id LIMIT 1').fetchone()
 
-    conn.execute(
-        """
-        INSERT INTO users (company_id, username, password, full_name, role, phone, email, license_number, hourly_rate, active, created_at)
-        VALUES (?, ?, ?, ?, 'company_admin', ?, ?, ?, ?, 1, ?)
-        """,
-        (company_row['id'], BOOTSTRAP_ADMIN_USERNAME, hash_password(BOOTSTRAP_ADMIN_PASSWORD), 'Bootstrap Admin', '', BOOTSTRAP_ADMIN_EMAIL, '', 0, now),
-    )
-    print('No admin user found; bootstrap admin created')
+    existing = conn.execute('SELECT id FROM users WHERE username=?', (BOOTSTRAP_ADMIN_USERNAME,)).fetchone()
+    password_hash = hash_password(BOOTSTRAP_ADMIN_PASSWORD)
+    if existing:
+        conn.execute(
+            """
+            UPDATE users
+            SET company_id=?, password=?, role='company_admin', active=1
+            WHERE id=?
+            """,
+            (company_row['id'], password_hash, existing['id']),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO users (company_id, username, password, full_name, role, phone, email, license_number, hourly_rate, active, created_at)
+            VALUES (?, ?, ?, ?, 'company_admin', ?, ?, ?, ?, 1, ?)
+            """,
+            (company_row['id'], BOOTSTRAP_ADMIN_USERNAME, password_hash, 'Bootstrap Admin', '', BOOTSTRAP_ADMIN_EMAIL, '', 0, now),
+        )
+    print(f'Bootstrap admin credentials repaired for {BOOTSTRAP_ADMIN_USERNAME}')
     return True
 
 
@@ -3935,12 +3935,6 @@ def init_db():
     if APP_ENV == 'production' and not USE_POSTGRES:
         raise RuntimeError('Production requires PostgreSQL via DATABASE_URL.')
     _old_init_db()
-    conn = db()
-    try:
-        reset_admin_password_once(conn)
-        conn.commit()
-    finally:
-        conn.close()
     ensure_assets()
     conn = db()
     if conn.backend == 'postgres':
