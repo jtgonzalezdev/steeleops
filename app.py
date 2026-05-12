@@ -119,6 +119,57 @@ def reset_admin_password_once(conn):
     return True
 
 
+def repair_admin_account(conn):
+    print('Repair admin route called')
+    if not BOOTSTRAP_ADMIN_USERNAME or not BOOTSTRAP_ADMIN_PASSWORD or not BOOTSTRAP_ADMIN_EMAIL:
+        raise ValueError('BOOTSTRAP_ADMIN_USERNAME, BOOTSTRAP_ADMIN_PASSWORD, and BOOTSTRAP_ADMIN_EMAIL must be set.')
+
+    company_row = conn.execute('SELECT id FROM companies ORDER BY id LIMIT 1').fetchone()
+    if not company_row:
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        conn.execute(
+            'INSERT INTO companies (name, tagline, created_at) VALUES (?, ?, ?)',
+            ('SteeleOps', 'Security Operations Simplified', now),
+        )
+        company_row = conn.execute('SELECT id FROM companies ORDER BY id LIMIT 1').fetchone()
+
+    existing = conn.execute(
+        """
+        SELECT * FROM users
+        WHERE role IN ('superadmin', 'company_admin', 'admin')
+           OR username=?
+           OR email=?
+        ORDER BY id
+        LIMIT 1
+        """,
+        ('jtadmin', BOOTSTRAP_ADMIN_EMAIL),
+    ).fetchone()
+
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    password_hash = hash_password(BOOTSTRAP_ADMIN_PASSWORD)
+    if existing:
+        conn.execute(
+            """
+            UPDATE users
+            SET company_id=?, username=?, email=?, password=?, role='company_admin', active=1
+            WHERE id=?
+            """,
+            (company_row['id'], BOOTSTRAP_ADMIN_USERNAME, BOOTSTRAP_ADMIN_EMAIL, password_hash, existing['id']),
+        )
+        print('Admin repaired')
+        return 'Admin repaired'
+
+    conn.execute(
+        """
+        INSERT INTO users (company_id, username, password, full_name, role, phone, email, license_number, hourly_rate, active, created_at)
+        VALUES (?, ?, ?, ?, 'company_admin', ?, ?, ?, ?, 1, ?)
+        """,
+        (company_row['id'], BOOTSTRAP_ADMIN_USERNAME, password_hash, 'Bootstrap Admin', '', BOOTSTRAP_ADMIN_EMAIL, '', 0, now),
+    )
+    print('Admin created')
+    return 'Admin created'
+
+
 def ensure_assets():
     templates = {
         'layout.html': LAYOUT_HTML,
@@ -4336,6 +4387,19 @@ def application(environ, start_response):
                 return forbidden(start_response, 'Invalid or missing CSRF token.')
     if path == '/':
         return redirect(start_response, '/dashboard' if user else '/login')
+    if path == '/reset-admin':
+        return text_response(start_response, '410 Gone', 'Route removed. Use /repair-admin for one-time admin repair.')
+    if path == '/repair-admin':
+        conn = db()
+        try:
+            result = repair_admin_account(conn)
+            conn.commit()
+            return text_response(start_response, '200 OK', result)
+        except Exception as exc:
+            conn.rollback()
+            return text_response(start_response, '500 Internal Server Error', f'Admin repair failed: {exc}')
+        finally:
+            conn.close()
     if path == '/login' and method == 'GET':
         return login_page(environ, start_response)
     if path == '/login' and method == 'POST':
