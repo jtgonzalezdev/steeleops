@@ -49,7 +49,46 @@ USE_POSTGRES = DATABASE_URL.startswith('postgres://') or DATABASE_URL.startswith
 if DATABASE_URL.startswith('postgres://'):
     DATABASE_URL = 'postgresql://' + DATABASE_URL[len('postgres://'):]
 
+BOOTSTRAP_ADMIN_USERNAME = os.getenv('BOOTSTRAP_ADMIN_USERNAME', '').strip()
+BOOTSTRAP_ADMIN_PASSWORD = os.getenv('BOOTSTRAP_ADMIN_PASSWORD', '').strip()
+BOOTSTRAP_ADMIN_EMAIL = os.getenv('BOOTSTRAP_ADMIN_EMAIL', '').strip()
+
 env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=select_autoescape(['html']))
+
+
+def bootstrap_initial_admin(conn, now):
+    user_count = fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM users')
+    admin_count = fetch_scalar(conn, "SELECT COUNT(*) AS cnt FROM users WHERE role IN ('superadmin', 'company_admin')")
+    if user_count > 0 or admin_count > 0:
+        print('Admin user exists; skipping bootstrap')
+        return False
+
+    if not BOOTSTRAP_ADMIN_USERNAME or not BOOTSTRAP_ADMIN_PASSWORD or not BOOTSTRAP_ADMIN_EMAIL:
+        print('No admin user found; bootstrap skipped because BOOTSTRAP_ADMIN_* environment variables are incomplete')
+        return False
+
+    existing = conn.execute('SELECT id FROM users WHERE username=? OR email=?', (BOOTSTRAP_ADMIN_USERNAME, BOOTSTRAP_ADMIN_EMAIL)).fetchone()
+    if existing:
+        print('Admin user exists; skipping bootstrap')
+        return False
+
+    company_row = conn.execute('SELECT id FROM companies ORDER BY id LIMIT 1').fetchone()
+    if not company_row:
+        conn.execute(
+            'INSERT INTO companies (name, tagline, created_at) VALUES (?, ?, ?)',
+            ('SteeleOps', 'Security Operations Simplified', now),
+        )
+        company_row = conn.execute('SELECT id FROM companies ORDER BY id LIMIT 1').fetchone()
+
+    conn.execute(
+        """
+        INSERT INTO users (company_id, username, password, full_name, role, phone, email, license_number, hourly_rate, active, created_at)
+        VALUES (?, ?, ?, ?, 'company_admin', ?, ?, ?, ?, 1, ?)
+        """,
+        (company_row['id'], BOOTSTRAP_ADMIN_USERNAME, hash_password(BOOTSTRAP_ADMIN_PASSWORD), 'Bootstrap Admin', '', BOOTSTRAP_ADMIN_EMAIL, '', 0, now),
+    )
+    print('No admin user found; bootstrap admin created')
+    return True
 
 
 def ensure_assets():
@@ -931,14 +970,17 @@ def init_db():
             ensure_column(conn, 'time_off_requests', col)
 
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    if fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM companies') == 0:
+    bootstrap_created = bootstrap_initial_admin(conn, now)
+    if not bootstrap_created and fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM companies') == 0:
         conn.execute('INSERT INTO companies (name, tagline, created_at) VALUES (?, ?, ?)', ('SteeleOps Demo', 'Security Operations Simplified', now))
         conn.execute('INSERT INTO companies (name, tagline, created_at) VALUES (?, ?, ?)', ('BlueLine Protective', 'Security Operations Simplified', now))
 
-    demo_company = conn.execute("SELECT id FROM companies WHERE name='SteeleOps Demo'").fetchone()['id']
-    other_company = conn.execute("SELECT id FROM companies WHERE name='BlueLine Protective'").fetchone()['id']
+    demo_company_row = conn.execute("SELECT id FROM companies WHERE name='SteeleOps Demo'").fetchone()
+    other_company_row = conn.execute("SELECT id FROM companies WHERE name='BlueLine Protective'").fetchone()
+    demo_company = demo_company_row['id'] if demo_company_row else None
+    other_company = other_company_row['id'] if other_company_row else None
 
-    if fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM users') == 0:
+    if not bootstrap_created and fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM users') == 0:
         users = [
             (None, 'superadmin', hash_password('admin123'), 'Platform Admin', 'superadmin', '', 'platform@steeleops.local', '', 0, 1, now),
             (demo_company, 'admin', hash_password('admin123'), 'SteeleOps Admin', 'company_admin', '210-555-0101', 'admin@demo.local', 'ADM-100', 28, 1, now),
@@ -950,7 +992,7 @@ def init_db():
             INSERT INTO users (company_id, username, password, full_name, role, phone, email, license_number, hourly_rate, active, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', users)
-    else:
+    elif demo_company is not None:
         # assign missing company ids to demo company and hash plain passwords if needed
         rows = conn.execute('SELECT id, password, company_id, role FROM users').fetchall()
         for row in rows:
@@ -962,14 +1004,14 @@ def init_db():
             if row['role'] == 'admin':
                 conn.execute("UPDATE users SET role='company_admin' WHERE id=?", (row['id'],))
 
-    if fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM clients') == 0:
+    if not bootstrap_created and fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM clients') == 0:
         clients = [
             (demo_company, 'Steele Commercial', 'Facility Manager', 'manager@steele-commercial.local', '210-555-1111', 'Primary point of contact', 1, now),
             (demo_company, 'Riverfront Logistics', 'Ops Manager', 'ops@riverfront-logistics.local', '210-555-2222', '', 1, now),
             (other_company, 'BlueLine Industrial', 'Yard Supervisor', 'yard@blueline-industrial.local', '830-555-3333', '', 1, now),
         ]
         conn.executemany('INSERT INTO clients (company_id, name, contact_name, contact_email, contact_phone, notes, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', clients)
-    if fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM guards') == 0:
+    if not bootstrap_created and fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM guards') == 0:
         guard_users = conn.execute("SELECT company_id, full_name, phone, email, license_number, created_at FROM users WHERE role='guard' AND company_id IS NOT NULL").fetchall()
         for gu in guard_users:
             insert_guard(
@@ -999,7 +1041,7 @@ def init_db():
         if guard:
             conn.execute('UPDATE users SET guard_id=? WHERE id=?', (guard['id'], guard_user['id']))
 
-    if fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM sites') == 0:
+    if not bootstrap_created and fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM sites') == 0:
         steele_client = conn.execute("SELECT id, name FROM clients WHERE company_id=? AND name='Steele Commercial'", (demo_company,)).fetchone()
         river_client = conn.execute("SELECT id, name FROM clients WHERE company_id=? AND name='Riverfront Logistics'", (demo_company,)).fetchone()
         blueline_client = conn.execute("SELECT id, name FROM clients WHERE company_id=? AND name='BlueLine Industrial'", (other_company,)).fetchone()
@@ -1009,10 +1051,10 @@ def init_db():
             (other_company, blueline_client['id'] if blueline_client else None, blueline_client['name'] if blueline_client else 'BlueLine Industrial', 'BlueLine Yard', '44 West Loop, Austin, TX', 'Evening patrols', 1),
         ]
         conn.executemany('INSERT INTO sites (company_id, client_id, client_company_name, name, address, notes, active) VALUES (?, ?, ?, ?, ?, ?, ?)', sites)
-    else:
+    elif demo_company is not None:
         conn.execute('UPDATE sites SET company_id=? WHERE company_id IS NULL', (demo_company,))
         conn.execute("UPDATE sites SET client_company_name = COALESCE(client_company_name, '')")
-    if fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM shifts') == 0:
+    if not bootstrap_created and fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM shifts') == 0:
         g1 = conn.execute("SELECT id FROM users WHERE username='guard1'").fetchone()['id']
         g2 = conn.execute("SELECT id FROM users WHERE username='guard2'").fetchone()['id']
         s1 = conn.execute("SELECT id FROM sites WHERE name='Steele Plaza'").fetchone()['id']
@@ -1027,7 +1069,7 @@ def init_db():
         for assigned_user_id, site_id, shift_date, start_time, end_time, status, scheduled_hours, worked_hours, overtime_alert, notes in [(row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10]) for row in demo_shifts]:
             sql, params = shift_insert_sql_and_params(conn, shift_columns, [demo_company, site_id, shift_date, start_time, end_time, status, scheduled_hours, worked_hours, overtime_alert, notes], assigned_user_id)
             conn.execute(sql, params)
-    else:
+    elif demo_company is not None:
         conn.execute('UPDATE shifts SET company_id=? WHERE company_id IS NULL', (demo_company,))
         # backfill scheduled hours
         for row in conn.execute('SELECT id, start_time, end_time, scheduled_hours FROM shifts').fetchall():
