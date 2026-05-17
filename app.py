@@ -3074,11 +3074,13 @@ PAYROLL_HTML = r'''{% extends "app_shell.html" %}
         <div><strong>Clock Records</strong><div class="small-muted">{{ payroll_review.clock_records }}</div></div>
         <div><strong>Missing Punch</strong><div class="small-muted">{{ payroll_review.missing_warning }}</div></div>
       </div>
-      <div class="row-3">
+        <div class="row-3">
         <div><strong>Total</strong><div class="small-muted">{{ '%.2f'|format(payroll_review.total_hours) }} hrs</div></div>
         <div><strong>Regular / OT</strong><div class="small-muted">{{ '%.2f'|format(payroll_review.regular_hours) }} / {{ '%.2f'|format(payroll_review.overtime_hours) }}</div></div>
         <div><strong>Rate / Gross</strong><div class="small-muted">${{ '%.2f'|format(payroll_review.pay_rate) }} / ${{ '%.2f'|format(payroll_review.gross_pay) }}</div></div>
       </div>
+      {% if payroll_review.manual_override_used %}<div class="badge pending">Manual Hours Override</div>{% endif %}
+      {% if payroll_review.show_manual_override %}<div class="small-muted">Manual hours require admin approval before payroll export.</div>{% endif %}
       <div class="small-muted">Guard notes: {{ payroll_review.guard_notes }}</div>
       <form method="post" action="/admin/payroll/review/action" class="stack compact">
         {{ csrf_input|safe }}
@@ -3086,8 +3088,19 @@ PAYROLL_HTML = r'''{% extends "app_shell.html" %}
         <input type="hidden" name="end" value="{{ payroll_end }}">
         <input type="hidden" name="guard_id" value="{{ payroll_review.guard_id }}">
         <label>Admin Notes<textarea name="admin_notes" rows="3">{{ payroll_review.admin_notes }}</textarea></label>
+        {% if payroll_review.show_manual_override %}
+        <div class="card">
+          <div class="section-head"><h3>Manual Hours Override</h3><span>Controlled admin correction</span></div>
+          <div class="row-2">
+            <label>Regular Hours<input type="number" min="0" step="0.01" name="manual_regular_hours" value="{{ '%.2f'|format(payroll_review.manual_regular_hours) }}"></label>
+            <label>Overtime Hours<input type="number" min="0" step="0.01" name="manual_overtime_hours" value="{{ '%.2f'|format(payroll_review.manual_overtime_hours) }}"></label>
+          </div>
+          <label>Admin Reason / Notes<textarea name="manual_reason" rows="3">{{ payroll_review.manual_reason }}</textarea></label>
+          <button class="btn ghost" name="action" value="save_manual_hours" {% if payroll_review.locked %}disabled{% endif %}>Save Manual Hours</button>
+        </div>
+        {% endif %}
         <div class="actions">
-          <button class="btn" name="action" value="approve" {% if payroll_review.locked %}disabled{% endif %}>Approve Hours</button>
+          <button class="btn" name="action" value="approve" {% if payroll_review.locked or payroll_review.approval_blocked %}disabled{% endif %}>Approve Hours</button>
           <button class="btn ghost" name="action" value="edit" {% if payroll_review.locked %}disabled{% endif %}>Edit Hours</button>
           <button class="btn ghost" name="action" value="flag" {% if payroll_review.locked %}disabled{% endif %}>Flag Issue</button>
           <button class="btn ghost" name="action" value="send_back" {% if payroll_review.locked %}disabled{% endif %}>Send Back</button>
@@ -4219,6 +4232,9 @@ def init_db():
         ensure_column(conn, 'reports', 'updated_at TEXT')
     if table_exists(conn, 'sites'):
         ensure_column(conn, 'sites', 'client_id INTEGER')
+    if table_exists(conn, 'payroll_guard_records'):
+        ensure_column(conn, 'payroll_guard_records', 'manual_override_used INTEGER DEFAULT 0')
+        ensure_column(conn, 'payroll_guard_records', 'manual_override_reason TEXT')
     if APP_ENV == 'production':
         # conn.execute("DELETE FROM users WHERE username IN ('superadmin','admin','guard1','guard2','demoadmin') AND email LIKE '%%.local'")
         conn.execute("DELETE FROM companies WHERE name IN ('SteeleOps Demo','BlueLine Protective') AND id NOT IN (SELECT DISTINCT company_id FROM users WHERE company_id IS NOT NULL)")
@@ -5302,16 +5318,31 @@ def application(environ, start_response):
                 shifts = conn.execute('SELECT clock_in_time, clock_out_time, notes FROM shifts WHERE company_id=? AND COALESCE(user_id, guard_id)=? AND shift_date BETWEEN ? AND ? ORDER BY shift_date, start_time', (user['company_id'], review_row['guard_id'], start_date, end_date)).fetchall()
                 missing = any((not s['clock_in_time']) or (not s['clock_out_time']) for s in shifts) or len(shifts) == 0
                 rec = record_map.get(review_row['guard_id'])
+                computed_regular_hours = float(max((review_row['total_hours'] or 0) - (review_row['overtime_hours'] or 0), 0))
+                manual_override_used = bool(rec and rec['manual_override_used'])
+                manual_regular_hours = float(rec['regular_hours']) if rec and manual_override_used else computed_regular_hours
+                manual_overtime_hours = float(rec['overtime_hours']) if rec and manual_override_used else float(review_row['overtime_hours'] or 0)
+                manual_total_hours = manual_regular_hours + manual_overtime_hours
+                effective_total_hours = manual_total_hours if manual_override_used else float(review_row['total_hours'] or 0)
+                effective_gross_pay = (manual_regular_hours * float(review_row['hourly_rate'] or 0)) + (manual_overtime_hours * float(review_row['hourly_rate'] or 0) * 1.5) if manual_override_used else float(review_row['gross_pay'] or 0)
+                show_manual_override = missing or (query.get('manual_mode') == '1') or manual_override_used
+                approval_blocked = (missing and not manual_override_used) or effective_total_hours <= 0
                 review = {
                     'guard_id': review_row['guard_id'], 'guard_name': review_row['full_name'], 'period_start': start_date, 'period_end': end_date,
                     'site_name': review_row['site_name'] or 'Multiple', 'clock_records': f'{len(shifts)} shifts captured',
-                    'total_hours': float(review_row['total_hours'] or 0), 'regular_hours': float(max((review_row['total_hours'] or 0) - (review_row['overtime_hours'] or 0), 0)),
-                    'overtime_hours': float(review_row['overtime_hours'] or 0), 'pay_rate': float(review_row['hourly_rate'] or 0), 'gross_pay': float(review_row['gross_pay'] or 0),
-                    'missing_warning': 'Missing clock-in or clock-out found.' if missing else 'No missing punches detected.',
+                    'total_hours': effective_total_hours, 'regular_hours': manual_regular_hours,
+                    'overtime_hours': manual_overtime_hours, 'pay_rate': float(review_row['hourly_rate'] or 0), 'gross_pay': effective_gross_pay,
+                    'missing_warning': 'Missing clock-in or clock-out found.' if (missing and not manual_override_used) else 'No missing punches detected.',
                     'guard_notes': '; '.join([s['notes'] for s in shifts if s['notes']]) or 'No guard notes.',
                     'admin_notes': rec['admin_notes'] if rec else '',
                     'locked': bool(period and period['status'] == 'sent_to_quickbooks'),
                     'error': query.get('review_error', ''),
+                    'show_manual_override': show_manual_override,
+                    'manual_override_used': manual_override_used,
+                    'manual_regular_hours': manual_regular_hours,
+                    'manual_overtime_hours': manual_overtime_hours,
+                    'manual_reason': rec['manual_override_reason'] if rec else '',
+                    'approval_blocked': approval_blocked,
                 }
                 log_audit('payroll_review_opened', actor_user_id=user['id'], company_id=user['company_id'], target_type='payroll_guard', target_id=str(review_row['guard_id']), message='review opened', environ=environ, metadata={'start': start_date, 'end': end_date})
         conn.close()
@@ -5337,11 +5368,43 @@ def application(environ, start_response):
         row = payroll_rows(user['company_id'], start_date, end_date, guard_id)[0]
         shifts = conn.execute('SELECT clock_in_time, clock_out_time FROM shifts WHERE company_id=? AND COALESCE(user_id, guard_id)=? AND shift_date BETWEEN ? AND ?', (user['company_id'], guard_id, start_date, end_date)).fetchall()
         missing = any((not s['clock_in_time']) or (not s['clock_out_time']) for s in shifts) or len(shifts) == 0
+        existing_rec = conn.execute('SELECT * FROM payroll_guard_records WHERE company_id=? AND period_id=? AND guard_id=? ORDER BY id DESC LIMIT 1', (user['company_id'], period['id'], guard_id)).fetchone()
+        manual_override_used = bool(existing_rec and existing_rec['manual_override_used'])
+        regular_hours = float(max((row['total_hours'] or 0) - (row['overtime_hours'] or 0), 0))
+        overtime_hours = float(row['overtime_hours'] or 0)
+        gross_pay_estimate = float(row['gross_pay'] or 0)
         status = 'pending_review'
+        if action == 'save_manual_hours':
+            try:
+                regular_hours = float(data.get('manual_regular_hours') or 0)
+                overtime_hours = float(data.get('manual_overtime_hours') or 0)
+            except (TypeError, ValueError):
+                conn.close()
+                return redirect(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date, 'guard_id': guard_id, 'review_error': 'Manual regular and overtime hours must be valid numbers.', 'manual_mode': '1'})}")
+            manual_reason = (data.get('manual_reason') or '').strip()
+            if regular_hours < 0 or overtime_hours < 0:
+                conn.close()
+                return redirect(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date, 'guard_id': guard_id, 'review_error': 'Manual hours cannot be negative.', 'manual_mode': '1'})}")
+            if (regular_hours + overtime_hours) <= 0:
+                conn.close()
+                return redirect(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date, 'guard_id': guard_id, 'review_error': 'At least one of regular or overtime hours must be greater than 0.', 'manual_mode': '1'})}")
+            if not manual_reason:
+                conn.close()
+                return redirect(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date, 'guard_id': guard_id, 'review_error': 'Admin Reason / Notes is required for manual override.', 'manual_mode': '1'})}")
+            gross_pay_estimate = (regular_hours * float(row['hourly_rate'] or 0)) + (overtime_hours * float(row['hourly_rate'] or 0) * 1.5)
+            status = 'pending_review'
+            manual_override_used = True
+            old_regular = float(existing_rec['regular_hours']) if existing_rec else float(max((row['total_hours'] or 0) - (row['overtime_hours'] or 0), 0))
+            old_overtime = float(existing_rec['overtime_hours']) if existing_rec else float(row['overtime_hours'] or 0)
+            audit_note = f"guard_id={guard_id}; pay_period_start={start_date}; pay_period_end={end_date}; old_regular_hours={old_regular:.2f}; old_overtime_hours={old_overtime:.2f}; new_regular_hours={regular_hours:.2f}; new_overtime_hours={overtime_hours:.2f}; admin_reason={manual_reason}; admin_user={user['username']}"
+            conn.execute('INSERT INTO payroll_audit_logs (company_id, period_id, guard_id, event_type, notes, actor_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], period['id'], guard_id, 'manual_hours_saved', audit_note, user['id'], datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         if action == 'approve':
-            if missing:
+            if missing and not manual_override_used:
                 conn.close()
                 return redirect(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date, 'guard_id': guard_id, 'review_error': 'Cannot approve: missing clock-in or clock-out.'})}")
+            if (regular_hours + overtime_hours) <= 0:
+                conn.close()
+                return redirect(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date, 'guard_id': guard_id, 'review_error': 'Cannot approve: valid hours are required.'})}")
             status = 'approved'
         elif action == 'flag':
             status = 'issue_flagged'
@@ -5349,9 +5412,10 @@ def application(environ, start_response):
             status = 'pending_review'
         elif action == 'edit':
             status = 'hours_edited'
+            return redirect(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date, 'guard_id': guard_id, 'manual_mode': '1'})}")
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         conn.execute('DELETE FROM payroll_guard_records WHERE company_id=? AND period_id=? AND guard_id=?', (user['company_id'], period['id'], guard_id))
-        conn.execute('INSERT INTO payroll_guard_records (period_id, company_id, guard_id, regular_hours, overtime_hours, pay_rate, gross_pay_estimate, status, admin_notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', (period['id'], user['company_id'], guard_id, max((row['total_hours'] or 0) - (row['overtime_hours'] or 0), 0), row['overtime_hours'] or 0, row['hourly_rate'] or 0, row['gross_pay'] or 0, status, data.get('admin_notes', '')))
+        conn.execute('INSERT INTO payroll_guard_records (period_id, company_id, guard_id, regular_hours, overtime_hours, pay_rate, gross_pay_estimate, status, admin_notes, manual_override_used, manual_override_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (period['id'], user['company_id'], guard_id, regular_hours, overtime_hours, row['hourly_rate'] or 0, gross_pay_estimate, status, data.get('admin_notes', ''), 1 if manual_override_used else 0, (data.get('manual_reason', '') or (existing_rec['manual_override_reason'] if existing_rec else ''))))
         conn.execute('INSERT INTO payroll_audit_logs (company_id, period_id, guard_id, event_type, notes, actor_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], period['id'], guard_id, f'payroll_{action}', data.get('admin_notes', ''), user['id'], now))
         conn.commit(); conn.close()
         log_audit('payroll_review_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='payroll_guard', target_id=str(guard_id), message=f'{action} action', environ=environ, metadata={'start': start_date, 'end': end_date})
