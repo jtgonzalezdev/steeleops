@@ -1983,6 +1983,38 @@ def payroll_rows(company_id, start_date, end_date, guard_id=None):
     return rows
 
 
+
+
+def get_payroll_display_values(payroll_row, guard_record=None):
+    pay_rate = float((payroll_row or {}).get('hourly_rate') or 0)
+    clock_overtime_hours = float((payroll_row or {}).get('overtime_hours') or 0)
+    clock_total_hours = float((payroll_row or {}).get('total_hours') or 0)
+    clock_regular_hours = float(max(clock_total_hours - clock_overtime_hours, 0))
+
+    manual_override_used = bool(guard_record and guard_record.get('manual_override_used'))
+    if manual_override_used:
+        regular_hours = float(guard_record.get('regular_hours') or 0)
+        overtime_hours = float(guard_record.get('overtime_hours') or 0)
+        source = 'manual_override'
+    elif clock_total_hours > 0:
+        regular_hours = clock_regular_hours
+        overtime_hours = clock_overtime_hours
+        source = 'clock_records'
+    else:
+        regular_hours = 0.0
+        overtime_hours = 0.0
+        source = 'zero'
+
+    total_hours = regular_hours + overtime_hours
+    overtime_rate = pay_rate * 1.5
+    estimated_gross_pay = (regular_hours * pay_rate) + (overtime_hours * overtime_rate)
+    return {
+        'regular_hours': regular_hours,
+        'overtime_hours': overtime_hours,
+        'total_hours': total_hours,
+        'estimated_gross_pay': estimated_gross_pay,
+        'source': source,
+    }
 def payroll_guard_record_map(conn, company_id, period_id):
     if not period_id:
         return {}
@@ -3059,7 +3091,7 @@ PAYROLL_HTML = r'''{% extends "app_shell.html" %}
       <div class="table-wrap">
         <table>
           <thead><tr><th>Guard Name</th><th>Site / Location</th><th>Regular Hours</th><th>Overtime Hours</th><th>Total Hours</th><th>Pay Rate</th><th>Estimated Gross Pay</th><th>Status</th><th>Actions</th></tr></thead>
-          <tbody>{% for row in payroll_rows %}<tr><td>{{ row.full_name }}</td><td>{{ row.site_name }}</td><td>{{ '%.2f'|format((row.total_hours or 0) - (row.overtime_hours or 0)) }}</td><td>{{ '%.2f'|format(row.overtime_hours or 0) }}</td><td>{{ '%.2f'|format(row.total_hours or 0) }}</td><td>${{ '%.2f'|format(row.hourly_rate or 0) }}</td><td>${{ '%.2f'|format(row.gross_pay or 0) }}</td><td><span class="badge assigned">{{ row.review_status_label }}</span></td><td><a class="btn ghost" href="/admin/payroll/review?start={{ payroll_start }}&end={{ payroll_end }}&guard_id={{ row.guard_id }}">Review</a></td></tr>{% else %}<tr><td colspan="9">No payroll rows found for this period.</td></tr>{% endfor %}</tbody>
+          <tbody>{% for row in payroll_rows %}<tr><td>{{ row.full_name }}</td><td>{{ row.site_name }}</td><td>{{ '%.2f'|format(row.regular_hours or 0) }}</td><td>{{ '%.2f'|format(row.overtime_hours or 0) }}</td><td>{{ '%.2f'|format(row.total_hours or 0) }}</td><td>${{ '%.2f'|format(row.hourly_rate or 0) }}</td><td>${{ '%.2f'|format(row.gross_pay or 0) }}</td><td><span class="badge assigned">{{ row.review_status_label }}</span></td><td><a class="btn ghost" href="/admin/payroll/review?start={{ payroll_start }}&end={{ payroll_end }}&guard_id={{ row.guard_id }}">Review</a></td></tr>{% else %}<tr><td colspan="9">No payroll rows found for this period.</td></tr>{% endfor %}</tbody>
         </table>
       </div>
       {% else %}<div class="empty">Generate a report to view payroll totals.</div>{% endif %}
@@ -5311,27 +5343,30 @@ def application(environ, start_response):
         review_guard_id = query.get('guard_id')
         for r in rows:
             rec = record_map.get(r['guard_id'])
-            r['review_status_label'] = (rec['status'].replace('_', ' ').title() if rec else ('Approved' if (r['total_hours'] or 0) > 0 else 'Pending Review'))
+            display = get_payroll_display_values(r, rec)
+            r['regular_hours'] = display['regular_hours']
+            r['overtime_hours'] = display['overtime_hours']
+            r['total_hours'] = display['total_hours']
+            r['gross_pay'] = display['estimated_gross_pay']
+            r['hours_source'] = display['source']
+            r['review_status_label'] = (rec['status'].replace('_', ' ').title() if rec else ('Approved' if display['total_hours'] > 0 else 'Pending Review'))
         if review_guard_id:
             review_row = next((r for r in rows if str(r['guard_id']) == str(review_guard_id)), None)
             if review_row:
                 shifts = conn.execute('SELECT clock_in_time, clock_out_time, notes FROM shifts WHERE company_id=? AND COALESCE(user_id, guard_id)=? AND shift_date BETWEEN ? AND ? ORDER BY shift_date, start_time', (user['company_id'], review_row['guard_id'], start_date, end_date)).fetchall()
                 missing = any((not s['clock_in_time']) or (not s['clock_out_time']) for s in shifts) or len(shifts) == 0
                 rec = record_map.get(review_row['guard_id'])
-                computed_regular_hours = float(max((review_row['total_hours'] or 0) - (review_row['overtime_hours'] or 0), 0))
-                manual_override_used = bool(rec and rec['manual_override_used'])
-                manual_regular_hours = float(rec['regular_hours']) if rec and manual_override_used else computed_regular_hours
-                manual_overtime_hours = float(rec['overtime_hours']) if rec and manual_override_used else float(review_row['overtime_hours'] or 0)
-                manual_total_hours = manual_regular_hours + manual_overtime_hours
-                effective_total_hours = manual_total_hours if manual_override_used else float(review_row['total_hours'] or 0)
-                effective_gross_pay = (manual_regular_hours * float(review_row['hourly_rate'] or 0)) + (manual_overtime_hours * float(review_row['hourly_rate'] or 0) * 1.5) if manual_override_used else float(review_row['gross_pay'] or 0)
+                display = get_payroll_display_values(review_row, rec)
+                manual_override_used = display['source'] == 'manual_override'
+                effective_total_hours = display['total_hours']
+                effective_gross_pay = display['estimated_gross_pay']
                 show_manual_override = missing or (query.get('manual_mode') == '1') or manual_override_used
                 approval_blocked = (missing and not manual_override_used) or effective_total_hours <= 0
                 review = {
                     'guard_id': review_row['guard_id'], 'guard_name': review_row['full_name'], 'period_start': start_date, 'period_end': end_date,
                     'site_name': review_row['site_name'] or 'Multiple', 'clock_records': f'{len(shifts)} shifts captured',
-                    'total_hours': effective_total_hours, 'regular_hours': manual_regular_hours,
-                    'overtime_hours': manual_overtime_hours, 'pay_rate': float(review_row['hourly_rate'] or 0), 'gross_pay': effective_gross_pay,
+                    'total_hours': effective_total_hours, 'regular_hours': display['regular_hours'],
+                    'overtime_hours': display['overtime_hours'], 'pay_rate': float(review_row['hourly_rate'] or 0), 'gross_pay': effective_gross_pay,
                     'missing_warning': 'Missing clock-in or clock-out found.' if (missing and not manual_override_used) else 'No missing punches detected.',
                     'guard_notes': '; '.join([s['notes'] for s in shifts if s['notes']]) or 'No guard notes.',
                     'admin_notes': rec['admin_notes'] if rec else '',
@@ -5339,8 +5374,8 @@ def application(environ, start_response):
                     'error': query.get('review_error', ''),
                     'show_manual_override': show_manual_override,
                     'manual_override_used': manual_override_used,
-                    'manual_regular_hours': manual_regular_hours,
-                    'manual_overtime_hours': manual_overtime_hours,
+                    'manual_regular_hours': display['regular_hours'],
+                    'manual_overtime_hours': display['overtime_hours'],
                     'manual_reason': rec['manual_override_reason'] if rec else '',
                     'approval_blocked': approval_blocked,
                 }
@@ -5369,10 +5404,11 @@ def application(environ, start_response):
         shifts = conn.execute('SELECT clock_in_time, clock_out_time FROM shifts WHERE company_id=? AND COALESCE(user_id, guard_id)=? AND shift_date BETWEEN ? AND ?', (user['company_id'], guard_id, start_date, end_date)).fetchall()
         missing = any((not s['clock_in_time']) or (not s['clock_out_time']) for s in shifts) or len(shifts) == 0
         existing_rec = conn.execute('SELECT * FROM payroll_guard_records WHERE company_id=? AND period_id=? AND guard_id=? ORDER BY id DESC LIMIT 1', (user['company_id'], period['id'], guard_id)).fetchone()
+        base_display = get_payroll_display_values(row, None)
         manual_override_used = bool(existing_rec and existing_rec['manual_override_used'])
-        clock_regular_hours = float(max((row['total_hours'] or 0) - (row['overtime_hours'] or 0), 0))
-        clock_overtime_hours = float(row['overtime_hours'] or 0)
-        clock_total_hours = clock_regular_hours + clock_overtime_hours
+        clock_regular_hours = float(base_display['regular_hours'])
+        clock_overtime_hours = float(base_display['overtime_hours'])
+        clock_total_hours = float(base_display['total_hours'])
         regular_hours = float(existing_rec['regular_hours']) if manual_override_used and existing_rec else clock_regular_hours
         overtime_hours = float(existing_rec['overtime_hours']) if manual_override_used and existing_rec else clock_overtime_hours
         gross_pay_estimate = (regular_hours * float(row['hourly_rate'] or 0)) + (overtime_hours * float(row['hourly_rate'] or 0) * 1.5) if manual_override_used else float(row['gross_pay'] or 0)
