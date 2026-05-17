@@ -1967,13 +1967,14 @@ def payroll_rows(company_id, start_date, end_date, guard_id=None):
         guard_filter = ' AND u.id=? '
         params.append(guard_id)
     rows = conn.execute(f'''
-        SELECT u.id as guard_id, u.full_name, u.hourly_rate,
+        SELECT u.id as guard_id, u.full_name, u.email, u.hourly_rate, COALESCE(MAX(si.name),'Multiple') AS site_name,
                COUNT(s.id) as shifts_count,
                COALESCE(SUM(s.worked_hours), 0) as total_hours,
                COALESCE(SUM(CASE WHEN s.worked_hours > 8 THEN s.worked_hours - 8 ELSE 0 END),0) as overtime_hours,
                COALESCE(SUM(s.worked_hours * u.hourly_rate), 0) as gross_pay
         FROM users u
         LEFT JOIN shifts s ON u.id=COALESCE(s.user_id, s.guard_id) AND s.shift_date BETWEEN ? AND ?
+        LEFT JOIN sites si ON si.id=s.site_id
         WHERE u.company_id=? AND u.role='guard' {guard_filter}
         GROUP BY u.id
         ORDER BY u.full_name
@@ -1986,10 +1987,33 @@ def payroll_csv(company_id, start_date, end_date):
     rows = payroll_rows(company_id, start_date, end_date)
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(['Guard Name', 'Pay Period Start', 'Pay Period End', 'Shifts', 'Hours Worked', 'Overtime Hours', 'Hourly Rate', 'Gross Pay'])
+    writer.writerow(['Employee Name', 'Employee Email', 'Pay Period Start', 'Pay Period End', 'Regular Hours', 'Overtime Hours', 'Pay Rate', 'Overtime Rate', 'Gross Pay Estimate', 'Site / Location', 'Notes'])
     for row in rows:
-        writer.writerow([row['full_name'], start_date, end_date, row['shifts_count'], row['total_hours'], row['overtime_hours'], row['hourly_rate'], round(row['gross_pay'], 2)])
+        regular_hours = max((row['total_hours'] or 0) - (row['overtime_hours'] or 0), 0)
+        writer.writerow([
+            row['full_name'],
+            row.get('email', ''),
+            start_date,
+            end_date,
+            round(regular_hours, 2),
+            round(row['overtime_hours'] or 0, 2),
+            round(row['hourly_rate'] or 0, 2),
+            round((row['hourly_rate'] or 0) * 1.5, 2),
+            round(row['gross_pay'] or 0, 2),
+            row.get('site_name', 'Multiple'),
+            'Prepared in SteeleOps for QuickBooks processing only.',
+        ])
     return output.getvalue().encode('utf-8')
+
+
+def payroll_period_status(conn, period_id):
+    period = conn.execute('SELECT * FROM payroll_periods WHERE id=?', (period_id,)).fetchone()
+    if not period:
+        return 'Pending Approval'
+    if period['status'] == 'sent_to_quickbooks':
+        return 'Sent to QuickBooks'
+    pending = conn.execute("SELECT COUNT(*) AS cnt FROM payroll_guard_records WHERE period_id=? AND status NOT IN ('approved','excluded','sent_to_quickbooks')", (period_id,)).fetchone()
+    return 'Ready to Process' if pending and pending['cnt'] == 0 else 'Pending Approval'
 
 
 def application(environ, start_response):
@@ -3002,17 +3026,17 @@ PAYROLL_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
     <section class="grid two-col">
       <div class="card">
-        <div class="section-head"><h3>Payroll Reporting</h3><span>Generate payroll-ready totals without dashboard widgets</span></div>
+        <div class="section-head"><h3>Payroll Processing</h3><span>QuickBooks is the payroll source of truth</span></div>
         <form method="get" action="/admin/payroll" class="stack compact">
           <div class="row-2"><label>Pay Period Start<input type="date" name="start" value="{{ payroll_start or '' }}"></label><label>Pay Period End<input type="date" name="end" value="{{ payroll_end or '' }}"></label></div>
-          <button class="btn primary" type="submit">Generate Payroll Report</button>
+          <button class="btn primary" type="submit">Load Pay Period</button>
         </form>
-        <div class="small-muted">Use this page to review payroll totals and export the CSV for your selected pay period.</div>
+        <div class="small-muted">SteeleOps prepares approved hours only. Taxes, direct deposit, official payroll and paystubs stay in QuickBooks.</div>
       </div>
       <div class="card">
-        <div class="section-head"><h3>Payroll Export</h3><span>Download payroll data for your accounting workflow</span></div>
+        <div class="section-head"><h3>Status</h3><span>{{ payroll_period.status.replace('_', ' ').title() if payroll_period else 'Pending Approval' }}</span></div>
         {% if payroll_rows is defined %}
-        <a class="btn" href="/admin/payroll/export.csv?start={{ payroll_start }}&end={{ payroll_end }}">Export Payroll CSV</a>
+        <a class="btn" href="/admin/payroll/export.csv?start={{ payroll_start }}&end={{ payroll_end }}">Generate Payroll Export</a>
         {% else %}<div class="empty">Choose a pay period to enable CSV export.</div>{% endif %}
       </div>
     </section>
@@ -3021,8 +3045,8 @@ PAYROLL_HTML = r'''{% extends "app_shell.html" %}
       {% if payroll_rows is defined %}
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Guard</th><th>Hours</th><th>OT</th><th>Rate</th><th>Gross</th></tr></thead>
-          <tbody>{% for row in payroll_rows %}<tr><td>{{ row.full_name }}</td><td>{{ row.total_hours }}</td><td>{{ row.overtime_hours }}</td><td>${{ '%.2f'|format(row.hourly_rate or 0) }}</td><td>${{ '%.2f'|format(row.gross_pay or 0) }}</td></tr>{% else %}<tr><td colspan="5">No payroll rows found for this period.</td></tr>{% endfor %}</tbody>
+          <thead><tr><th>Guard Name</th><th>Site / Location</th><th>Regular Hours</th><th>Overtime Hours</th><th>Total Hours</th><th>Pay Rate</th><th>Estimated Gross Pay</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody>{% for row in payroll_rows %}<tr><td>{{ row.full_name }}</td><td>{{ row.site_name }}</td><td>{{ '%.2f'|format((row.total_hours or 0) - (row.overtime_hours or 0)) }}</td><td>{{ '%.2f'|format(row.overtime_hours or 0) }}</td><td>{{ '%.2f'|format(row.total_hours or 0) }}</td><td>${{ '%.2f'|format(row.hourly_rate or 0) }}</td><td>${{ '%.2f'|format(row.gross_pay or 0) }}</td><td><span class="badge assigned">{% if (row.total_hours or 0) > 0 %}Approved{% else %}Pending Review{% endif %}</span></td><td><a class="btn ghost" href="/dashboard">Review</a></td></tr>{% else %}<tr><td colspan="9">No payroll rows found for this period.</td></tr>{% endfor %}</tbody>
         </table>
       </div>
       {% else %}<div class="empty">Generate a report to view payroll totals.</div>{% endif %}
@@ -3979,6 +4003,68 @@ def init_db():
             FOREIGN KEY(guard_id) REFERENCES users(id),
             FOREIGN KEY(company_id) REFERENCES companies(id)
         );
+        CREATE TABLE IF NOT EXISTS payroll_periods (
+            id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            company_id INTEGER NOT NULL,
+            period_start TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending_approval',
+            locked_at TEXT,
+            created_by INTEGER,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS payroll_runs (
+            id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            period_id INTEGER NOT NULL,
+            company_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'generated',
+            generated_by INTEGER,
+            generated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS payroll_guard_records (
+            id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            period_id INTEGER NOT NULL,
+            run_id INTEGER,
+            company_id INTEGER NOT NULL,
+            guard_id INTEGER NOT NULL,
+            regular_hours DOUBLE PRECISION DEFAULT 0,
+            overtime_hours DOUBLE PRECISION DEFAULT 0,
+            pay_rate DOUBLE PRECISION DEFAULT 0,
+            gross_pay_estimate DOUBLE PRECISION DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending_review',
+            admin_notes TEXT,
+            excluded INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS payroll_exports (
+            id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            period_id INTEGER NOT NULL,
+            run_id INTEGER NOT NULL,
+            company_id INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            created_by INTEGER,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS guard_paystubs (
+            id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            company_id INTEGER NOT NULL,
+            guard_id INTEGER NOT NULL,
+            period_id INTEGER,
+            pay_date TEXT,
+            file_path TEXT NOT NULL,
+            notes TEXT,
+            created_by INTEGER,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS payroll_audit_logs (
+            id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            company_id INTEGER NOT NULL,
+            period_id INTEGER,
+            guard_id INTEGER,
+            event_type TEXT NOT NULL,
+            notes TEXT,
+            actor_user_id INTEGER,
+            created_at TEXT NOT NULL
+        );
         ''')
     else:
         conn.cursor().executescript('''
@@ -4021,6 +4107,68 @@ def init_db():
             created_at TEXT NOT NULL,
             FOREIGN KEY(guard_id) REFERENCES users(id),
             FOREIGN KEY(company_id) REFERENCES companies(id)
+        );
+        CREATE TABLE IF NOT EXISTS payroll_periods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL,
+            period_start TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending_approval',
+            locked_at TEXT,
+            created_by INTEGER,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS payroll_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period_id INTEGER NOT NULL,
+            company_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'generated',
+            generated_by INTEGER,
+            generated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS payroll_guard_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period_id INTEGER NOT NULL,
+            run_id INTEGER,
+            company_id INTEGER NOT NULL,
+            guard_id INTEGER NOT NULL,
+            regular_hours REAL DEFAULT 0,
+            overtime_hours REAL DEFAULT 0,
+            pay_rate REAL DEFAULT 0,
+            gross_pay_estimate REAL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending_review',
+            admin_notes TEXT,
+            excluded INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS payroll_exports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period_id INTEGER NOT NULL,
+            run_id INTEGER NOT NULL,
+            company_id INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            created_by INTEGER,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS guard_paystubs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL,
+            guard_id INTEGER NOT NULL,
+            period_id INTEGER,
+            pay_date TEXT,
+            file_path TEXT NOT NULL,
+            notes TEXT,
+            created_by INTEGER,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS payroll_audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL,
+            period_id INTEGER,
+            guard_id INTEGER,
+            event_type TEXT NOT NULL,
+            notes TEXT,
+            actor_user_id INTEGER,
+            created_at TEXT NOT NULL
         );
         ''')
     if table_exists(conn, 'reports'):
@@ -4956,7 +5104,7 @@ def application(environ, start_response):
         """, (user['company_id'],)).fetchall()
         recent_paystubs = conn.execute("""
             SELECT p.id, p.pay_period_start, p.pay_period_end, p.created_at, u.full_name AS guard_name
-            FROM paystubs p
+            FROM guard_paystubs p
             JOIN users u ON p.guard_id=u.id
             WHERE p.company_id=?
             ORDER BY p.created_at DESC, p.id DESC
@@ -5004,9 +5152,12 @@ def application(environ, start_response):
                 os.remove(local_file_path)
             return redirect_with_feedback(start_response, '/admin/paystubs/upload', error='Selected guard was not found for your company.')
         created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        period = None
+        if pay_period_start and pay_period_end:
+            period = conn.execute('SELECT id FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], pay_period_start, pay_period_end)).fetchone()
         conn.execute(
-            'INSERT INTO paystubs (guard_id, company_id, file_path, pay_period_start, pay_period_end, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-            (guard_id, user['company_id'], uploaded_path, pay_period_start, pay_period_end, created_at),
+            'INSERT INTO guard_paystubs (guard_id, company_id, period_id, pay_date, file_path, notes, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (guard_id, user['company_id'], period['id'] if period else None, data.get('pay_date') or None, uploaded_path, data.get('notes', ''), user['id'], created_at),
         )
         conn.commit()
         conn.close()
@@ -5028,7 +5179,7 @@ def application(environ, start_response):
             return redirect_with_feedback(start_response, '/dashboard', error='Only guards can view personal paystubs.')
         conn = db()
         paystubs = conn.execute(
-            'SELECT id, file_path, pay_period_start, pay_period_end, created_at FROM paystubs WHERE company_id=? AND guard_id=? ORDER BY created_at DESC, id DESC',
+            'SELECT id, file_path, created_at, pay_date, notes FROM guard_paystubs WHERE company_id=? AND guard_id=? ORDER BY created_at DESC, id DESC',
             (user['company_id'], user['id']),
         ).fetchall()
         conn.close()
@@ -5048,7 +5199,7 @@ def application(environ, start_response):
         if response: return response
         paystub_id = int(paystub_file_match.group(1))
         conn = db()
-        paystub = conn.execute('SELECT * FROM paystubs WHERE id=?', (paystub_id,)).fetchone()
+        paystub = conn.execute('SELECT * FROM guard_paystubs WHERE id=?', (paystub_id,)).fetchone()
         conn.close()
         if not paystub:
             return not_found(start_response)
@@ -5092,11 +5243,40 @@ def application(environ, start_response):
     if path in {'/payroll', '/admin/payroll'}:
         user, response = require_admin(environ, start_response)
         if response: return response
-        start_date = query.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat()); end_date = query.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat()); rows = payroll_rows(user['company_id'], start_date, end_date, query.get('guard_id')); return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date)
+        start_date = query.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat()); end_date = query.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat()); rows = payroll_rows(user['company_id'], start_date, end_date, query.get('guard_id'))
+        conn = db()
+        period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
+        conn.close()
+        return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll Processing', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date, payroll_period=period)
     if path == '/admin/payroll/export.csv':
         user, response = require_admin(environ, start_response)
         if response: return response
-        start_date = query.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat()); end_date = query.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat()); csv_data = payroll_csv(user['company_id'], start_date, end_date); log_audit('payroll_exported_csv', actor_user_id=user['id'], company_id=user['company_id'], target_type='payroll', target_id=f'{start_date}:{end_date}', message='payroll CSV exported', environ=environ); start_response('200 OK', response_headers([('Content-Disposition', 'attachment; filename="steeleops_payroll.csv"')], 'text/csv; charset=utf-8')); return [csv_data]
+        start_date = query.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat()); end_date = query.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat())
+        conn = db()
+        rows = payroll_rows(user['company_id'], start_date, end_date)
+        if any((r['total_hours'] or 0) <= 0 for r in rows):
+            conn.close()
+            return bad_request(start_response, 'Cannot generate payroll export while rows remain unapproved or have missing hours.')
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
+        if not period:
+            conn.execute('INSERT INTO payroll_periods (company_id, period_start, period_end, status, locked_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], start_date, end_date, 'sent_to_quickbooks', now, user['id'], now))
+            period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
+        run_status = 'sent_to_quickbooks'
+        conn.execute('INSERT INTO payroll_runs (period_id, company_id, status, generated_by, generated_at) VALUES (?, ?, ?, ?, ?)', (period['id'], user['company_id'], run_status, user['id'], now))
+        run = conn.execute('SELECT id FROM payroll_runs WHERE period_id=? ORDER BY id DESC LIMIT 1', (period['id'],)).fetchone()
+        csv_data = payroll_csv(user['company_id'], start_date, end_date)
+        export_name = f'payroll_export_{user["company_id"]}_{start_date}_{end_date}_{int(datetime.now().timestamp())}.csv'
+        export_rel = f'uploads/payroll_exports/{export_name}'
+        os.makedirs(os.path.join(BASE_DIR, 'uploads', 'payroll_exports'), exist_ok=True)
+        with open(os.path.join(BASE_DIR, export_rel), 'wb') as f:
+            f.write(csv_data)
+        conn.execute('INSERT INTO payroll_exports (period_id, run_id, company_id, file_path, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)', (period['id'], run['id'], user['company_id'], export_rel, user['id'], now))
+        conn.execute('UPDATE payroll_periods SET status=?, locked_at=? WHERE id=?', ('sent_to_quickbooks', now, period['id']))
+        conn.execute('INSERT INTO payroll_audit_logs (company_id, period_id, event_type, notes, actor_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?)', (user['company_id'], period['id'], 'payroll_generation', 'Payroll CSV export generated and period locked for QuickBooks.', user['id'], now))
+        conn.commit(); conn.close()
+        log_audit('payroll_exported_csv', actor_user_id=user['id'], company_id=user['company_id'], target_type='payroll', target_id=f'{start_date}:{end_date}', message='payroll CSV exported and locked', environ=environ)
+        start_response('200 OK', response_headers([('Content-Disposition', 'attachment; filename="steeleops_payroll.csv"')], 'text/csv; charset=utf-8')); return [csv_data]
     return not_found(start_response)
 
 
