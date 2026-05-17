@@ -3035,8 +3035,14 @@ PAYROLL_HTML = r'''{% extends "app_shell.html" %}
       </div>
       <div class="card">
         <div class="section-head"><h3>Status</h3><span>{{ payroll_period.status.replace('_', ' ').title() if payroll_period else 'Pending Approval' }}</span></div>
+        {% if payroll_export_blocked %}<div class="alert error">Payroll export blocked: all guard hours must be approved and complete before export.</div>{% endif %}
         {% if payroll_rows is defined %}
-        <a class="btn" href="/admin/payroll/export.csv?start={{ payroll_start }}&end={{ payroll_end }}">Generate Payroll Export</a>
+        <form method="get" action="/admin/payroll/export.csv" class="stack compact">
+          <input type="hidden" name="start" value="{{ payroll_start }}">
+          <input type="hidden" name="end" value="{{ payroll_end }}">
+          <button class="btn" type="submit" {% if not payroll_can_export %}disabled{% endif %}>Generate Payroll Export</button>
+          {% if not payroll_can_export %}<div class="small-muted">Review and approve all guard hours before generating the QuickBooks export.</div>{% endif %}
+        </form>
         {% else %}<div class="empty">Choose a pay period to enable CSV export.</div>{% endif %}
       </div>
     </section>
@@ -5247,7 +5253,9 @@ def application(environ, start_response):
         conn = db()
         period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
         conn.close()
-        return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll Processing', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date, payroll_period=period)
+        payroll_can_export = all((r['total_hours'] or 0) > 0 for r in rows)
+        payroll_export_blocked = query.get('export_blocked') == '1'
+        return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll Processing', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date, payroll_period=period, payroll_can_export=payroll_can_export, payroll_export_blocked=payroll_export_blocked)
     if path == '/admin/payroll/export.csv':
         user, response = require_admin(environ, start_response)
         if response: return response
@@ -5256,7 +5264,8 @@ def application(environ, start_response):
         rows = payroll_rows(user['company_id'], start_date, end_date)
         if any((r['total_hours'] or 0) <= 0 for r in rows):
             conn.close()
-            return bad_request(start_response, 'Cannot generate payroll export while rows remain unapproved or have missing hours.')
+            blocked_qs = urlencode({'start': start_date, 'end': end_date, 'export_blocked': '1'})
+            return redirect(start_response, f'/admin/payroll?{blocked_qs}')
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
         if not period:
