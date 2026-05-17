@@ -1983,6 +1983,13 @@ def payroll_rows(company_id, start_date, end_date, guard_id=None):
     return rows
 
 
+def payroll_guard_record_map(conn, company_id, period_id):
+    if not period_id:
+        return {}
+    rows = conn.execute('SELECT * FROM payroll_guard_records WHERE company_id=? AND period_id=?', (company_id, period_id)).fetchall()
+    return {row['guard_id']: row for row in rows}
+
+
 def payroll_csv(company_id, start_date, end_date):
     rows = payroll_rows(company_id, start_date, end_date)
     output = io.StringIO()
@@ -3052,11 +3059,42 @@ PAYROLL_HTML = r'''{% extends "app_shell.html" %}
       <div class="table-wrap">
         <table>
           <thead><tr><th>Guard Name</th><th>Site / Location</th><th>Regular Hours</th><th>Overtime Hours</th><th>Total Hours</th><th>Pay Rate</th><th>Estimated Gross Pay</th><th>Status</th><th>Actions</th></tr></thead>
-          <tbody>{% for row in payroll_rows %}<tr><td>{{ row.full_name }}</td><td>{{ row.site_name }}</td><td>{{ '%.2f'|format((row.total_hours or 0) - (row.overtime_hours or 0)) }}</td><td>{{ '%.2f'|format(row.overtime_hours or 0) }}</td><td>{{ '%.2f'|format(row.total_hours or 0) }}</td><td>${{ '%.2f'|format(row.hourly_rate or 0) }}</td><td>${{ '%.2f'|format(row.gross_pay or 0) }}</td><td><span class="badge assigned">{% if (row.total_hours or 0) > 0 %}Approved{% else %}Pending Review{% endif %}</span></td><td><a class="btn ghost" href="/dashboard">Review</a></td></tr>{% else %}<tr><td colspan="9">No payroll rows found for this period.</td></tr>{% endfor %}</tbody>
+          <tbody>{% for row in payroll_rows %}<tr><td>{{ row.full_name }}</td><td>{{ row.site_name }}</td><td>{{ '%.2f'|format((row.total_hours or 0) - (row.overtime_hours or 0)) }}</td><td>{{ '%.2f'|format(row.overtime_hours or 0) }}</td><td>{{ '%.2f'|format(row.total_hours or 0) }}</td><td>${{ '%.2f'|format(row.hourly_rate or 0) }}</td><td>${{ '%.2f'|format(row.gross_pay or 0) }}</td><td><span class="badge assigned">{{ row.review_status_label }}</span></td><td><a class="btn ghost" href="/admin/payroll/review?start={{ payroll_start }}&end={{ payroll_end }}&guard_id={{ row.guard_id }}">Review</a></td></tr>{% else %}<tr><td colspan="9">No payroll rows found for this period.</td></tr>{% endfor %}</tbody>
         </table>
       </div>
       {% else %}<div class="empty">Generate a report to view payroll totals.</div>{% endif %}
     </section>
+    {% if payroll_review %}
+    <section class="card">
+      <div class="section-head"><h3>Payroll Review</h3><span>{{ payroll_review.guard_name }} · {{ payroll_review.period_start }} to {{ payroll_review.period_end }}</span></div>
+      {% if payroll_review.locked %}<div class="alert">Payroll has already been exported to QuickBooks. This review is view-only.</div>{% endif %}
+      {% if payroll_review.error %}<div class="alert error">{{ payroll_review.error }}</div>{% endif %}
+      <div class="row-3">
+        <div><strong>Site</strong><div class="small-muted">{{ payroll_review.site_name }}</div></div>
+        <div><strong>Clock Records</strong><div class="small-muted">{{ payroll_review.clock_records }}</div></div>
+        <div><strong>Missing Punch</strong><div class="small-muted">{{ payroll_review.missing_warning }}</div></div>
+      </div>
+      <div class="row-3">
+        <div><strong>Total</strong><div class="small-muted">{{ '%.2f'|format(payroll_review.total_hours) }} hrs</div></div>
+        <div><strong>Regular / OT</strong><div class="small-muted">{{ '%.2f'|format(payroll_review.regular_hours) }} / {{ '%.2f'|format(payroll_review.overtime_hours) }}</div></div>
+        <div><strong>Rate / Gross</strong><div class="small-muted">${{ '%.2f'|format(payroll_review.pay_rate) }} / ${{ '%.2f'|format(payroll_review.gross_pay) }}</div></div>
+      </div>
+      <div class="small-muted">Guard notes: {{ payroll_review.guard_notes }}</div>
+      <form method="post" action="/admin/payroll/review/action" class="stack compact">
+        {{ csrf_input|safe }}
+        <input type="hidden" name="start" value="{{ payroll_start }}">
+        <input type="hidden" name="end" value="{{ payroll_end }}">
+        <input type="hidden" name="guard_id" value="{{ payroll_review.guard_id }}">
+        <label>Admin Notes<textarea name="admin_notes" rows="3">{{ payroll_review.admin_notes }}</textarea></label>
+        <div class="actions">
+          <button class="btn" name="action" value="approve" {% if payroll_review.locked %}disabled{% endif %}>Approve Hours</button>
+          <button class="btn ghost" name="action" value="edit" {% if payroll_review.locked %}disabled{% endif %}>Edit Hours</button>
+          <button class="btn ghost" name="action" value="flag" {% if payroll_review.locked %}disabled{% endif %}>Flag Issue</button>
+          <button class="btn ghost" name="action" value="send_back" {% if payroll_review.locked %}disabled{% endif %}>Send Back</button>
+        </div>
+      </form>
+    </section>
+    {% endif %}
 {% endblock %}'''
 
 PROFILE_HTML = r'''{% extends "app_shell.html" %}
@@ -5252,17 +5290,81 @@ def application(environ, start_response):
         start_date = query.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat()); end_date = query.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat()); rows = payroll_rows(user['company_id'], start_date, end_date, query.get('guard_id'))
         conn = db()
         period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
+        record_map = payroll_guard_record_map(conn, user['company_id'], period['id'] if period else None)
+        review = None
+        review_guard_id = query.get('guard_id')
+        for r in rows:
+            rec = record_map.get(r['guard_id'])
+            r['review_status_label'] = (rec['status'].replace('_', ' ').title() if rec else ('Approved' if (r['total_hours'] or 0) > 0 else 'Pending Review'))
+        if review_guard_id:
+            review_row = next((r for r in rows if str(r['guard_id']) == str(review_guard_id)), None)
+            if review_row:
+                shifts = conn.execute('SELECT clock_in_time, clock_out_time, notes FROM shifts WHERE company_id=? AND COALESCE(user_id, guard_id)=? AND shift_date BETWEEN ? AND ? ORDER BY shift_date, start_time', (user['company_id'], review_row['guard_id'], start_date, end_date)).fetchall()
+                missing = any((not s['clock_in_time']) or (not s['clock_out_time']) for s in shifts) or len(shifts) == 0
+                rec = record_map.get(review_row['guard_id'])
+                review = {
+                    'guard_id': review_row['guard_id'], 'guard_name': review_row['full_name'], 'period_start': start_date, 'period_end': end_date,
+                    'site_name': review_row['site_name'] or 'Multiple', 'clock_records': f'{len(shifts)} shifts captured',
+                    'total_hours': float(review_row['total_hours'] or 0), 'regular_hours': float(max((review_row['total_hours'] or 0) - (review_row['overtime_hours'] or 0), 0)),
+                    'overtime_hours': float(review_row['overtime_hours'] or 0), 'pay_rate': float(review_row['hourly_rate'] or 0), 'gross_pay': float(review_row['gross_pay'] or 0),
+                    'missing_warning': 'Missing clock-in or clock-out found.' if missing else 'No missing punches detected.',
+                    'guard_notes': '; '.join([s['notes'] for s in shifts if s['notes']]) or 'No guard notes.',
+                    'admin_notes': rec['admin_notes'] if rec else '',
+                    'locked': bool(period and period['status'] == 'sent_to_quickbooks'),
+                    'error': query.get('review_error', ''),
+                }
+                log_audit('payroll_review_opened', actor_user_id=user['id'], company_id=user['company_id'], target_type='payroll_guard', target_id=str(review_row['guard_id']), message='review opened', environ=environ, metadata={'start': start_date, 'end': end_date})
         conn.close()
-        payroll_can_export = all((r['total_hours'] or 0) > 0 for r in rows)
+        payroll_can_export = len(rows) > 0 and all(str(r.get('review_status_label', '')).lower() == 'approved' for r in rows)
         payroll_export_blocked = query.get('export_blocked') == '1'
-        return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll Processing', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date, payroll_period=period, payroll_can_export=payroll_can_export, payroll_export_blocked=payroll_export_blocked)
+        return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll Processing', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date, payroll_period=period, payroll_can_export=payroll_can_export, payroll_export_blocked=payroll_export_blocked, payroll_review=review)
+    if path == '/admin/payroll/review':
+        return redirect(start_response, f"/admin/payroll?{urlencode({'start': query.get('start',''), 'end': query.get('end',''), 'guard_id': query.get('guard_id','')})}")
+    if path == '/admin/payroll/review/action' and method == 'POST':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        data, _ = parse_post(environ)
+        start_date, end_date, guard_id, action = data.get('start'), data.get('end'), data.get('guard_id'), data.get('action')
+        conn = db()
+        period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
+        if not period:
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            conn.execute('INSERT INTO payroll_periods (company_id, period_start, period_end, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)', (user['company_id'], start_date, end_date, 'pending_approval', user['id'], now))
+            period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
+        if period['status'] == 'sent_to_quickbooks':
+            conn.close()
+            return redirect(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date, 'guard_id': guard_id, 'review_error': 'Payroll already exported. Review is view-only.'})}")
+        row = payroll_rows(user['company_id'], start_date, end_date, guard_id)[0]
+        shifts = conn.execute('SELECT clock_in_time, clock_out_time FROM shifts WHERE company_id=? AND COALESCE(user_id, guard_id)=? AND shift_date BETWEEN ? AND ?', (user['company_id'], guard_id, start_date, end_date)).fetchall()
+        missing = any((not s['clock_in_time']) or (not s['clock_out_time']) for s in shifts) or len(shifts) == 0
+        status = 'pending_review'
+        if action == 'approve':
+            if missing:
+                conn.close()
+                return redirect(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date, 'guard_id': guard_id, 'review_error': 'Cannot approve: missing clock-in or clock-out.'})}")
+            status = 'approved'
+        elif action == 'flag':
+            status = 'issue_flagged'
+        elif action == 'send_back':
+            status = 'pending_review'
+        elif action == 'edit':
+            status = 'hours_edited'
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        conn.execute('DELETE FROM payroll_guard_records WHERE company_id=? AND period_id=? AND guard_id=?', (user['company_id'], period['id'], guard_id))
+        conn.execute('INSERT INTO payroll_guard_records (period_id, company_id, guard_id, regular_hours, overtime_hours, pay_rate, gross_pay_estimate, status, admin_notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', (period['id'], user['company_id'], guard_id, max((row['total_hours'] or 0) - (row['overtime_hours'] or 0), 0), row['overtime_hours'] or 0, row['hourly_rate'] or 0, row['gross_pay'] or 0, status, data.get('admin_notes', '')))
+        conn.execute('INSERT INTO payroll_audit_logs (company_id, period_id, guard_id, event_type, notes, actor_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], period['id'], guard_id, f'payroll_{action}', data.get('admin_notes', ''), user['id'], now))
+        conn.commit(); conn.close()
+        log_audit('payroll_review_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='payroll_guard', target_id=str(guard_id), message=f'{action} action', environ=environ, metadata={'start': start_date, 'end': end_date})
+        return redirect(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date})}")
     if path == '/admin/payroll/export.csv':
         user, response = require_admin(environ, start_response)
         if response: return response
         start_date = query.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat()); end_date = query.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat())
         conn = db()
         rows = payroll_rows(user['company_id'], start_date, end_date)
-        if any((r['total_hours'] or 0) <= 0 for r in rows):
+        period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
+        record_map = payroll_guard_record_map(conn, user['company_id'], period['id'] if period else None)
+        if any((record_map.get(r['guard_id']) or {}).get('status') != 'approved' for r in rows):
             conn.close()
             blocked_qs = urlencode({'start': start_date, 'end': end_date, 'export_blocked': '1'})
             return redirect(start_response, f'/admin/payroll?{blocked_qs}')
