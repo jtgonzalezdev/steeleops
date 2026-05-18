@@ -553,6 +553,29 @@ def delete_cookie_header():
     return cookie_header('deleted', datetime(1970, 1, 1))
 
 
+def parse_request_cookies(environ):
+    cookies = {}
+    raw = environ.get('HTTP_COOKIE', '')
+    for part in raw.split(';'):
+        if '=' in part:
+            k, v = part.strip().split('=', 1)
+            cookies[k] = v
+    return cookies
+
+
+def qb_state_cookie_header(state, expires=None):
+    parts = [f'qb_oauth_state={state}', 'Path=/', 'HttpOnly', 'SameSite=Lax']
+    if SESSION_COOKIE_SECURE:
+        parts.append('Secure')
+    if expires:
+        parts.append('Expires=' + format_datetime(expires, usegmt=True))
+    return '; '.join(parts)
+
+
+def qb_delete_state_cookie_header():
+    return qb_state_cookie_header('deleted', datetime(1970, 1, 1))
+
+
 def response_headers(extra=None, content_type='text/html; charset=utf-8'):
     headers = [('Content-Type', content_type), ('X-Frame-Options', 'DENY'), ('X-Content-Type-Options', 'nosniff'), ('Referrer-Policy', 'same-origin')]
     if APP_ENV == 'production':
@@ -5556,18 +5579,65 @@ def application(environ, start_response):
         conn.commit(); conn.close()
         log_audit('payroll_exported_csv', actor_user_id=user['id'], company_id=user['company_id'], target_type='payroll', target_id=f'{start_date}:{end_date}', message='payroll CSV exported and locked', environ=environ)
         start_response('200 OK', response_headers([('Content-Disposition', 'attachment; filename="steeleops_payroll.csv"')], 'text/csv; charset=utf-8')); return [csv_data]
-    if path == '/admin/settings/quickbooks/connect' and method == 'POST':
+    if path == '/admin/settings/quickbooks/connect' and method in ('GET', 'POST'):
         user, response = require_admin(environ, start_response)
         if response: return response
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        # Phase 1 simulation of OAuth token storage.
-        access_token = f"qbo_access_{secrets.token_urlsafe(24)}"
-        refresh_token = f"qbo_refresh_{secrets.token_urlsafe(24)}"
-        conn = db()
-        conn.execute('UPDATE companies SET qb_access_token=?, qb_refresh_token=?, qb_connected_at=?, qb_realm_id=? WHERE id=?', (access_token, refresh_token, now, 'phase1-sandbox', user['company_id']))
-        conn.commit()
-        conn.close()
-        return redirect_with_feedback(start_response, '/admin/payroll', success='QuickBooks connection saved (phase 1 simulated OAuth).')
+        try:
+            required_vars = {
+                'QUICKBOOKS_CLIENT_ID': os.getenv('QUICKBOOKS_CLIENT_ID', '').strip(),
+                'QUICKBOOKS_CLIENT_SECRET': os.getenv('QUICKBOOKS_CLIENT_SECRET', '').strip(),
+                'QUICKBOOKS_REDIRECT_URI': os.getenv('QUICKBOOKS_REDIRECT_URI', '').strip(),
+                'QUICKBOOKS_ENV': os.getenv('QUICKBOOKS_ENV', '').strip(),
+            }
+            missing_vars = [name for name, value in required_vars.items() if not value]
+            if missing_vars:
+                missing_html = ''.join(f'<li><code>{escape(name)}</code></li>' for name in missing_vars)
+                body = f'''<!doctype html><html><head><title>QuickBooks Setup Required</title></head><body>
+                <h1>QuickBooks setup is incomplete</h1>
+                <p>Please add the following environment variables and try again:</p>
+                <ul>{missing_html}</ul>
+                <p><a href="/admin/payroll">Back to Payroll Settings</a></p>
+                </body></html>'''.encode('utf-8')
+                return html_response(start_response, body, status='400 Bad Request')
+
+            oauth_state = secrets.token_urlsafe(32)
+            query_params = {
+                'client_id': required_vars['QUICKBOOKS_CLIENT_ID'],
+                'response_type': 'code',
+                'scope': 'com.intuit.quickbooks.accounting',
+                'redirect_uri': required_vars['QUICKBOOKS_REDIRECT_URI'],
+                'state': oauth_state,
+            }
+            oauth_url = f"https://appcenter.intuit.com/connect/oauth2?{urlencode(query_params)}"
+            state_cookie = qb_state_cookie_header(oauth_state, datetime.utcnow() + timedelta(minutes=15))
+            return redirect(start_response, oauth_url, extra_headers=[('Set-Cookie', state_cookie)])
+        except Exception as exc:
+            print(f"[quickbooks_oauth_connect_error] {exc}", flush=True)
+            return html_response(start_response, b"<h1>QuickBooks connection failed</h1><p>We couldn't start authorization right now. Please check server logs and configuration.</p>", status='500 Internal Server Error')
+
+    if path == '/admin/settings/quickbooks/callback' and method == 'GET':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        try:
+            code = (query.get('code') or '').strip()
+            state = (query.get('state') or '').strip()
+            realm_id = (query.get('realmId') or '').strip()
+            cookies = parse_request_cookies(environ)
+            expected_state = (cookies.get('qb_oauth_state') or '').strip()
+
+            if not code or not realm_id:
+                return html_response(start_response, b"<h1>QuickBooks callback error</h1><p>Missing required parameters: code and realmId.</p>", status='400 Bad Request')
+            if not state or not expected_state or state != expected_state:
+                return html_response(start_response, b"<h1>QuickBooks callback error</h1><p>Invalid OAuth state. Please start the connection again.</p>", status='400 Bad Request')
+
+            return html_response(
+                start_response,
+                b"<h1>QuickBooks authorization received successfully.</h1>",
+                extra_headers=[('Set-Cookie', qb_delete_state_cookie_header())]
+            )
+        except Exception as exc:
+            print(f"[quickbooks_oauth_callback_error] {exc}", flush=True)
+            return html_response(start_response, b"<h1>QuickBooks callback failed</h1><p>We couldn't complete authorization. Please try again.</p>", status='500 Internal Server Error')
     if path == '/admin/payroll/send-to-quickbooks' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
