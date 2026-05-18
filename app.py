@@ -8,8 +8,7 @@ import re
 import secrets
 import shutil
 import sqlite3
-from datetime import date, datetime, timedelta
-from email.utils import format_datetime
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlencode
 from wsgiref.simple_server import make_server
 
@@ -533,24 +532,29 @@ def upsert_guard_login(conn, guard, payload):
     return new_id, True
 
 def now_utc():
-    return datetime.utcnow()
+    return datetime.now(timezone.utc)
 
 
 def expires_at(hours=SESSION_TTL_HOURS):
     return (now_utc() + timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
 
 
+def cookie_expires_gmt(expires):
+    if expires.tzinfo is None:
+        raise ValueError('cookie expiration datetime must be timezone-aware UTC')
+    return expires.astimezone(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT')
+
 def cookie_header(session_id, expires=None):
     parts = [f'{SESSION_COOKIE_NAME}={session_id}', 'Path=/', 'HttpOnly', 'SameSite=Lax']
     if SESSION_COOKIE_SECURE:
         parts.append('Secure')
     if expires:
-        parts.append('Expires=' + format_datetime(expires, usegmt=True))
+        parts.append('Expires=' + cookie_expires_gmt(expires))
     return '; '.join(parts)
 
 
 def delete_cookie_header():
-    return cookie_header('deleted', datetime(1970, 1, 1))
+    return cookie_header('deleted', datetime(1970, 1, 1, tzinfo=timezone.utc))
 
 
 def parse_request_cookies(environ):
@@ -568,12 +572,12 @@ def qb_state_cookie_header(state, expires=None):
     if SESSION_COOKIE_SECURE:
         parts.append('Secure')
     if expires:
-        parts.append('Expires=' + format_datetime(expires, usegmt=True))
+        parts.append('Expires=' + cookie_expires_gmt(expires))
     return '; '.join(parts)
 
 
 def qb_delete_state_cookie_header():
-    return qb_state_cookie_header('deleted', datetime(1970, 1, 1))
+    return qb_state_cookie_header('deleted', datetime(1970, 1, 1, tzinfo=timezone.utc))
 
 
 def response_headers(extra=None, content_type='text/html; charset=utf-8'):
@@ -3488,7 +3492,7 @@ def csrf_cookie_header(token, expires=None):
     if SESSION_COOKIE_SECURE:
         parts.append('Secure')
     if expires:
-        parts.append('Expires=' + format_datetime(expires, usegmt=True))
+        parts.append('Expires=' + cookie_expires_gmt(expires))
     return '; '.join(parts)
 
 
@@ -3941,7 +3945,7 @@ def run_missed_clock_check_for_companies(company_ids, environ=None):
 
 
 def utc_now_string():
-    return datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
 
 def scheduler_environ():
@@ -3954,7 +3958,7 @@ def scheduler_environ():
 def acquire_scheduler_leadership(lock_name=MISSED_CLOCK_SCHEDULER_LOCK_NAME):
     conn = db()
     now_str = utc_now_string()
-    stale_before = (datetime.utcnow() - timedelta(seconds=MISSED_CLOCK_SCHEDULER_STALE_SECONDS)).strftime('%Y-%m-%d %H:%M:%S')
+    stale_before = (datetime.now(timezone.utc) - timedelta(seconds=MISSED_CLOCK_SCHEDULER_STALE_SECONDS)).strftime('%Y-%m-%d %H:%M:%S')
     try:
         existing = conn.execute(
             'SELECT owner_id, heartbeat_at FROM app_runtime_locks WHERE lock_name=?',
@@ -5609,7 +5613,7 @@ def application(environ, start_response):
                 'state': oauth_state,
             }
             oauth_url = f"https://appcenter.intuit.com/connect/oauth2?{urlencode(query_params)}"
-            state_cookie = qb_state_cookie_header(oauth_state, datetime.utcnow() + timedelta(minutes=15))
+            state_cookie = qb_state_cookie_header(oauth_state, datetime.now(timezone.utc) + timedelta(minutes=15))
             return redirect(start_response, oauth_url, extra_headers=[('Set-Cookie', state_cookie)])
         except Exception as exc:
             print(f"[quickbooks_oauth_connect_error] {exc}", flush=True)
