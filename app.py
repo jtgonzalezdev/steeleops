@@ -2119,6 +2119,23 @@ def payroll_rows(company_id, start_date, end_date, guard_id=None):
     return rows
 
 
+def parse_payroll_period_dates(start_date_raw, end_date_raw):
+    today = date.today()
+    default_start = (today - timedelta(days=today.weekday()))
+    default_end = default_start + timedelta(days=13)
+    try:
+        start_value = datetime.strptime((start_date_raw or '').strip(), '%Y-%m-%d').date() if start_date_raw else default_start
+    except Exception:
+        start_value = default_start
+    try:
+        end_value = datetime.strptime((end_date_raw or '').strip(), '%Y-%m-%d').date() if end_date_raw else default_end
+    except Exception:
+        end_value = default_end
+    if end_value < start_value:
+        end_value = start_value
+    return start_value.isoformat(), end_value.isoformat()
+
+
 
 
 def get_payroll_display_values(payroll_row, guard_record=None):
@@ -5547,53 +5564,67 @@ def application(environ, start_response):
     if path in {'/payroll', '/admin/payroll'}:
         user, response = require_admin(environ, start_response)
         if response: return response
-        start_date = query.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat()); end_date = query.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat()); rows = payroll_rows(user['company_id'], start_date, end_date, query.get('guard_id'))
-        conn = db()
-        period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
-        company = conn.execute('SELECT qb_connected_at, qb_realm_id FROM companies WHERE id=?', (user['company_id'],)).fetchone()
-        record_map = payroll_guard_record_map(conn, user['company_id'], period['id'] if period else None)
+        start_date, end_date = parse_payroll_period_dates(query.get('start'), query.get('end'))
+        payroll_error = ''
+        rows = []
+        period = None
+        company = None
         review = None
-        review_guard_id = query.get('guard_id')
-        for r in rows:
-            rec = record_map.get(r['guard_id'])
-            display = get_payroll_display_values(r, rec)
-            r['regular_hours'] = display['regular_hours']
-            r['overtime_hours'] = display['overtime_hours']
-            r['total_hours'] = display['total_hours']
-            r['gross_pay'] = display['estimated_gross_pay']
-            r['hours_source'] = display['source']
-            r['review_status_label'] = (rec['status'].replace('_', ' ').title() if rec else ('Approved' if display['total_hours'] > 0 else 'Pending Review'))
-        if review_guard_id:
-            review_row = next((r for r in rows if str(r['guard_id']) == str(review_guard_id)), None)
-            if review_row:
-                shifts = conn.execute('SELECT clock_in_time, clock_out_time, notes FROM shifts WHERE company_id=? AND COALESCE(user_id, guard_id)=? AND shift_date BETWEEN ? AND ? ORDER BY shift_date, start_time', (user['company_id'], review_row['guard_id'], start_date, end_date)).fetchall()
-                missing = any((not s['clock_in_time']) or (not s['clock_out_time']) for s in shifts) or len(shifts) == 0
-                rec = record_map.get(review_row['guard_id'])
-                display = get_payroll_display_values(review_row, rec)
-                manual_override_used = display['source'] == 'manual_override'
-                effective_total_hours = display['total_hours']
-                effective_gross_pay = display['estimated_gross_pay']
-                show_manual_override = missing or (query.get('manual_mode') == '1') or manual_override_used
-                approval_blocked = (missing and not manual_override_used) or effective_total_hours <= 0
-                review = {
+        try:
+            rows = payroll_rows(user['company_id'], start_date, end_date, query.get('guard_id')) or []
+            conn = db()
+            try:
+                period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
+                company = conn.execute('SELECT qb_connected_at, qb_realm_id FROM companies WHERE id=?', (user['company_id'],)).fetchone()
+                record_map = payroll_guard_record_map(conn, user['company_id'], period['id'] if period else None) or {}
+                review_guard_id = query.get('guard_id')
+                for r in rows:
+                    rec = record_map.get(r['guard_id']) or {}
+                    display = get_payroll_display_values(r, rec)
+                    r['regular_hours'] = display['regular_hours'] or 0
+                    r['overtime_hours'] = display['overtime_hours'] or 0
+                    r['total_hours'] = display['total_hours'] or 0
+                    r['hourly_rate'] = float(r.get('hourly_rate') or 0)
+                    r['gross_pay'] = display['estimated_gross_pay'] or 0
+                    r['hours_source'] = display['source']
+                    review_status_raw = rec.get('status') if rec else None
+                    r['review_status_label'] = (review_status_raw.replace('_', ' ').title() if review_status_raw else ('Approved' if display['total_hours'] > 0 else 'Pending Review'))
+                if review_guard_id:
+                    review_row = next((r for r in rows if str(r['guard_id']) == str(review_guard_id)), None)
+                    if review_row:
+                        shifts = conn.execute('SELECT clock_in_time, clock_out_time, notes FROM shifts WHERE company_id=? AND COALESCE(user_id, guard_id)=? AND shift_date BETWEEN ? AND ? ORDER BY shift_date, start_time', (user['company_id'], review_row['guard_id'], start_date, end_date)).fetchall() or []
+                        missing = any((not s['clock_in_time']) or (not s['clock_out_time']) for s in shifts) or len(shifts) == 0
+                        rec = record_map.get(review_row['guard_id']) or {}
+                        display = get_payroll_display_values(review_row, rec)
+                        manual_override_used = display['source'] == 'manual_override'
+                        effective_total_hours = display['total_hours'] or 0
+                        effective_gross_pay = display['estimated_gross_pay'] or 0
+                        show_manual_override = missing or (query.get('manual_mode') == '1') or manual_override_used
+                        approval_blocked = (missing and not manual_override_used) or effective_total_hours <= 0
+                        review = {
                     'guard_id': review_row['guard_id'], 'guard_name': review_row['full_name'], 'period_start': start_date, 'period_end': end_date,
                     'site_name': review_row['site_name'] or 'Multiple', 'clock_records': f'{len(shifts)} shifts captured',
                     'total_hours': effective_total_hours, 'regular_hours': display['regular_hours'],
                     'overtime_hours': display['overtime_hours'], 'pay_rate': float(review_row['hourly_rate'] or 0), 'gross_pay': effective_gross_pay,
                     'missing_warning': 'Missing clock-in or clock-out found.' if (missing and not manual_override_used) else 'No missing punches detected.',
                     'guard_notes': '; '.join([s['notes'] for s in shifts if s['notes']]) or 'No guard notes.',
-                    'admin_notes': rec['admin_notes'] if rec else '',
+                    'admin_notes': rec.get('admin_notes', '') if rec else '',
                     'locked': bool(period and period['status'] == 'sent_to_quickbooks'),
                     'error': query.get('review_error', ''),
                     'show_manual_override': show_manual_override,
                     'manual_override_used': manual_override_used,
                     'manual_regular_hours': display['regular_hours'],
                     'manual_overtime_hours': display['overtime_hours'],
-                    'manual_reason': rec['manual_override_reason'] if rec else '',
+                    'manual_reason': rec.get('manual_override_reason', '') if rec else '',
                     'approval_blocked': approval_blocked,
                 }
-                log_audit('payroll_review_opened', actor_user_id=user['id'], company_id=user['company_id'], target_type='payroll_guard', target_id=str(review_row['guard_id']), message='review opened', environ=environ, metadata={'start': start_date, 'end': end_date})
-        conn.close()
+                        log_audit('payroll_review_opened', actor_user_id=user['id'], company_id=user['company_id'], target_type='payroll_guard', target_id=str(review_row['guard_id']), message='review opened', environ=environ, metadata={'start': start_date, 'end': end_date})
+            finally:
+                conn.close()
+        except Exception as exc:
+            print(f"[payroll_period_load_error] {exc}", flush=True)
+            print(traceback.format_exc(), flush=True)
+            payroll_error = 'Payroll period failed to load. Check logs.'
         payroll_can_export = len(rows) > 0 and all(str(r.get('review_status_label', '')).lower() == 'approved' for r in rows)
         payroll_export_blocked = query.get('export_blocked') == '1'
         send_status = 'Sent to QuickBooks' if period and period.get('status') == 'sent_to_quickbooks' else 'Not Sent'
@@ -5604,7 +5635,7 @@ def application(environ, start_response):
             except Exception as exc:
                 print(f"[quickbooks_companyinfo_error] {exc}", flush=True)
         try:
-            return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll Processing', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date, payroll_period=period, payroll_can_export=payroll_can_export, payroll_export_blocked=payroll_export_blocked, payroll_review=review, qb_connected=bool(company and company.get('qb_connected_at')), qb_company_name=qb_company_name, payroll_send_status=send_status)
+            return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll Processing', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date, payroll_period=period, payroll_can_export=payroll_can_export, payroll_export_blocked=payroll_export_blocked, payroll_review=review, qb_connected=bool(company and company.get('qb_connected_at')), qb_company_name=qb_company_name, payroll_send_status=send_status, error=payroll_error)
         except Exception as exc:
             log_route_exception('/payroll', exc)
             return html_response(start_response, b'<h1>Payroll failed to load. Check server logs.</h1>', status='500 Internal Server Error')
