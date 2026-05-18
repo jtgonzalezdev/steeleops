@@ -2022,25 +2022,42 @@ def payroll_guard_record_map(conn, company_id, period_id):
     return {row['guard_id']: row for row in rows}
 
 
-def payroll_csv(company_id, start_date, end_date):
+def payroll_csv(company_id, start_date, end_date, guard_record_map=None):
     rows = payroll_rows(company_id, start_date, end_date)
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(['Employee Name', 'Employee Email', 'Pay Period Start', 'Pay Period End', 'Regular Hours', 'Overtime Hours', 'Pay Rate', 'Overtime Rate', 'Gross Pay Estimate', 'Site / Location', 'Notes'])
     for row in rows:
-        regular_hours = max((row['total_hours'] or 0) - (row['overtime_hours'] or 0), 0)
+        guard_record = (guard_record_map or {}).get(row['guard_id'])
+        pay_rate = float(row['hourly_rate'] or 0)
+        overtime_rate = pay_rate * 1.5
+
+        if guard_record and guard_record.get('manual_override_used'):
+            regular_hours = float(guard_record.get('regular_hours') or 0)
+            overtime_hours = float(guard_record.get('overtime_hours') or 0)
+        elif guard_record and str(guard_record.get('status') or '').lower() == 'approved':
+            regular_hours = float(guard_record.get('regular_hours') or 0)
+            overtime_hours = float(guard_record.get('overtime_hours') or 0)
+        else:
+            regular_hours = max(float(row['total_hours'] or 0) - float(row['overtime_hours'] or 0), 0)
+            overtime_hours = float(row['overtime_hours'] or 0)
+
+        total_hours = regular_hours + overtime_hours
+        gross_pay = (regular_hours * pay_rate) + (overtime_hours * overtime_rate)
+        print('Exporting payroll:', row['full_name'], regular_hours, overtime_hours, gross_pay)
+
         writer.writerow([
             row['full_name'],
             row.get('email', ''),
             start_date,
             end_date,
             round(regular_hours, 2),
-            round(row['overtime_hours'] or 0, 2),
-            round(row['hourly_rate'] or 0, 2),
-            round((row['hourly_rate'] or 0) * 1.5, 2),
-            round(row['gross_pay'] or 0, 2),
+            round(overtime_hours, 2),
+            round(pay_rate, 2),
+            round(overtime_rate, 2),
+            round(gross_pay, 2),
             row.get('site_name', 'Multiple'),
-            'Prepared in SteeleOps for QuickBooks processing only.',
+            f'Prepared in SteeleOps for QuickBooks processing only. Total Hours: {round(total_hours, 2)}',
         ])
     return output.getvalue().encode('utf-8')
 
@@ -2502,7 +2519,7 @@ def application(environ, start_response):
             return response
         start_date = query.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat())
         end_date = query.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat())
-        csv_data = payroll_csv(user['company_id'], start_date, end_date)
+        csv_data = payroll_csv(user['company_id'], start_date, end_date, record_map)
         start_response('200 OK', response_headers([('Content-Disposition', 'attachment; filename="steeleops_payroll.csv"')], 'text/csv; charset=utf-8'))
         return [csv_data]
 
@@ -5491,7 +5508,7 @@ def application(environ, start_response):
         run_status = 'sent_to_quickbooks'
         conn.execute('INSERT INTO payroll_runs (period_id, company_id, status, generated_by, generated_at) VALUES (?, ?, ?, ?, ?)', (period['id'], user['company_id'], run_status, user['id'], now))
         run = conn.execute('SELECT id FROM payroll_runs WHERE period_id=? ORDER BY id DESC LIMIT 1', (period['id'],)).fetchone()
-        csv_data = payroll_csv(user['company_id'], start_date, end_date)
+        csv_data = payroll_csv(user['company_id'], start_date, end_date, record_map)
         export_name = f'payroll_export_{user["company_id"]}_{start_date}_{end_date}_{int(datetime.now().timestamp())}.csv'
         export_rel = f'uploads/payroll_exports/{export_name}'
         os.makedirs(os.path.join(BASE_DIR, 'uploads', 'payroll_exports'), exist_ok=True)
