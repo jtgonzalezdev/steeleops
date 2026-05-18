@@ -2022,6 +2022,22 @@ def payroll_guard_record_map(conn, company_id, period_id):
     return {row['guard_id']: row for row in rows}
 
 
+def quickbooks_payroll_payload(company_id, start_date, end_date, guard_record_map=None):
+    rows = payroll_rows(company_id, start_date, end_date)
+    payload = []
+    for row in rows:
+        guard_record = (guard_record_map or {}).get(row['guard_id'])
+        display = get_payroll_display_values(row, guard_record)
+        payload.append({
+            'employee_name': row['full_name'],
+            'total_hours': round(float(display['total_hours']), 2),
+            'regular_hours': round(float(display['regular_hours']), 2),
+            'overtime_hours': round(float(display['overtime_hours']), 2),
+            'pay_rate': round(float(row['hourly_rate'] or 0), 2),
+        })
+    return payload
+
+
 def payroll_csv(company_id, start_date, end_date, guard_record_map=None):
     rows = payroll_rows(company_id, start_date, end_date)
     output = io.StringIO()
@@ -3091,6 +3107,12 @@ PAYROLL_HTML = r'''{% extends "app_shell.html" %}
       </div>
       <div class="card">
         <div class="section-head"><h3>Status</h3><span>{{ payroll_period.status.replace('_', ' ').title() if payroll_period else 'Pending Approval' }}</span></div>
+        <div class="small-muted">QuickBooks Connection: {% if qb_connected %}Connected{% else %}Not Connected{% endif %}</div>
+        <form method="post" action="/admin/settings/quickbooks/connect" class="stack compact">
+          {{ csrf_input|safe }}
+          <button class="btn ghost" type="submit">Connect to QuickBooks</button>
+        </form>
+        <div class="small-muted">Send Status: {{ payroll_send_status or 'Not Sent' }}</div>
         {% if payroll_export_blocked %}<div class="alert error">Payroll export blocked: all guard hours must be approved and complete before export.</div>{% endif %}
         {% if payroll_rows is defined %}
         <form method="get" action="/admin/payroll/export.csv" class="stack compact">
@@ -3098,6 +3120,13 @@ PAYROLL_HTML = r'''{% extends "app_shell.html" %}
           <input type="hidden" name="end" value="{{ payroll_end }}">
           <button class="btn" type="submit" {% if not payroll_can_export %}disabled{% endif %}>Generate Payroll Export</button>
           {% if not payroll_can_export %}<div class="small-muted">Review and approve all guard hours before generating the QuickBooks export.</div>{% endif %}
+        </form>
+        <form method="post" action="/admin/payroll/send-to-quickbooks" class="stack compact">
+          {{ csrf_input|safe }}
+          <input type="hidden" name="start" value="{{ payroll_start }}">
+          <input type="hidden" name="end" value="{{ payroll_end }}">
+          <button class="btn primary" type="submit" {% if (not payroll_can_export) or (not qb_connected) %}disabled{% endif %}>Send to QuickBooks</button>
+          {% if not qb_connected %}<div class="small-muted">Connect QuickBooks before sending payroll.</div>{% endif %}
         </form>
         {% else %}<div class="empty">Choose a pay period to enable CSV export.</div>{% endif %}
       </div>
@@ -4284,6 +4313,11 @@ def init_db():
     if table_exists(conn, 'payroll_guard_records'):
         ensure_column(conn, 'payroll_guard_records', 'manual_override_used INTEGER DEFAULT 0')
         ensure_column(conn, 'payroll_guard_records', 'manual_override_reason TEXT')
+    if table_exists(conn, 'companies'):
+        ensure_column(conn, 'companies', 'qb_access_token TEXT')
+        ensure_column(conn, 'companies', 'qb_refresh_token TEXT')
+        ensure_column(conn, 'companies', 'qb_connected_at TEXT')
+        ensure_column(conn, 'companies', 'qb_realm_id TEXT')
     if APP_ENV == 'production':
         # conn.execute("DELETE FROM users WHERE username IN ('superadmin','admin','guard1','guard2','demoadmin') AND email LIKE '%%.local'")
         conn.execute("DELETE FROM companies WHERE name IN ('SteeleOps Demo','BlueLine Protective') AND id NOT IN (SELECT DISTINCT company_id FROM users WHERE company_id IS NOT NULL)")
@@ -5355,6 +5389,7 @@ def application(environ, start_response):
         start_date = query.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat()); end_date = query.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat()); rows = payroll_rows(user['company_id'], start_date, end_date, query.get('guard_id'))
         conn = db()
         period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
+        company = conn.execute('SELECT qb_connected_at FROM companies WHERE id=?', (user['company_id'],)).fetchone()
         record_map = payroll_guard_record_map(conn, user['company_id'], period['id'] if period else None)
         review = None
         review_guard_id = query.get('guard_id')
@@ -5400,7 +5435,8 @@ def application(environ, start_response):
         conn.close()
         payroll_can_export = len(rows) > 0 and all(str(r.get('review_status_label', '')).lower() == 'approved' for r in rows)
         payroll_export_blocked = query.get('export_blocked') == '1'
-        return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll Processing', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date, payroll_period=period, payroll_can_export=payroll_can_export, payroll_export_blocked=payroll_export_blocked, payroll_review=review)
+        send_status = 'Sent to QuickBooks' if period and period.get('status') == 'sent_to_quickbooks' else 'Not Sent'
+        return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll Processing', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date, payroll_period=period, payroll_can_export=payroll_can_export, payroll_export_blocked=payroll_export_blocked, payroll_review=review, qb_connected=bool(company and company.get('qb_connected_at')), payroll_send_status=send_status)
     if path == '/admin/payroll/review':
         return redirect(start_response, f"/admin/payroll?{urlencode({'start': query.get('start',''), 'end': query.get('end',''), 'guard_id': query.get('guard_id','')})}")
     if path == '/admin/payroll/review/action' and method == 'POST':
@@ -5520,6 +5556,41 @@ def application(environ, start_response):
         conn.commit(); conn.close()
         log_audit('payroll_exported_csv', actor_user_id=user['id'], company_id=user['company_id'], target_type='payroll', target_id=f'{start_date}:{end_date}', message='payroll CSV exported and locked', environ=environ)
         start_response('200 OK', response_headers([('Content-Disposition', 'attachment; filename="steeleops_payroll.csv"')], 'text/csv; charset=utf-8')); return [csv_data]
+    if path == '/admin/settings/quickbooks/connect' and method == 'POST':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # Phase 1 simulation of OAuth token storage.
+        access_token = f"qbo_access_{secrets.token_urlsafe(24)}"
+        refresh_token = f"qbo_refresh_{secrets.token_urlsafe(24)}"
+        conn = db()
+        conn.execute('UPDATE companies SET qb_access_token=?, qb_refresh_token=?, qb_connected_at=?, qb_realm_id=? WHERE id=?', (access_token, refresh_token, now, 'phase1-sandbox', user['company_id']))
+        conn.commit()
+        conn.close()
+        return redirect_with_feedback(start_response, '/admin/payroll', success='QuickBooks connection saved (phase 1 simulated OAuth).')
+    if path == '/admin/payroll/send-to-quickbooks' and method == 'POST':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        data, _ = parse_post(environ)
+        start_date = data.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat())
+        end_date = data.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat())
+        conn = db()
+        rows = payroll_rows(user['company_id'], start_date, end_date)
+        period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
+        record_map = payroll_guard_record_map(conn, user['company_id'], period['id'] if period else None)
+        if any((record_map.get(r['guard_id']) or {}).get('status') != 'approved' for r in rows):
+            conn.close()
+            return redirect_with_feedback(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date})}", error='Cannot send payroll: all guards must be approved.')
+        payload = quickbooks_payroll_payload(user['company_id'], start_date, end_date, record_map)
+        print('QuickBooks payroll payload (phase 1 simulation):', json.dumps(payload, indent=2))
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if not period:
+            conn.execute('INSERT INTO payroll_periods (company_id, period_start, period_end, status, locked_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], start_date, end_date, 'sent_to_quickbooks', now, user['id'], now))
+            period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
+        conn.execute('UPDATE payroll_periods SET status=?, locked_at=? WHERE id=?', ('sent_to_quickbooks', now, period['id']))
+        conn.commit()
+        conn.close()
+        return json_response(start_response, {'status': 'success', 'message': 'Payroll payload logged and QuickBooks send simulated.', 'sent_count': len(payload), 'period_start': start_date, 'period_end': end_date})
     return not_found(start_response)
 
 
