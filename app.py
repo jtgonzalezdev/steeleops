@@ -3286,13 +3286,14 @@ PAYROLL_HTML = r'''{% extends "app_shell.html" %}
         </form>
         {% endif %}
         <div class="small-muted">Send Status: {{ payroll_send_status or 'Not Sent' }}</div>
-        {% if payroll_export_blocked %}<div class="alert error">Payroll export blocked: all guard hours must be approved and complete before export.</div>{% endif %}
+        {% if payroll_export_blocked %}<div class="alert error">Approve all payroll rows before export.</div>{% endif %}
+        {% if query_preview %}<div class="alert">Payroll batch preview is shown below. CSV download is deprecated.</div>{% endif %}
         {% if payroll_rows is defined %}
         <form method="get" action="/admin/payroll/export.csv" class="stack compact">
           <input type="hidden" name="start" value="{{ payroll_start }}">
           <input type="hidden" name="end" value="{{ payroll_end }}">
-          <button class="btn" type="submit" {% if not payroll_can_export %}disabled{% endif %}>Generate Payroll Export</button>
-          {% if not payroll_can_export %}<div class="small-muted">Review and approve all guard hours before generating the QuickBooks export.</div>{% endif %}
+          <button class="btn" type="submit" {% if not payroll_can_export %}disabled{% endif %}>Preview Payroll Batch</button>
+          {% if not payroll_can_export %}<div class="small-muted">Review and approve all guard hours before previewing the payroll batch.</div>{% endif %}
         </form>
         <form method="post" action="/admin/payroll/send-to-quickbooks" class="stack compact">
           {{ csrf_input|safe }}
@@ -3301,7 +3302,7 @@ PAYROLL_HTML = r'''{% extends "app_shell.html" %}
           <button class="btn primary" type="submit" {% if (not payroll_can_export) or (not qb_connected) %}disabled{% endif %}>Send to QuickBooks</button>
           {% if not qb_connected %}<div class="small-muted">Connect QuickBooks before sending payroll.</div>{% endif %}
         </form>
-        {% else %}<div class="empty">Choose a pay period to enable CSV export.</div>{% endif %}
+        {% else %}<div class="empty">Choose a pay period to preview the payroll batch.</div>{% endif %}
       </div>
     </section>
     <section class="card">
@@ -5635,7 +5636,7 @@ def application(environ, start_response):
             except Exception as exc:
                 print(f"[quickbooks_companyinfo_error] {exc}", flush=True)
         try:
-            return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll Processing', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date, payroll_period=period, payroll_can_export=payroll_can_export, payroll_export_blocked=payroll_export_blocked, payroll_review=review, qb_connected=bool(company and company.get('qb_connected_at')), qb_company_name=qb_company_name, payroll_send_status=send_status, error=payroll_error)
+            return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll Processing', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date, payroll_period=period, payroll_can_export=payroll_can_export, payroll_export_blocked=payroll_export_blocked, query_preview=(query.get('preview') == '1'), payroll_review=review, qb_connected=bool(company and company.get('qb_connected_at')), qb_company_name=qb_company_name, payroll_send_status=send_status, error=payroll_error)
         except Exception as exc:
             log_route_exception('/payroll', exc)
             return html_response(start_response, b'<h1>Payroll failed to load. Check server logs.</h1>', status='500 Internal Server Error')
@@ -5729,35 +5730,39 @@ def application(environ, start_response):
     if path == '/admin/payroll/export.csv':
         user, response = require_admin(environ, start_response)
         if response: return response
-        start_date = query.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat()); end_date = query.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat())
-        conn = db()
-        rows = payroll_rows(user['company_id'], start_date, end_date)
-        period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
-        record_map = payroll_guard_record_map(conn, user['company_id'], period['id'] if period else None)
-        if any((record_map.get(r['guard_id']) or {}).get('status') != 'approved' for r in rows):
-            conn.close()
-            blocked_qs = urlencode({'start': start_date, 'end': end_date, 'export_blocked': '1'})
-            return redirect(start_response, f'/admin/payroll?{blocked_qs}')
-        now = utc_now_str()
-        period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
-        if not period:
-            conn.execute('INSERT INTO payroll_periods (company_id, period_start, period_end, status, locked_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], start_date, end_date, 'sent_to_quickbooks', now, user['id'], now))
-            period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
-        run_status = 'sent_to_quickbooks'
-        conn.execute('INSERT INTO payroll_runs (period_id, company_id, status, generated_by, generated_at) VALUES (?, ?, ?, ?, ?)', (period['id'], user['company_id'], run_status, user['id'], now))
-        run = conn.execute('SELECT id FROM payroll_runs WHERE period_id=? ORDER BY id DESC LIMIT 1', (period['id'],)).fetchone()
-        csv_data = payroll_csv(user['company_id'], start_date, end_date, record_map)
-        export_name = f'payroll_export_{user["company_id"]}_{start_date}_{end_date}_{int(datetime.now().timestamp())}.csv'
-        export_rel = f'uploads/payroll_exports/{export_name}'
-        os.makedirs(os.path.join(BASE_DIR, 'uploads', 'payroll_exports'), exist_ok=True)
-        with open(os.path.join(BASE_DIR, export_rel), 'wb') as f:
-            f.write(csv_data)
-        conn.execute('INSERT INTO payroll_exports (period_id, run_id, company_id, file_path, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)', (period['id'], run['id'], user['company_id'], export_rel, user['id'], now))
-        conn.execute('UPDATE payroll_periods SET status=?, locked_at=? WHERE id=?', ('sent_to_quickbooks', now, period['id']))
-        conn.execute('INSERT INTO payroll_audit_logs (company_id, period_id, event_type, notes, actor_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?)', (user['company_id'], period['id'], 'payroll_generation', 'Payroll CSV export generated and period locked for QuickBooks.', user['id'], now))
-        conn.commit(); conn.close()
-        log_audit('payroll_exported_csv', actor_user_id=user['id'], company_id=user['company_id'], target_type='payroll', target_id=f'{start_date}:{end_date}', message='payroll CSV exported and locked', environ=environ)
-        start_response('200 OK', response_headers([('Content-Disposition', 'attachment; filename="steeleops_payroll.csv"')], 'text/csv; charset=utf-8')); return [csv_data]
+        try:
+            start_date, end_date = parse_payroll_period_dates(query.get('start'), query.get('end'))
+            conn = db()
+            try:
+                rows = payroll_rows(user['company_id'], start_date, end_date) or []
+                period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
+                record_map = payroll_guard_record_map(conn, user['company_id'], period['id'] if period else None)
+
+                if not rows:
+                    return redirect_with_feedback(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date})}", error='No payroll rows found for this period.')
+
+                for row in rows:
+                    guard_record = (record_map.get(row['guard_id']) or {})
+                    guard_status = str(guard_record.get('status') or '').lower()
+                    display = get_payroll_display_values(row, guard_record)
+                    guard_name = row.get('full_name') or 'Unknown guard'
+                    if guard_status != 'approved':
+                        return redirect_with_feedback(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date})}", error='Approve all payroll rows before export.')
+                    if display['total_hours'] <= 0:
+                        return redirect_with_feedback(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date})}", error=f'Missing hours for {guard_name}.')
+                    if row.get('hourly_rate') in (None, ''):
+                        return redirect_with_feedback(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date})}", error=f'Missing pay rate for {guard_name}.')
+                    _guard_email = (row.get('email') or '').strip() or 'missing-email@unknown.local'
+                    _site_name = (row.get('site_name') or '').strip() or 'Unknown Site'
+
+                return redirect_with_feedback(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date, 'preview': '1'})}", success='Payroll batch preview ready.')
+            finally:
+                conn.close()
+        except Exception as exc:
+            print(f"[payroll_export_error] {exc}", flush=True)
+            print(traceback.format_exc(), flush=True)
+            fallback_start, fallback_end = parse_payroll_period_dates(query.get('start'), query.get('end'))
+            return redirect_with_feedback(start_response, f"/admin/payroll?{urlencode({'start': fallback_start, 'end': fallback_end})}", error='Payroll export failed. Check logs.')
     if path == '/admin/settings/quickbooks/reconnect' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
