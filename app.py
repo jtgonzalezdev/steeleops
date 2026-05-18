@@ -116,7 +116,7 @@ def reset_admin_password_once(conn):
         conn.execute('UPDATE users SET password=? WHERE id=?', (new_hash, target['id']))
 
     with open(TEMP_ADMIN_RESET_MARKER, 'w', encoding='utf-8') as marker_file:
-        marker_file.write(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        marker_file.write(utc_now_str())
 
     print(f"Temporary admin password reset applied for {len(targets)} user(s)")
     return True
@@ -129,7 +129,7 @@ def repair_admin_account(conn):
 
     company_row = conn.execute('SELECT id FROM companies ORDER BY id LIMIT 1').fetchone()
     if not company_row:
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now = utc_now_str()
         conn.execute(
             'INSERT INTO companies (name, tagline, created_at) VALUES (?, ?, ?)',
             ('SteeleOps', 'Security Operations Simplified', now),
@@ -148,7 +148,7 @@ def repair_admin_account(conn):
         ('jtadmin', BOOTSTRAP_ADMIN_EMAIL),
     ).fetchone()
 
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    now = utc_now_str()
     password_hash = hash_password(BOOTSTRAP_ADMIN_PASSWORD)
     if existing:
         conn.execute(
@@ -616,7 +616,7 @@ def upsert_guard_login(conn, guard, payload):
         """,
         (
             payload['company_id'], guard['id'], payload['username'], hash_password(payload['temporary_password']), hash_password(payload['pin']) if payload['pin'] else None, payload['full_name'],
-            user_phone, user_email, user_license, 18, active, datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            user_phone, user_email, user_license, 18, active, utc_now_str()
         )
     )
     new_row = conn.execute('SELECT id FROM users WHERE username=?', (payload['username'],)).fetchone()
@@ -628,6 +628,10 @@ def upsert_guard_login(conn, guard, payload):
 
 def now_utc():
     return datetime.now(timezone.utc)
+
+
+def utc_now_str():
+    return now_utc().strftime('%Y-%m-%d %H:%M:%S')
 
 
 def expires_at(hours=SESSION_TTL_HOURS):
@@ -1170,7 +1174,7 @@ def init_db():
         for col in ['reviewed_at TEXT', 'reviewed_by INTEGER']:
             ensure_column(conn, 'time_off_requests', col)
 
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    now = utc_now_str()
     bootstrap_created = bootstrap_initial_admin(conn, now)
     if not bootstrap_created and fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM companies') == 0:
         conn.execute('INSERT INTO companies (name, tagline, created_at) VALUES (?, ?, ?)', ('SteeleOps Demo', 'Security Operations Simplified', now))
@@ -1721,7 +1725,7 @@ def process_shift_clock_action(user, shift_id, action):
         if user['role'] != 'guard' or shift_assignment_value(shift) != user['id']:
             return False, 'Only the assigned guard can clock this shift'
 
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        timestamp = utc_now_str()
         if action == 'in':
             if shift['clock_in_time']:
                 return False, 'Shift already clocked in'
@@ -2029,6 +2033,16 @@ def login_page(start_response, error=None):
     return html_response(start_response, render('login.html', title='SteeleOps Login', error=error))
 
 
+def log_route_exception(route_name, exc):
+    print(f"[route_error] route={route_name} error={exc}", flush=True)
+    print(traceback.format_exc(), flush=True)
+
+
+def dashboard_error_page(start_response):
+    body = b"<h1>Dashboard failed to load. Check server logs.</h1><p>Please try again in a moment.</p>"
+    return html_response(start_response, body, status='500 Internal Server Error')
+
+
 def export_reports_pdf(company_id):
     conn = db()
     company = conn.execute('SELECT * FROM companies WHERE id=?', (company_id,)).fetchone()
@@ -2222,7 +2236,11 @@ def application(environ, start_response):
         return serve_static(environ, start_response, path.lstrip('/'))
 
     if path == '/':
-        return redirect(start_response, '/dashboard' if user else '/login')
+        try:
+            return redirect(start_response, '/dashboard' if user else '/login')
+        except Exception as exc:
+            log_route_exception('/', exc)
+            return html_response(start_response, b'<h1>Something went wrong. Please try again.</h1>', status='500 Internal Server Error')
 
     if path == '/login' and method == 'GET':
         return login_page(start_response)
@@ -2249,11 +2267,15 @@ def application(environ, start_response):
         return redirect(start_response, '/login', [('Set-Cookie', delete_cookie_header())])
 
     if path == '/dashboard':
-        user, response = require_login(environ, start_response)
-        if response:
-            return response
-        ctx = get_dashboard_context(user, query.get('view', 'week'))
-        return html_response(start_response, render('dashboard.html', title='SteeleOps Control Center', user=user, **ctx))
+        try:
+            user, response = require_login(environ, start_response)
+            if response:
+                return response
+            ctx = get_dashboard_context(user, query.get('view', 'week'))
+            return html_response(start_response, render('dashboard.html', title='SteeleOps Control Center', user=user, **ctx))
+        except Exception as exc:
+            log_route_exception('/dashboard', exc)
+            return dashboard_error_page(start_response)
 
     if path == '/profile':
         user, response = require_login(environ, start_response)
@@ -2319,7 +2341,7 @@ def application(environ, start_response):
         if not shift or not require_company_access(user, shift['company_id']) or (user['role'] == 'guard' and shift_assignment_value(shift) != user['id']):
             conn.close()
             return bad_request(start_response, 'Shift not accessible')
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        timestamp = utc_now_str()
         if action == 'in':
             conn.execute('UPDATE shifts SET clock_in_time=?, status=? WHERE id=?', (timestamp, 'clocked_in', shift_id))
         else:
@@ -2350,7 +2372,7 @@ def application(environ, start_response):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (company_id, data['report_type'], data['report_date'], data['report_time'], int(data['site_id']), officer_name,
               data['summary'], data.get('status', 'open'), data.get('priority', 'medium'), attachment_name, attachment_path, photo_name, photo_path,
-              datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+              utc_now_str()))
         conn.commit(); conn.close()
         return redirect(start_response, '/dashboard')
 
@@ -2363,7 +2385,7 @@ def application(environ, start_response):
         conn.execute('''
             INSERT INTO patrol_checkpoints (company_id, user_id, site_id, checkpoint_name, check_time, notes)
             VALUES (?, ?, ?, ?, ?, ?)
-        ''', (user['company_id'], user['id'], data.get('site_id'), data.get('checkpoint_name'), data.get('check_time') or datetime.now().strftime('%Y-%m-%d %H:%M:%S'), data.get('notes', '')))
+        ''', (user['company_id'], user['id'], data.get('site_id'), data.get('checkpoint_name'), data.get('check_time') or utc_now_str(), data.get('notes', '')))
         conn.commit(); conn.close()
         return redirect(start_response, '/dashboard')
 
@@ -2376,7 +2398,7 @@ def application(environ, start_response):
         conn.execute('''
             INSERT INTO shift_swap_requests (company_id, shift_id, requested_by, requested_to, status, notes, created_at)
             VALUES (?, ?, ?, ?, 'pending', ?, ?)
-        ''', (user['company_id'], data.get('shift_id'), user['id'], data.get('requested_to') or None, data.get('notes', ''), datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        ''', (user['company_id'], data.get('shift_id'), user['id'], data.get('requested_to') or None, data.get('notes', ''), utc_now_str()))
         conn.commit(); conn.close()
         return redirect(start_response, '/dashboard')
 
@@ -2437,7 +2459,7 @@ def application(environ, start_response):
         conn.execute('''
             INSERT INTO time_corrections (company_id, shift_id, requested_by, requested_clock_in, requested_clock_out, reason, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (user['company_id'], data.get('shift_id'), user['id'], data.get('requested_clock_in'), data.get('requested_clock_out'), data.get('reason', ''), datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        ''', (user['company_id'], data.get('shift_id'), user['id'], data.get('requested_clock_in'), data.get('requested_clock_out'), data.get('reason', ''), utc_now_str()))
         conn.commit(); conn.close()
         return redirect(start_response, '/dashboard')
 
@@ -2486,7 +2508,7 @@ def application(environ, start_response):
                 status=data.get('status', 'active') if data.get('status') in ('active', 'inactive') else 'active',
                 rating=float(data.get('rating') or 5),
                 training_status=data.get('training_status') or '',
-                created_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                created_at=utc_now_str(),
             )
             new_row = conn.execute('SELECT * FROM guards WHERE company_id=? ORDER BY id DESC LIMIT 1', (user['company_id'],)).fetchone()
             new_id = new_row['id'] if new_row else None
@@ -2557,7 +2579,7 @@ def application(environ, start_response):
             conn.execute('''
                 INSERT INTO users (company_id, username, password, full_name, role, phone, email, license_number, hourly_rate, active, created_at)
                 VALUES (?, ?, ?, ?, 'guard', ?, ?, ?, ?, 1, ?)
-            ''', (user['company_id'], data.get('username'), hash_password(data.get('password', 'guard123')), data.get('full_name'), data.get('phone', ''), data.get('email', ''), data.get('license_number', ''), float(data.get('hourly_rate') or 18), datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            ''', (user['company_id'], data.get('username'), hash_password(data.get('password', 'guard123')), data.get('full_name'), data.get('phone', ''), data.get('email', ''), data.get('license_number', ''), float(data.get('hourly_rate') or 18), utc_now_str()))
             new_row = conn.execute('SELECT id FROM users WHERE username=?', (data.get('username'),)).fetchone()
             new_id = new_row['id'] if new_row else None
             for weekday in range(7):
@@ -3832,7 +3854,7 @@ def save_guard_site_assignment(conn, company_id, guard_id, site_id):
     site = conn.execute('SELECT id FROM sites WHERE id=? AND company_id=? AND active=1', (normalized_site_id, company_id)).fetchone()
     if not site:
         raise ValueError('Assigned site not found')
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    timestamp = utc_now_str()
     conn.execute(
         'INSERT INTO guard_site_assignments (company_id, guard_id, site_id, assigned_at) VALUES (?, ?, ?, ?)',
         (company_id, guard_id, normalized_site_id, timestamp)
@@ -4727,7 +4749,7 @@ def reset_admin_password_once(conn):
         conn.execute('UPDATE users SET password=? WHERE id=?', (new_hash, target['id']))
 
     with open(TEMP_ADMIN_RESET_MARKER, 'w', encoding='utf-8') as marker_file:
-        marker_file.write(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        marker_file.write(utc_now_str())
 
     print(f"Temporary admin password reset applied for {len(targets)} user(s)")
     return True
@@ -4795,7 +4817,11 @@ def application(environ, start_response):
             if not validate_csrf(environ, data):
                 return forbidden(start_response, 'Invalid or missing CSRF token.')
     if path == '/':
-        return redirect(start_response, '/dashboard' if user else '/login')
+        try:
+            return redirect(start_response, '/dashboard' if user else '/login')
+        except Exception as exc:
+            log_route_exception('/', exc)
+            return html_response(start_response, b'<h1>Something went wrong. Please try again.</h1>', status='500 Internal Server Error')
     if path == '/reset-admin':
         return text_response(start_response, '410 Gone', 'Route removed. Use /repair-admin for one-time admin repair.')
     if path == '/repair-admin':
@@ -5026,18 +5052,18 @@ def application(environ, start_response):
         attachment_name, attachment_path = save_upload(files.get('attachment'), 'attachments') if files.get('attachment') else (None, None)
         photo_name, photo_path = save_upload(files.get('photo'), 'photos') if files.get('photo') else (None, None)
         officer_name = user['full_name'] if user['role'] == 'guard' else data.get('officer_name', user['full_name'])
-        conn = db(); now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S'); conn.execute('INSERT INTO reports (company_id, report_type, report_date, report_time, site_id, officer_name, summary, status, priority, attachment_name, attachment_path, photo_name, photo_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (user['company_id'], data['report_type'], data['report_date'], data['report_time'], int(data['site_id']), officer_name, data['summary'], data.get('status', 'open'), data.get('priority', 'medium'), attachment_name, attachment_path, photo_name, photo_path, now_str, now_str)); report_id = _new_report_id(conn); conn.commit(); conn.close(); log_audit('report_created', actor_user_id=user['id'], company_id=user['company_id'], target_type='report', target_id=report_id, message='report submitted', environ=environ, metadata={'type': data['report_type']}); return redirect(start_response, '/dashboard')
+        conn = db(); now_str = utc_now_str(); conn.execute('INSERT INTO reports (company_id, report_type, report_date, report_time, site_id, officer_name, summary, status, priority, attachment_name, attachment_path, photo_name, photo_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (user['company_id'], data['report_type'], data['report_date'], data['report_time'], int(data['site_id']), officer_name, data['summary'], data.get('status', 'open'), data.get('priority', 'medium'), attachment_name, attachment_path, photo_name, photo_path, now_str, now_str)); report_id = _new_report_id(conn); conn.commit(); conn.close(); log_audit('report_created', actor_user_id=user['id'], company_id=user['company_id'], target_type='report', target_id=report_id, message='report submitted', environ=environ, metadata={'type': data['report_type']}); return redirect(start_response, '/dashboard')
     if path == '/report/update' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
         data, _ = parse_post(environ); conn = db(); report = conn.execute('SELECT * FROM reports WHERE id=? AND company_id=?', (data.get('report_id'), user['company_id'])).fetchone()
         if not report: conn.close(); return bad_request(start_response, 'Report not found')
-        conn.execute('UPDATE reports SET status=?, priority=?, updated_at=? WHERE id=?', (data.get('status', report['status']), data.get('priority', report['priority']), datetime.now().strftime('%Y-%m-%d %H:%M:%S'), report['id']))
+        conn.execute('UPDATE reports SET status=?, priority=?, updated_at=? WHERE id=?', (data.get('status', report['status']), data.get('priority', report['priority']), utc_now_str(), report['id']))
         conn.commit(); conn.close(); log_audit('incident_updated', actor_user_id=user['id'], company_id=user['company_id'], target_type='report', target_id=report['id'], message='report status or priority updated', environ=environ, metadata={'status': data.get('status'), 'priority': data.get('priority')}); return redirect(start_response, '/dashboard')
     if path == '/checkpoint/new' and method == 'POST':
         user, response = require_login(environ, start_response)
         if response: return response
-        data, _ = parse_post(environ); conn = db(); conn.execute('INSERT INTO patrol_checkpoints (company_id, user_id, site_id, checkpoint_name, check_time, notes) VALUES (?, ?, ?, ?, ?, ?)', (user['company_id'], user['id'], data.get('site_id'), data.get('checkpoint_name'), data.get('check_time') or datetime.now().strftime('%Y-%m-%d %H:%M:%S'), data.get('notes', ''))); conn.commit(); conn.close(); return redirect(start_response, '/dashboard')
+        data, _ = parse_post(environ); conn = db(); conn.execute('INSERT INTO patrol_checkpoints (company_id, user_id, site_id, checkpoint_name, check_time, notes) VALUES (?, ?, ?, ?, ?, ?)', (user['company_id'], user['id'], data.get('site_id'), data.get('checkpoint_name'), data.get('check_time') or utc_now_str(), data.get('notes', ''))); conn.commit(); conn.close(); return redirect(start_response, '/dashboard')
     if path == '/swap/request' and method == 'POST':
         user, response = require_login(environ, start_response)
         if response: return response
@@ -5049,7 +5075,7 @@ def application(environ, start_response):
             requested_guard = conn.execute("SELECT id FROM users WHERE id=? AND company_id=? AND role='guard'", (requested_to, user['company_id'])).fetchone()
             if not requested_guard:
                 conn.close(); return bad_request(start_response, 'Requested guard not found')
-        conn.execute("INSERT INTO shift_swap_requests (company_id, shift_id, requested_by, requested_to, status, notes, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)", (user['company_id'], data.get('shift_id'), user['id'], requested_to, data.get('notes', ''), datetime.now().strftime('%Y-%m-%d %H:%M:%S'))); conn.commit(); conn.close(); return redirect(start_response, '/dashboard')
+        conn.execute("INSERT INTO shift_swap_requests (company_id, shift_id, requested_by, requested_to, status, notes, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)", (user['company_id'], data.get('shift_id'), user['id'], requested_to, data.get('notes', ''), utc_now_str())); conn.commit(); conn.close(); return redirect(start_response, '/dashboard')
     if path == '/swap/approve' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
@@ -5100,7 +5126,7 @@ def application(environ, start_response):
         data, _ = parse_post(environ); conn = db(); shift = conn.execute('SELECT * FROM shifts WHERE id=? AND company_id=?', (data.get('shift_id'), user['company_id'])).fetchone()
         if not shift or shift_assignment_value(shift) != user['id']:
             conn.close(); return bad_request(start_response, 'You can only request corrections for your own assigned shifts')
-        conn.execute('INSERT INTO time_corrections (company_id, shift_id, requested_by, requested_clock_in, requested_clock_out, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], data.get('shift_id'), user['id'], data.get('requested_clock_in'), data.get('requested_clock_out'), data.get('reason', ''), datetime.now().strftime('%Y-%m-%d %H:%M:%S'))); conn.commit(); conn.close(); return redirect(start_response, '/dashboard')
+        conn.execute('INSERT INTO time_corrections (company_id, shift_id, requested_by, requested_clock_in, requested_clock_out, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], data.get('shift_id'), user['id'], data.get('requested_clock_in'), data.get('requested_clock_out'), data.get('reason', ''), utc_now_str())); conn.commit(); conn.close(); return redirect(start_response, '/dashboard')
     if path == '/time-correction/approve' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
@@ -5135,7 +5161,7 @@ def application(environ, start_response):
             return redirect_with_feedback(start_response, '/dashboard', error='End date cannot be before start date.')
         if request_type not in {'paid', 'unpaid'}:
             return redirect_with_feedback(start_response, '/dashboard', error='Type must be paid or unpaid.')
-        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now_str = utc_now_str()
         conn = db()
         duplicate = conn.execute('''
             SELECT id
@@ -5162,7 +5188,7 @@ def application(environ, start_response):
             conn.close(); return redirect_with_feedback(start_response, '/dashboard', error='Time off request not found.')
         if req['status'] != 'pending':
             conn.close(); return redirect_with_feedback(start_response, '/dashboard', error='Only pending requests can be reviewed.')
-        reviewed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        reviewed_at = utc_now_str()
         conn.execute('UPDATE time_off_requests SET status=?, updated_at=?, reviewed_at=?, reviewed_by=? WHERE id=?', (decision, reviewed_at, reviewed_at, user['id'], req['id']))
         conn.commit(); conn.close()
         log_audit('time_off_request_reviewed', actor_user_id=user['id'], company_id=user['company_id'], target_type='time_off_request', target_id=req['id'], message=f'time off request {decision}', environ=environ)
@@ -5215,7 +5241,7 @@ def application(environ, start_response):
                 status=data.get('status', 'active') if data.get('status') in ('active', 'inactive') else 'active',
                 rating=float(data.get('rating') or 5),
                 training_status=data.get('training_status') or '',
-                created_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                created_at=utc_now_str(),
             )
             new_row = conn.execute('SELECT * FROM guards WHERE company_id=? ORDER BY id DESC LIMIT 1', (user['company_id'],)).fetchone()
             new_id = new_row['id'] if new_row else None
@@ -5279,14 +5305,14 @@ def application(environ, start_response):
     if path == '/admin/guard/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
-        data, _ = parse_post(environ); conn = db(); conn.execute("INSERT INTO users (company_id, username, password, full_name, role, phone, email, license_number, hourly_rate, active, created_at) VALUES (?, ?, ?, ?, 'guard', ?, ?, ?, ?, 1, ?)", (user['company_id'], data.get('username'), hash_password(data.get('password', 'guard123')), data.get('full_name'), data.get('phone', ''), data.get('email', ''), data.get('license_number', ''), float(data.get('hourly_rate') or 18), datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        data, _ = parse_post(environ); conn = db(); conn.execute("INSERT INTO users (company_id, username, password, full_name, role, phone, email, license_number, hourly_rate, active, created_at) VALUES (?, ?, ?, ?, 'guard', ?, ?, ?, ?, 1, ?)", (user['company_id'], data.get('username'), hash_password(data.get('password', 'guard123')), data.get('full_name'), data.get('phone', ''), data.get('email', ''), data.get('license_number', ''), float(data.get('hourly_rate') or 18), utc_now_str()))
         new_row = conn.execute('SELECT id FROM users WHERE username=?', (data.get('username'),)).fetchone(); new_id = new_row['id'] if new_row else None
         for weekday in range(7): conn.execute("INSERT INTO availability (company_id, user_id, weekday, available_start, available_end, is_available) VALUES (?, ?, ?, '08:00', '20:00', 1)", (user['company_id'], new_id, weekday))
         conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='user', target_id=new_id, message='guard account created', environ=environ); return redirect(start_response, '/dashboard')
     if path == '/admin/client/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
-        data, _ = parse_post(environ); conn = db(); conn.execute('INSERT INTO clients (company_id, name, contact_name, contact_email, contact_phone, notes, active, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)', (user['company_id'], data.get('name'), data.get('contact_name'), data.get('contact_email'), data.get('contact_phone'), data.get('notes'), datetime.now().strftime('%Y-%m-%d %H:%M:%S'))); conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='client', target_id=data.get('name'), message='client created', environ=environ); return redirect(start_response, '/dashboard')
+        data, _ = parse_post(environ); conn = db(); conn.execute('INSERT INTO clients (company_id, name, contact_name, contact_email, contact_phone, notes, active, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)', (user['company_id'], data.get('name'), data.get('contact_name'), data.get('contact_email'), data.get('contact_phone'), data.get('notes'), utc_now_str())); conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='client', target_id=data.get('name'), message='client created', environ=environ); return redirect(start_response, '/dashboard')
     if path == '/admin/site/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
@@ -5418,7 +5444,7 @@ def application(environ, start_response):
             if local_file_path and os.path.isfile(local_file_path):
                 os.remove(local_file_path)
             return redirect_with_feedback(start_response, '/admin/paystubs/upload', error='Selected guard was not found for your company.')
-        created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        created_at = utc_now_str()
         period = None
         if pay_period_start and pay_period_end:
             period = conn.execute('SELECT id FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], pay_period_start, pay_period_end)).fetchone()
@@ -5566,7 +5592,11 @@ def application(environ, start_response):
                 qb_company_name = (quickbooks_fetch_company_info(user['company_id']).get('CompanyName') or '').strip()
             except Exception as exc:
                 print(f"[quickbooks_companyinfo_error] {exc}", flush=True)
-        return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll Processing', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date, payroll_period=period, payroll_can_export=payroll_can_export, payroll_export_blocked=payroll_export_blocked, payroll_review=review, qb_connected=bool(company and company.get('qb_connected_at')), qb_company_name=qb_company_name, payroll_send_status=send_status)
+        try:
+            return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll Processing', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date, payroll_period=period, payroll_can_export=payroll_can_export, payroll_export_blocked=payroll_export_blocked, payroll_review=review, qb_connected=bool(company and company.get('qb_connected_at')), qb_company_name=qb_company_name, payroll_send_status=send_status)
+        except Exception as exc:
+            log_route_exception('/payroll', exc)
+            return html_response(start_response, b'<h1>Payroll failed to load. Check server logs.</h1>', status='500 Internal Server Error')
     if path == '/admin/payroll/review':
         return redirect(start_response, f"/admin/payroll?{urlencode({'start': query.get('start',''), 'end': query.get('end',''), 'guard_id': query.get('guard_id','')})}")
     if path == '/admin/payroll/review/action' and method == 'POST':
@@ -5577,7 +5607,7 @@ def application(environ, start_response):
         conn = db()
         period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
         if not period:
-            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            now = utc_now_str()
             conn.execute('INSERT INTO payroll_periods (company_id, period_start, period_end, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)', (user['company_id'], start_date, end_date, 'pending_approval', user['id'], now))
             period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
         if period['status'] == 'sent_to_quickbooks':
@@ -5619,7 +5649,7 @@ def application(environ, start_response):
             old_regular = float(existing_rec['regular_hours']) if existing_rec else float(max((row['total_hours'] or 0) - (row['overtime_hours'] or 0), 0))
             old_overtime = float(existing_rec['overtime_hours']) if existing_rec else float(row['overtime_hours'] or 0)
             audit_note = f"guard_id={guard_id}; pay_period_start={start_date}; pay_period_end={end_date}; old_regular_hours={old_regular:.2f}; old_overtime_hours={old_overtime:.2f}; new_regular_hours={regular_hours:.2f}; new_overtime_hours={overtime_hours:.2f}; admin_reason={manual_reason}; admin_user={user['username']}"
-            conn.execute('INSERT INTO payroll_audit_logs (company_id, period_id, guard_id, event_type, notes, actor_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], period['id'], guard_id, 'manual_hours_saved', audit_note, user['id'], datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            conn.execute('INSERT INTO payroll_audit_logs (company_id, period_id, guard_id, event_type, notes, actor_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], period['id'], guard_id, 'manual_hours_saved', audit_note, user['id'], utc_now_str()))
         approval_source = 'manual_override' if manual_override_used else 'clock_records'
         if action == 'approve':
             manual_total_hours = regular_hours + overtime_hours
@@ -5643,7 +5673,7 @@ def application(environ, start_response):
         elif action == 'edit':
             status = 'hours_edited'
             return redirect(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date, 'guard_id': guard_id, 'manual_mode': '1'})}")
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now = utc_now_str()
         conn.execute('DELETE FROM payroll_guard_records WHERE company_id=? AND period_id=? AND guard_id=?', (user['company_id'], period['id'], guard_id))
         conn.execute('INSERT INTO payroll_guard_records (period_id, company_id, guard_id, regular_hours, overtime_hours, pay_rate, gross_pay_estimate, status, admin_notes, manual_override_used, manual_override_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (period['id'], user['company_id'], guard_id, regular_hours, overtime_hours, row['hourly_rate'] or 0, gross_pay_estimate, status, data.get('admin_notes', ''), 1 if manual_override_used else 0, (data.get('manual_reason', '') or (existing_rec['manual_override_reason'] if existing_rec else ''))))
         audit_notes = data.get('admin_notes', '')
@@ -5666,7 +5696,7 @@ def application(environ, start_response):
             conn.close()
             blocked_qs = urlencode({'start': start_date, 'end': end_date, 'export_blocked': '1'})
             return redirect(start_response, f'/admin/payroll?{blocked_qs}')
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now = utc_now_str()
         period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
         if not period:
             conn.execute('INSERT INTO payroll_periods (company_id, period_start, period_end, status, locked_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], start_date, end_date, 'sent_to_quickbooks', now, user['id'], now))
@@ -5776,7 +5806,7 @@ def application(environ, start_response):
             return redirect_with_feedback(start_response, f"/admin/payroll?{urlencode({'start': start_date, 'end': end_date})}", error='Cannot send payroll: all guards must be approved.')
         payload = quickbooks_payroll_payload(user['company_id'], start_date, end_date, record_map)
         print('QuickBooks payroll payload (phase 1 simulation):', json.dumps(payload, indent=2))
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now = utc_now_str()
         if not period:
             conn.execute('INSERT INTO payroll_periods (company_id, period_start, period_end, status, locked_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], start_date, end_date, 'sent_to_quickbooks', now, user['id'], now))
             period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
