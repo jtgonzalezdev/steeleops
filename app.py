@@ -3253,10 +3253,21 @@ PAYROLL_HTML = r'''{% extends "app_shell.html" %}
         <div class="section-head"><h3>Status</h3><span>{{ payroll_period.status.replace('_', ' ').title() if payroll_period else 'Pending Approval' }}</span></div>
         <div class="small-muted">QuickBooks Connection: {% if qb_connected %}Connected{% else %}Not Connected{% endif %}</div>
         {% if qb_company_name %}<div class="small-muted">Connected to QuickBooks: {{ qb_company_name }}</div>{% endif %}
+        {% if qb_connected %}
+        <form method="post" action="/admin/settings/quickbooks/connect" class="stack compact">
+          {{ csrf_input|safe }}
+          <button class="btn ghost" type="button" disabled>QuickBooks Connected</button>
+        </form>
+        <form method="post" action="/admin/settings/quickbooks/reconnect" class="stack compact">
+          {{ csrf_input|safe }}
+          <button class="btn ghost" type="submit">Reconnect QuickBooks</button>
+        </form>
+        {% else %}
         <form method="post" action="/admin/settings/quickbooks/connect" class="stack compact">
           {{ csrf_input|safe }}
           <button class="btn ghost" type="submit">Connect to QuickBooks</button>
         </form>
+        {% endif %}
         <div class="small-muted">Send Status: {{ payroll_send_status or 'Not Sent' }}</div>
         {% if payroll_export_blocked %}<div class="alert error">Payroll export blocked: all guard hours must be approved and complete before export.</div>{% endif %}
         {% if payroll_rows is defined %}
@@ -5716,9 +5727,27 @@ def application(environ, start_response):
         conn.commit(); conn.close()
         log_audit('payroll_exported_csv', actor_user_id=user['id'], company_id=user['company_id'], target_type='payroll', target_id=f'{start_date}:{end_date}', message='payroll CSV exported and locked', environ=environ)
         start_response('200 OK', response_headers([('Content-Disposition', 'attachment; filename="steeleops_payroll.csv"')], 'text/csv; charset=utf-8')); return [csv_data]
+    if path == '/admin/settings/quickbooks/reconnect' and method == 'POST':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        conn = db()
+        conn.execute(
+            'UPDATE companies SET qb_access_token=NULL, qb_refresh_token=NULL, qb_realm_id=NULL, qb_connected_at=NULL, qb_expires_at=NULL WHERE id=?',
+            (user['company_id'],),
+        )
+        conn.commit()
+        conn.close()
+        return redirect(start_response, '/admin/settings/quickbooks/connect')
+
     if path == '/admin/settings/quickbooks/connect' and method in ('GET', 'POST'):
         user, response = require_admin(environ, start_response)
         if response: return response
+        conn = db()
+        company = conn.execute('SELECT qb_connected_at, qb_realm_id, qb_access_token, qb_refresh_token FROM companies WHERE id=?', (user['company_id'],)).fetchone()
+        conn.close()
+        qb_already_connected = bool(company and company.get('qb_connected_at') and company.get('qb_realm_id') and company.get('qb_access_token') and company.get('qb_refresh_token'))
+        if qb_already_connected:
+            return redirect_with_feedback(start_response, '/payroll', success='QuickBooks is already connected.')
         try:
             required_vars = {
                 'QUICKBOOKS_CLIENT_ID': os.getenv('QUICKBOOKS_CLIENT_ID', '').strip(),
