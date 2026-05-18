@@ -8,6 +8,10 @@ import re
 import secrets
 import shutil
 import sqlite3
+import urllib.error
+import urllib.parse
+import urllib.request
+from base64 import b64encode
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlencode
 from wsgiref.simple_server import make_server
@@ -167,6 +171,97 @@ def repair_admin_account(conn):
     )
     print('Admin created')
     return 'Admin created'
+
+
+def quickbooks_base_url():
+    qb_env = os.getenv('QUICKBOOKS_ENV', 'sandbox').strip().lower()
+    return 'https://sandbox-quickbooks.api.intuit.com' if qb_env == 'sandbox' else 'https://quickbooks.api.intuit.com'
+
+
+def quickbooks_token_url():
+    qb_env = os.getenv('QUICKBOOKS_ENV', 'sandbox').strip().lower()
+    return 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer' if qb_env == 'sandbox' else 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer'
+
+
+def exchange_quickbooks_code_for_tokens(code, redirect_uri):
+    client_id = os.getenv('QUICKBOOKS_CLIENT_ID', '').strip()
+    client_secret = os.getenv('QUICKBOOKS_CLIENT_SECRET', '').strip()
+    if not client_id or not client_secret or not redirect_uri:
+        raise ValueError('QuickBooks OAuth configuration is incomplete.')
+    payload = urllib.parse.urlencode({
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': redirect_uri,
+    }).encode('utf-8')
+    auth = b64encode(f'{client_id}:{client_secret}'.encode('utf-8')).decode('utf-8')
+    req = urllib.request.Request(quickbooks_token_url(), data=payload, method='POST')
+    req.add_header('Authorization', f'Basic {auth}')
+    req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode('utf-8'))
+
+
+def refresh_quickbooks_token(refresh_token):
+    client_id = os.getenv('QUICKBOOKS_CLIENT_ID', '').strip()
+    client_secret = os.getenv('QUICKBOOKS_CLIENT_SECRET', '').strip()
+    payload = urllib.parse.urlencode({
+        'grant_type': 'refresh_token',
+        'refresh_token': refresh_token,
+    }).encode('utf-8')
+    auth = b64encode(f'{client_id}:{client_secret}'.encode('utf-8')).decode('utf-8')
+    req = urllib.request.Request(quickbooks_token_url(), data=payload, method='POST')
+    req.add_header('Authorization', f'Basic {auth}')
+    req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode('utf-8'))
+
+
+def get_valid_quickbooks_token(company_id):
+    conn = db()
+    company = conn.execute('SELECT id, qb_access_token, qb_refresh_token, qb_realm_id, qb_expires_at FROM companies WHERE id=?', (company_id,)).fetchone()
+    if not company or not company.get('qb_access_token') or not company.get('qb_refresh_token'):
+        conn.close()
+        raise ValueError('QuickBooks is not connected for this company.')
+    expires_at = company.get('qb_expires_at')
+    if expires_at:
+        try:
+            expiry = datetime.strptime(expires_at, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+        except Exception:
+            expiry = datetime.now(timezone.utc) - timedelta(seconds=1)
+    else:
+        expiry = datetime.now(timezone.utc) - timedelta(seconds=1)
+    if expiry <= (datetime.now(timezone.utc) + timedelta(minutes=2)):
+        token_data = refresh_quickbooks_token(company['qb_refresh_token'])
+        new_access = token_data.get('access_token')
+        new_refresh = token_data.get('refresh_token') or company['qb_refresh_token']
+        expires_in = int(token_data.get('expires_in') or 3600)
+        new_expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).strftime('%Y-%m-%d %H:%M:%S')
+        conn.execute(
+            'UPDATE companies SET qb_access_token=?, qb_refresh_token=?, qb_expires_at=?, qb_connected_at=? WHERE id=?',
+            (new_access, new_refresh, new_expires_at, datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'), company_id),
+        )
+        conn.commit()
+        company['qb_access_token'] = new_access
+        company['qb_refresh_token'] = new_refresh
+    conn.close()
+    return company['qb_access_token']
+
+
+def quickbooks_fetch_company_info(company_id):
+    conn = db()
+    company = conn.execute('SELECT qb_realm_id FROM companies WHERE id=?', (company_id,)).fetchone()
+    realm_id = (company.get('qb_realm_id') if company else '') or ''
+    conn.close()
+    if not realm_id:
+        raise ValueError('QuickBooks realmId is missing.')
+    access_token = get_valid_quickbooks_token(company_id)
+    url = f"{quickbooks_base_url()}/v3/company/{realm_id}/companyinfo/{realm_id}"
+    req = urllib.request.Request(url, method='GET')
+    req.add_header('Authorization', f'Bearer {access_token}')
+    req.add_header('Accept', 'application/json')
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = json.loads(resp.read().decode('utf-8'))
+    return data.get('CompanyInfo', {})
 
 
 def ensure_assets():
@@ -3135,6 +3230,7 @@ PAYROLL_HTML = r'''{% extends "app_shell.html" %}
       <div class="card">
         <div class="section-head"><h3>Status</h3><span>{{ payroll_period.status.replace('_', ' ').title() if payroll_period else 'Pending Approval' }}</span></div>
         <div class="small-muted">QuickBooks Connection: {% if qb_connected %}Connected{% else %}Not Connected{% endif %}</div>
+        {% if qb_company_name %}<div class="small-muted">Connected to QuickBooks: {{ qb_company_name }}</div>{% endif %}
         <form method="post" action="/admin/settings/quickbooks/connect" class="stack compact">
           {{ csrf_input|safe }}
           <button class="btn ghost" type="submit">Connect to QuickBooks</button>
@@ -4343,6 +4439,7 @@ def init_db():
     if table_exists(conn, 'companies'):
         ensure_column(conn, 'companies', 'qb_access_token TEXT')
         ensure_column(conn, 'companies', 'qb_refresh_token TEXT')
+        ensure_column(conn, 'companies', 'qb_expires_at TEXT')
         ensure_column(conn, 'companies', 'qb_connected_at TEXT')
         ensure_column(conn, 'companies', 'qb_realm_id TEXT')
     if APP_ENV == 'production':
@@ -5416,7 +5513,7 @@ def application(environ, start_response):
         start_date = query.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat()); end_date = query.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat()); rows = payroll_rows(user['company_id'], start_date, end_date, query.get('guard_id'))
         conn = db()
         period = conn.execute('SELECT * FROM payroll_periods WHERE company_id=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1', (user['company_id'], start_date, end_date)).fetchone()
-        company = conn.execute('SELECT qb_connected_at FROM companies WHERE id=?', (user['company_id'],)).fetchone()
+        company = conn.execute('SELECT qb_connected_at, qb_realm_id FROM companies WHERE id=?', (user['company_id'],)).fetchone()
         record_map = payroll_guard_record_map(conn, user['company_id'], period['id'] if period else None)
         review = None
         review_guard_id = query.get('guard_id')
@@ -5463,7 +5560,13 @@ def application(environ, start_response):
         payroll_can_export = len(rows) > 0 and all(str(r.get('review_status_label', '')).lower() == 'approved' for r in rows)
         payroll_export_blocked = query.get('export_blocked') == '1'
         send_status = 'Sent to QuickBooks' if period and period.get('status') == 'sent_to_quickbooks' else 'Not Sent'
-        return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll Processing', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date, payroll_period=period, payroll_can_export=payroll_can_export, payroll_export_blocked=payroll_export_blocked, payroll_review=review, qb_connected=bool(company and company.get('qb_connected_at')), payroll_send_status=send_status)
+        qb_company_name = ''
+        if company and company.get('qb_connected_at') and company.get('qb_realm_id'):
+            try:
+                qb_company_name = (quickbooks_fetch_company_info(user['company_id']).get('CompanyName') or '').strip()
+            except Exception as exc:
+                print(f"[quickbooks_companyinfo_error] {exc}", flush=True)
+        return app_page(environ, start_response, user, 'payroll.html', active_path='/payroll', view='week', title='Payroll Processing', payroll_rows=rows, payroll_start=start_date, payroll_end=end_date, payroll_period=period, payroll_can_export=payroll_can_export, payroll_export_blocked=payroll_export_blocked, payroll_review=review, qb_connected=bool(company and company.get('qb_connected_at')), qb_company_name=qb_company_name, payroll_send_status=send_status)
     if path == '/admin/payroll/review':
         return redirect(start_response, f"/admin/payroll?{urlencode({'start': query.get('start',''), 'end': query.get('end',''), 'guard_id': query.get('guard_id','')})}")
     if path == '/admin/payroll/review/action' and method == 'POST':
@@ -5633,10 +5736,26 @@ def application(environ, start_response):
                 return html_response(start_response, b"<h1>QuickBooks callback error</h1><p>Missing required parameters: code and realmId.</p>", status='400 Bad Request')
             if not state or not expected_state or state != expected_state:
                 return html_response(start_response, b"<h1>QuickBooks callback error</h1><p>Invalid OAuth state. Please start the connection again.</p>", status='400 Bad Request')
-
+            redirect_uri = os.getenv('QUICKBOOKS_REDIRECT_URI', '').strip()
+            token_data = exchange_quickbooks_code_for_tokens(code, redirect_uri)
+            access_token = (token_data.get('access_token') or '').strip()
+            refresh_token = (token_data.get('refresh_token') or '').strip()
+            expires_in = int(token_data.get('expires_in') or 3600)
+            expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).strftime('%Y-%m-%d %H:%M:%S')
+            if not access_token or not refresh_token:
+                return html_response(start_response, b"<h1>QuickBooks callback error</h1><p>Token exchange failed. Missing access_token or refresh_token.</p>", status='400 Bad Request')
+            conn = db()
+            conn.execute(
+                'UPDATE companies SET qb_realm_id=?, qb_access_token=?, qb_refresh_token=?, qb_expires_at=?, qb_connected_at=? WHERE id=?',
+                (realm_id, access_token, refresh_token, expires_at, datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'), user['company_id']),
+            )
+            conn.commit()
+            conn.close()
+            company_info = quickbooks_fetch_company_info(user['company_id'])
+            company_name = (company_info.get('CompanyName') or 'Unknown Company').strip()
             return html_response(
                 start_response,
-                b"<h1>QuickBooks authorization received successfully.</h1>",
+                f"<h1>QuickBooks authorization received successfully.</h1><p>Connected to QuickBooks: {escape(company_name)}</p><p><a href=\"/admin/payroll\">Return to Payroll</a></p>".encode('utf-8'),
                 extra_headers=[('Set-Cookie', qb_delete_state_cookie_header())]
             )
         except Exception as exc:
