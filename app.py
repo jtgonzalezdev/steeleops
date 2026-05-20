@@ -1235,6 +1235,21 @@ def init_db():
             'attachment_path TEXT', "status TEXT NOT NULL DEFAULT 'Open'", 'created_at TEXT'
         ]:
             ensure_column(conn, 'incident_reports', col)
+        ensure_column(conn, 'incident_reports', 'admin_notes TEXT')
+    if table_exists(conn, 'daily_activity_reports'):
+        ensure_column(conn, 'daily_activity_reports', 'admin_notes TEXT')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS report_status_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL,
+            report_kind TEXT NOT NULL,
+            report_id INTEGER NOT NULL,
+            old_status TEXT,
+            new_status TEXT,
+            changed_by INTEGER,
+            changed_at TEXT NOT NULL
+        )
+    ''')
 
     now = utc_now_str()
     bootstrap_created = bootstrap_initial_admin(conn, now)
@@ -1849,6 +1864,79 @@ def normalized_recent_reports(base_reports, daily_activity_reports, incident_rep
     normalized_rows.extend(normalize_report_row(report, fallback_type='Daily Activity') for report in daily_activity_reports)
     normalized_rows.extend(normalize_report_row(report, fallback_type='Incident') for report in incident_reports)
     return sorted(normalized_rows, key=lambda x: str(x.get('created_at') or ''), reverse=True)
+
+
+def report_status_options():
+    return ['Open', 'In Progress', 'Closed', 'Escalated']
+
+
+def report_management_context(conn, user, query):
+    company_id = user['company_id']
+    page = max(1, int((query.get('page') or '1') if str(query.get('page') or '1').isdigit() else 1))
+    page_size = 15
+    selected_type = (query.get('type') or '').strip().lower()
+    selected_status = (query.get('status') or '').strip().lower()
+    selected_officer = (query.get('officer_id') or '').strip()
+    selected_site = (query.get('site_id') or '').strip()
+    q = (query.get('q') or '').strip().lower()
+    all_rows = []
+
+    daily_rows = conn.execute('''
+        SELECT d.id as report_id, 'daily_activity' as report_kind, 'Daily Activity' as report_type, d.status, '' as priority, d.created_at, d.summary as narrative,
+               '' as persons_involved, '' as witnesses, d.photo_path, '' as attachment_path, s.name as site_name, u.full_name as officer_name, d.officer_id, d.site_id, d.admin_notes
+        FROM daily_activity_reports d
+        JOIN sites s ON d.site_id=s.id
+        JOIN users u ON d.officer_id=u.id
+        WHERE d.company_id=?
+    ''', (company_id,)).fetchall()
+    incident_rows = conn.execute('''
+        SELECT i.id as report_id, 'incident' as report_kind, 'Incident' as report_type, i.status, i.priority, i.created_at, i.narrative,
+               i.persons_involved, i.witnesses, '' as photo_path, i.attachment_path, s.name as site_name, u.full_name as officer_name, i.officer_id, i.site_id, i.admin_notes
+        FROM incident_reports i
+        JOIN sites s ON i.site_id=s.id
+        JOIN users u ON i.officer_id=u.id
+        WHERE i.company_id=?
+    ''', (company_id,)).fetchall()
+    if user['role'] != 'guard':
+        all_rows = list(daily_rows) + list(incident_rows)
+    else:
+        all_rows = [r for r in list(daily_rows) + list(incident_rows) if str(r['officer_id']) == str(user['id'])]
+    history_rows = conn.execute('SELECT * FROM report_status_history WHERE company_id=? ORDER BY changed_at DESC', (company_id,)).fetchall()
+    history_by_key = {}
+    for row in history_rows:
+        history_by_key.setdefault(f"{row['report_kind']}:{row['report_id']}", []).append(row)
+    filtered = []
+    for row in all_rows:
+        row = dict(row)
+        key = f"{row['report_kind']}:{row['report_id']}"
+        row['status_history'] = history_by_key.get(key, [])
+        if selected_type and row['report_kind'] != selected_type:
+            continue
+        if selected_status and (row.get('status') or '').strip().lower() != selected_status:
+            continue
+        if selected_officer and str(row.get('officer_id') or '') != selected_officer:
+            continue
+        if selected_site and str(row.get('site_id') or '') != selected_site:
+            continue
+        hay = ' '.join([str(row.get('narrative') or ''), str(row.get('officer_name') or ''), str(row.get('site_name') or ''), str(row.get('persons_involved') or '')]).lower()
+        if q and q not in hay:
+            continue
+        filtered.append(row)
+    filtered = sorted(filtered, key=lambda x: x.get('created_at') or '', reverse=True)
+    total = len(filtered)
+    start = (page - 1) * page_size
+    end = start + page_size
+    pages = max(1, (total + page_size - 1) // page_size)
+    officers = conn.execute("SELECT id, full_name FROM users WHERE company_id=? AND role='guard' ORDER BY full_name", (company_id,)).fetchall()
+    sites = conn.execute("SELECT id, name FROM sites WHERE company_id=? ORDER BY name", (company_id,)).fetchall()
+    return {
+        'managed_reports': filtered[start:end],
+        'report_filters': {'type': selected_type, 'status': selected_status, 'officer_id': selected_officer, 'site_id': selected_site, 'q': q},
+        'report_pages': {'current': page, 'total': pages, 'has_prev': page > 1, 'has_next': page < pages},
+        'report_filter_officers': officers,
+        'report_filter_sites': sites,
+        'report_status_options': report_status_options(),
+    }
 
 
 def get_dashboard_context(user, view='week', shift_form_values=None):
@@ -3350,38 +3438,55 @@ GUARDS_HTML = r'''{% extends "app_shell.html" %}
 
 REPORTS_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
-    <section class="grid two-col">
-      <div class="card">
-        <div class="section-head"><h3>Incident & Daily Reports</h3><span>Photo upload supported for incidents</span></div>
-        <form method="post" action="/report/new" enctype="multipart/form-data" class="stack">
-          <div class="row-2">
-            <label>Report Type<select name="report_type"><option value="incident">Incident</option><option value="daily">Daily Activity</option></select></label>
-            <label>Site<select name="site_id">{% for site in sites %}<option value="{{ site.id }}">{{ site.name }}{% if site.client_company_name %} · {{ site.client_company_name }}{% endif %}</option>{% endfor %}</select></label>
-          </div>
-          <div class="row-3">
-            <label>Date<input type="date" name="report_date" required></label>
-            <label>Time<input type="time" name="report_time" required></label>
-            <label>Status<select name="status"><option>open</option><option>pending</option><option>closed</option></select></label>
-          </div>
-          <div class="row-2">
-            <label>Priority<select name="priority"><option>low</option><option selected>medium</option><option>high</option></select></label>
-            {% if user.role in ['company_admin', 'superadmin'] %}<label>Officer Name<input type="text" name="officer_name" placeholder="Officer name"></label>{% endif %}
-          </div>
-          <label>Summary<textarea name="summary" rows="4" required></textarea></label>
-          <div class="row-2"><label>Attachment<input type="file" name="attachment"></label><label>Incident Photo<input type="file" name="photo" accept="image/*"></label></div>
-          <button class="btn primary" type="submit">Submit Report</button>
+    <section class="card">
+      <div class="section-head"><h3>Report Management</h3><span>Incident + Daily Activity reports</span></div>
+      <form method="get" action="/reports" class="stack compact">
+        <div class="actions" style="gap:8px;flex-wrap:wrap;">
+          <a class="btn {% if not report_filters.type %}primary{% else %}ghost{% endif %}" href="/reports">All</a>
+          <a class="btn {% if report_filters.type == 'incident' %}primary{% else %}ghost{% endif %}" href="/reports?type=incident">Incident</a>
+          <a class="btn {% if report_filters.type == 'daily_activity' %}primary{% else %}ghost{% endif %}" href="/reports?type=daily_activity">Daily Activity</a>
+          <a class="btn {% if report_filters.status == 'open' %}primary{% else %}ghost{% endif %}" href="/reports?status=open">Open</a>
+          <a class="btn {% if report_filters.status == 'closed' %}primary{% else %}ghost{% endif %}" href="/reports?status=closed">Closed</a>
+        </div>
+        <div class="row-4">
+          <label>Search<input type="search" name="q" value="{{ report_filters.q }}" placeholder="Narrative, officer, site, persons involved"></label>
+          <label>Officer<select name="officer_id"><option value="">All officers</option>{% for officer in report_filter_officers %}<option value="{{ officer.id }}" {% if report_filters.officer_id == officer.id|string %}selected{% endif %}>{{ officer.full_name }}</option>{% endfor %}</select></label>
+          <label>Site<select name="site_id"><option value="">All sites</option>{% for site in report_filter_sites %}<option value="{{ site.id }}" {% if report_filters.site_id == site.id|string %}selected{% endif %}>{{ site.name }}</option>{% endfor %}</select></label>
+          <label>Status<select name="status"><option value="">All</option>{% for status in report_status_options %}<option value="{{ status|lower }}" {% if report_filters.status == status|lower %}selected{% endif %}>{{ status }}</option>{% endfor %}</select></label>
+        </div>
+        <input type="hidden" name="type" value="{{ report_filters.type }}">
+        <div class="actions"><button class="btn primary" type="submit">Apply</button><a class="btn ghost" href="/reports">Reset</a></div>
+      </form>
+    </section>
+    <section class="card">
+      <div class="section-head"><h3>Newest First</h3><span>Click a report to expand full details</span></div>
+      {% for report in managed_reports %}
+      <details class="report-details report-card">
+        <summary>
+          <div class="report-top"><strong>{{ report.report_type }}</strong><span class="badge {{ report.status|lower|replace(' ', '-') }}">{{ report.status }}</span>{% if report.priority %}<span class="badge">{{ report.priority }}</span>{% endif %}</div>
+          <div class="small-muted">{{ report.created_at }} · {{ report.site_name }} · {{ report.officer_name }}</div>
+        </summary>
+        <p><strong>Narrative / Summary:</strong> {{ report.narrative or 'N/A' }}</p>
+        <p><strong>Persons Involved:</strong> {{ report.persons_involved or 'N/A' }}</p>
+        <p><strong>Witnesses:</strong> {{ report.witnesses or 'N/A' }}</p>
+        {% if report.photo_path %}<p><img class="report-photo" src="/{{ report.photo_path }}" alt="Report photo"></p>{% endif %}
+        {% if report.attachment_path %}<p><a class="btn ghost" href="/{{ report.attachment_path }}" target="_blank" rel="noopener">Open Attachment</a></p>{% endif %}
+        <div class="small-muted">Status History:</div>
+        {% for history in report.status_history[:5] %}<div class="small-muted">• {{ history.changed_at }}: {{ history.old_status or 'N/A' }} → {{ history.new_status }}</div>{% else %}<div class="small-muted">No status history yet.</div>{% endfor %}
+        {% if user.role in ['company_admin', 'superadmin'] %}
+        <form method="post" action="/admin/reports/manage" class="stack compact">
+          <input type="hidden" name="report_kind" value="{{ report.report_kind }}">
+          <input type="hidden" name="report_id" value="{{ report.report_id }}">
+          <div class="row-2"><label>Status<select name="status">{% for status in report_status_options %}<option value="{{ status }}" {% if report.status == status %}selected{% endif %}>{{ status }}</option>{% endfor %}</select></label><label>Admin Notes<textarea name="admin_notes" rows="2" placeholder="Internal admin notes">{{ report.admin_notes or '' }}</textarea></label></div>
+          <button class="btn primary" type="submit">Save</button>
         </form>
-      </div>
-      <div class="card">
-        <div class="section-head"><h3>Recent Reports</h3><span>Latest field activity</span></div>
-        {% for report in recent_reports %}
-          <div class="report-card">
-            <div class="report-top"><strong>{{ (report.report_type or 'N/A') }}</strong><span class="badge {{ (report.status or 'n-a')|lower|replace(' ', '-') }}">{{ report.status or 'N/A' }}</span><span class="badge {{ (report.priority or 'n-a')|lower|replace(' ', '-') }}">{{ report.priority or 'N/A' }}</span></div>
-            <div class="small-muted">{{ report.timestamp or report.created_at or 'N/A' }} · {{ report.site or report.site_name or 'N/A' }} · {{ report.officer or report.officer_name or 'N/A' }}</div>
-            <p>{{ report.summary_preview or report.summary or report.narrative or 'N/A' }}</p>
-            {% if report.photo_path %}<img class="report-photo" src="/{{ report.photo_path }}" alt="Incident photo">{% endif %}
-          </div>
-        {% else %}<div class="empty">No reports yet.</div>{% endfor %}
+        {% endif %}
+      </details>
+      {% else %}<div class="empty">No reports found.</div>{% endfor %}
+      <div class="actions" style="justify-content:space-between;margin-top:10px;">
+        {% if report_pages.has_prev %}<a class="btn ghost" href="/reports?page={{ report_pages.current - 1 }}&type={{ report_filters.type }}&status={{ report_filters.status }}&officer_id={{ report_filters.officer_id }}&site_id={{ report_filters.site_id }}&q={{ report_filters.q|urlencode }}">Previous</a>{% else %}<span></span>{% endif %}
+        <span class="small-muted">Page {{ report_pages.current }} of {{ report_pages.total }}</span>
+        {% if report_pages.has_next %}<a class="btn ghost" href="/reports?page={{ report_pages.current + 1 }}&type={{ report_filters.type }}&status={{ report_filters.status }}&officer_id={{ report_filters.officer_id }}&site_id={{ report_filters.site_id }}&q={{ report_filters.q|urlencode }}">Next</a>{% endif %}
       </div>
     </section>
 {% endblock %}'''
@@ -5699,10 +5804,35 @@ def application(environ, start_response):
         user, response = require_admin(environ, start_response)
         if response: return response
         pdf = export_reports_pdf(user['company_id']); log_audit('reports_exported_pdf', actor_user_id=user['id'], company_id=user['company_id'], target_type='report', target_id='export', message='PDF report export generated', environ=environ); start_response('200 OK', response_headers([('Content-Disposition', 'attachment; filename="steeleops_reports.pdf"')], 'application/pdf')); return [pdf]
-    if path == '/reports':
+    if path == '/admin/reports/manage' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
-        return app_page(environ, start_response, user, 'reports.html', active_path='/reports', view='week', title='Reports')
+        data, _ = parse_post(environ)
+        report_kind = (data.get('report_kind') or '').strip()
+        table_name = 'daily_activity_reports' if report_kind == 'daily_activity' else 'incident_reports' if report_kind == 'incident' else ''
+        if not table_name:
+            return bad_request(start_response, 'Invalid report type.')
+        report_id = data.get('report_id')
+        new_status = (data.get('status') or '').strip()
+        if new_status not in report_status_options():
+            return bad_request(start_response, 'Invalid status.')
+        conn = db()
+        row = conn.execute(f'SELECT * FROM {table_name} WHERE id=? AND company_id=?', (report_id, user['company_id'])).fetchone()
+        if not row:
+            conn.close(); return bad_request(start_response, 'Report not found.')
+        old_status = row.get('status') or ''
+        now = utc_now_str()
+        conn.execute(f'UPDATE {table_name} SET status=?, admin_notes=? WHERE id=?', (new_status, (data.get('admin_notes') or '').strip(), report_id))
+        conn.execute('INSERT INTO report_status_history (company_id, report_kind, report_id, old_status, new_status, changed_by, changed_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], report_kind, report_id, old_status, new_status, user['id'], now))
+        conn.commit(); conn.close()
+        return redirect_with_feedback(start_response, '/reports', message='Report updated.')
+    if path == '/reports':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        conn = db()
+        report_context = report_management_context(conn, user, parse_query(environ))
+        conn.close()
+        return app_page(environ, start_response, user, 'reports.html', active_path='/reports', view='week', title='Reports', **report_context)
     if path == '/guard/daily-activity-reports' and method == 'GET':
         user, response = require_login(environ, start_response)
         if response: return response
