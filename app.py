@@ -1822,6 +1822,35 @@ def get_company_scope_id(user):
     return user['company_id']
 
 
+def normalize_report_row(report, fallback_type=None):
+    row = dict(report)
+    report_type_value = row.get('report_type') or fallback_type or 'N/A'
+    report_date = row.get('report_date')
+    report_time = row.get('report_time')
+    created_at = row.get('created_at')
+    timestamp_value = report_date and report_time and f"{report_date} {report_time}" or created_at or 'N/A'
+    summary_value = row.get('summary') or row.get('narrative') or 'N/A'
+    row.update({
+        'report_type': report_type_value,
+        'status': row.get('status') or 'N/A',
+        'priority': row.get('priority') or 'N/A',
+        'site': row.get('site') or row.get('site_name') or 'N/A',
+        'officer': row.get('officer') or row.get('officer_name') or 'N/A',
+        'timestamp': timestamp_value,
+        'created_at': created_at or timestamp_value,
+        'summary_preview': summary_value,
+        'summary': summary_value,
+    })
+    return row
+
+
+def normalized_recent_reports(base_reports, daily_activity_reports, incident_reports):
+    normalized_rows = [normalize_report_row(report) for report in base_reports]
+    normalized_rows.extend(normalize_report_row(report, fallback_type='Daily Activity') for report in daily_activity_reports)
+    normalized_rows.extend(normalize_report_row(report, fallback_type='Incident') for report in incident_reports)
+    return sorted(normalized_rows, key=lambda x: str(x.get('created_at') or ''), reverse=True)
+
+
 def get_dashboard_context(user, view='week', shift_form_values=None):
     conn = db()
     company_id = get_company_scope_id(user)
@@ -2105,7 +2134,7 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         'active_sites': active_sites,
         'clients': clients,
         'reports': reports,
-        'recent_reports': list(recent_reports) + list(dar_recent),
+        'recent_reports': normalized_recent_reports(recent_reports, dar_recent, incident_recent),
         'dar_recent': dar_recent,
         'incident_recent': incident_recent,
         'guards': guards,
@@ -3347,9 +3376,9 @@ REPORTS_HTML = r'''{% extends "app_shell.html" %}
         <div class="section-head"><h3>Recent Reports</h3><span>Latest field activity</span></div>
         {% for report in recent_reports %}
           <div class="report-card">
-            <div class="report-top"><strong>{{ report.report_type.title() }}</strong><span class="badge {{ report.status }}">{{ report.status }}</span><span class="badge {{ report.priority }}">{{ report.priority }}</span></div>
-            <div class="small-muted">{{ report.report_date }} {{ report.report_time }} · {{ report.site_name }} · {{ report.officer_name }}</div>
-            <p>{{ report.summary }}</p>
+            <div class="report-top"><strong>{{ (report.report_type or 'N/A') }}</strong><span class="badge {{ (report.status or 'n-a')|lower|replace(' ', '-') }}">{{ report.status or 'N/A' }}</span><span class="badge {{ (report.priority or 'n-a')|lower|replace(' ', '-') }}">{{ report.priority or 'N/A' }}</span></div>
+            <div class="small-muted">{{ report.timestamp or report.created_at or 'N/A' }} · {{ report.site or report.site_name or 'N/A' }} · {{ report.officer or report.officer_name or 'N/A' }}</div>
+            <p>{{ report.summary_preview or report.summary or report.narrative or 'N/A' }}</p>
             {% if report.photo_path %}<img class="report-photo" src="/{{ report.photo_path }}" alt="Incident photo">{% endif %}
           </div>
         {% else %}<div class="empty">No reports yet.</div>{% endfor %}
