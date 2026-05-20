@@ -868,6 +868,26 @@ def init_db():
         FOREIGN KEY(officer_id) REFERENCES users(id)
     );
 
+    CREATE TABLE IF NOT EXISTS incident_reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER NOT NULL,
+        site_id INTEGER NOT NULL,
+        officer_id INTEGER NOT NULL,
+        incident_type TEXT NOT NULL,
+        priority TEXT NOT NULL DEFAULT 'Medium',
+        narrative TEXT NOT NULL,
+        persons_involved TEXT,
+        witnesses TEXT,
+        police_notified INTEGER NOT NULL DEFAULT 0,
+        client_notified INTEGER NOT NULL DEFAULT 0,
+        attachment_path TEXT,
+        status TEXT NOT NULL DEFAULT 'Open',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(company_id) REFERENCES companies(id),
+        FOREIGN KEY(site_id) REFERENCES sites(id),
+        FOREIGN KEY(officer_id) REFERENCES users(id)
+    );
+
     CREATE TABLE IF NOT EXISTS daily_activity_reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         company_id INTEGER NOT NULL,
@@ -1206,6 +1226,14 @@ def init_db():
     if table_exists(conn, 'time_off_requests'):
         for col in ['reviewed_at TEXT', 'reviewed_by INTEGER']:
             ensure_column(conn, 'time_off_requests', col)
+    if table_exists(conn, 'incident_reports'):
+        for col in [
+            'company_id INTEGER', 'site_id INTEGER', 'officer_id INTEGER', 'incident_type TEXT',
+            "priority TEXT NOT NULL DEFAULT 'Medium'", 'narrative TEXT', 'persons_involved TEXT',
+            'witnesses TEXT', 'police_notified INTEGER NOT NULL DEFAULT 0', 'client_notified INTEGER NOT NULL DEFAULT 0',
+            'attachment_path TEXT', "status TEXT NOT NULL DEFAULT 'Open'", 'created_at TEXT'
+        ]:
+            ensure_column(conn, 'incident_reports', col)
 
     now = utc_now_str()
     bootstrap_created = bootstrap_initial_admin(conn, now)
@@ -1840,6 +1868,14 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
             WHERE d.company_id=? AND d.officer_id=?
             ORDER BY d.created_at DESC LIMIT 10
         ''', (company_id, user['id'])).fetchall()
+        incident_recent = conn.execute('''
+            SELECT i.*, s.name as site_name, u.full_name as officer_name
+            FROM incident_reports i
+            JOIN sites s ON i.site_id=s.id
+            JOIN users u ON i.officer_id=u.id
+            WHERE i.company_id=? AND i.officer_id=?
+            ORDER BY i.created_at DESC LIMIT 10
+        ''', (company_id, user['id'])).fetchall()
     else:
         shifts = conn.execute('''
             SELECT shifts.*, COALESCE(shifts.user_id, shifts.guard_id) as user_id, COALESCE(shifts.guard_id, shifts.user_id) as guard_id, users.full_name, sites.name as site_name, sites.address, sites.client_company_name
@@ -1866,6 +1902,14 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
             JOIN users u ON d.officer_id=u.id
             WHERE d.company_id=?
             ORDER BY d.created_at DESC LIMIT 8
+        ''', (company_id,)).fetchall()
+        incident_recent = conn.execute('''
+            SELECT i.*, s.name as site_name, u.full_name as officer_name
+            FROM incident_reports i
+            JOIN sites s ON i.site_id=s.id
+            JOIN users u ON i.officer_id=u.id
+            WHERE i.company_id=?
+            ORDER BY i.created_at DESC LIMIT 8
         ''', (company_id,)).fetchall()
     shift_form = {
         'site_id': (shift_form_values.get('site_id') or '').strip(),
@@ -2061,6 +2105,8 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         'clients': clients,
         'reports': reports,
         'recent_reports': list(recent_reports) + list(dar_recent),
+        'dar_recent': dar_recent,
+        'incident_recent': incident_recent,
         'guards': guards,
         'guards_module_rows': guards_module_rows,
         'schedule_rows': schedule_rows,
@@ -3318,7 +3364,7 @@ GUARD_DAILY_ACTIVITY_REPORTS_HTML = r'''{% extends "app_shell.html" %}
     <div class="section-head"><h3>Daily Activity Report</h3><span>Submit daily guard activity</span></div>
     <form method="post" action="/guard/daily-activity-reports/new" enctype="multipart/form-data" class="stack">
       <div class="row-2"><label>Officer<input type="text" value="{{ user.full_name }}" readonly></label><label>Assigned Site<input type="text" value="{{ assigned_site.name if assigned_site else 'Unassigned' }}" readonly></label></div>
-      <div class="row-2"><label>Server Date<input type="text" value="{{ server_now }}" readonly></label><label>Activity Type<select name="activity_type" required><option>Patrol</option><option>Gate Check</option><option>Visitor Log</option><option>Truck Entry</option><option>Parking Patrol</option><option>Perimeter Check</option><option>General Activity</option></select></label></div>
+      <div class="row-2"><label>Report Timestamp<input type="text" value="{{ server_now }}" readonly></label><label>Activity Type<select name="activity_type" required><option>Patrol</option><option>Gate Check</option><option>Visitor Log</option><option>Truck Entry</option><option>Parking Patrol</option><option>Perimeter Check</option><option>General Activity</option></select></label></div>
       <label>Summary / Notes<textarea name="summary" rows="5" required></textarea></label>
       <label>Optional Photo<input type="file" name="photo" accept="image/*"></label>
       <button class="btn primary" type="submit" {% if not assigned_site %}disabled{% endif %}>Submit Daily Activity Report</button>
@@ -3335,16 +3381,34 @@ GUARD_DAILY_ACTIVITY_REPORTS_HTML = r'''{% extends "app_shell.html" %}
 GUARD_MY_REPORTS_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
 <section class="card">
-  <div class="section-head"><h3>My Reports</h3><span>Daily activity reports submitted by you</span></div>
+  <div class="section-head"><h3>My Reports</h3><span>Daily Activity + Incident reports submitted by you</span></div>
   {% for report in my_reports %}
-  <div class="list-item detailed"><div><strong>{{ report.activity_type }}</strong><div class="small-muted">{{ report.site_name }} · {{ report.created_at }}</div></div><div><span class="badge {{ report.status }}">{{ report.status }}</span></div></div>
+  <div class="list-item detailed"><div><strong>{{ report.report_type }}</strong><div class="small-muted">{{ report.site_name }} · {{ report.created_at }}</div><div class="small-muted">{% if report.report_type == 'Incident Report' %}{{ report.incident_type }}{% else %}{{ report.activity_type }}{% endif %}</div></div><div><span class="badge {{ report.status }}">{{ report.status }}</span>{% if report.priority %}<span class="badge">{{ report.priority }}</span>{% endif %}<a class="btn ghost" href="/guard/my-reports">View details</a></div></div>
   {% else %}<div class="empty">No reports submitted yet.</div>{% endfor %}
 </section>
 {% endblock %}'''
 
 GUARD_INCIDENT_REPORTS_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
-<section class="card"><div class="section-head"><h3>Incident Reports</h3><span>Incident reporting remains separate from Daily Activity Reports.</span></div><div class="small-muted">Use the existing incident workflow managed by your administrators.</div></section>
+<section class="grid two-col">
+  <div class="card">
+    <div class="section-head"><h3>Incident Report</h3><span>Submit security incidents separately from DAR submissions</span></div>
+    <form method="post" action="/guard/incident-reports/new" enctype="multipart/form-data" class="stack">
+      <div class="row-2"><label>Officer<input type="text" value="{{ user.full_name }}" readonly></label><label>Assigned Site<input type="text" value="{{ assigned_site.name if assigned_site else 'Unassigned' }}" readonly></label></div>
+      <div class="row-2"><label>Report Timestamp<input type="text" value="{{ server_now }}" readonly></label><label>Status<input type="text" value="Open" readonly></label></div>
+      <div class="row-2"><label>Incident Type<select name="incident_type" required><option>Trespassing</option><option>Theft</option><option>Property Damage</option><option>Medical</option><option>Suspicious Activity</option><option>Alarm Response</option><option>Vehicle Incident</option><option>Fight / Disturbance</option><option>Fire / Safety</option><option>Other</option></select></label><label>Priority<select name="priority" required><option>Low</option><option selected>Medium</option><option>High</option><option>Critical</option></select></label></div>
+      <label>Detailed Narrative<textarea name="narrative" rows="6" required></textarea></label>
+      <div class="row-2"><label>Persons Involved<input type="text" name="persons_involved"></label><label>Witnesses<input type="text" name="witnesses"></label></div>
+      <div class="row-2"><label><input type="checkbox" name="police_notified" value="1"> Police Notified</label><label><input type="checkbox" name="client_notified" value="1"> Client Notified</label></div>
+      <label>Optional Photo / Document<input type="file" name="attachment"></label>
+      <button class="btn primary" type="submit" {% if not assigned_site %}disabled{% endif %}>Submit Incident Report</button>
+    </form>
+  </div>
+  <div class="card">
+    <div class="section-head"><h3>Recent Incident Reports</h3><span>Your latest incident submissions</span></div>
+    {% for report in incident_reports %}<div class="report-card"><div class="report-top"><strong>{{ report.incident_type }}</strong><span class="badge">{{ report.priority }}</span><span class="badge {{ report.status|lower }}">{{ report.status }}</span></div><div class="small-muted">{{ report.site_name }} · {{ report.created_at }}</div><p>{{ report.narrative }}</p></div>{% else %}<div class="empty">No incident reports yet.</div>{% endfor %}
+  </div>
+</section>
 {% endblock %}'''
 
 PAYROLL_HTML = r'''{% extends "app_shell.html" %}
@@ -5562,13 +5626,19 @@ def application(environ, start_response):
         if user['role'] != 'guard':
             return redirect(start_response, '/dashboard')
         conn = db()
-        my_reports = conn.execute('''
-            SELECT d.activity_type, d.status, d.created_at, s.name as site_name
+        daily_reports = conn.execute('''
+            SELECT d.activity_type, d.status, d.created_at, s.name as site_name, 'Daily Activity Report' as report_type, NULL as priority, NULL as incident_type
             FROM daily_activity_reports d
             JOIN sites s ON d.site_id=s.id
             WHERE d.company_id=? AND d.officer_id=?
-            ORDER BY d.created_at DESC
         ''', (user['company_id'], user['id'])).fetchall()
+        incident_reports = conn.execute('''
+            SELECT NULL as activity_type, i.status, i.created_at, s.name as site_name, 'Incident Report' as report_type, i.priority, i.incident_type
+            FROM incident_reports i
+            JOIN sites s ON i.site_id=s.id
+            WHERE i.company_id=? AND i.officer_id=?
+        ''', (user['company_id'], user['id'])).fetchall()
+        my_reports = sorted(list(daily_reports) + list(incident_reports), key=lambda x: x['created_at'], reverse=True)
         conn.close()
         return app_page(environ, start_response, user, 'guard_my_reports.html', active_path='/guard/my-reports', view='week', title='My Reports', my_reports=my_reports)
     if path == '/guard/incident-reports' and method == 'GET':
@@ -5576,7 +5646,32 @@ def application(environ, start_response):
         if response: return response
         if user['role'] != 'guard':
             return redirect(start_response, '/dashboard')
-        return app_page(environ, start_response, user, 'guard_incident_reports.html', active_path='/guard/incident-reports', view='week', title='Incident Reports')
+        conn = db()
+        assigned_site = conn.execute('SELECT s.id, s.name FROM guard_site_assignments gsa JOIN sites s ON s.id=gsa.site_id WHERE gsa.company_id=? AND gsa.guard_id=? LIMIT 1', (user['company_id'], user.get('guard_id'))).fetchone() if user.get('guard_id') else None
+        incident_reports = conn.execute('SELECT i.*, s.name as site_name FROM incident_reports i JOIN sites s ON i.site_id=s.id WHERE i.company_id=? AND i.officer_id=? ORDER BY i.created_at DESC LIMIT 20', (user['company_id'], user['id'])).fetchall()
+        conn.close()
+        return app_page(environ, start_response, user, 'guard_incident_reports.html', active_path='/guard/incident-reports', view='week', title='Incident Reports', assigned_site=assigned_site, server_now=utc_now_str(), incident_reports=incident_reports)
+    if path == '/guard/incident-reports/new' and method == 'POST':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        if user['role'] != 'guard':
+            return bad_request(start_response, 'Only guards can submit Incident Reports.')
+        data, files = parse_post(environ)
+        if not data.get('incident_type') or not data.get('priority') or not data.get('narrative'):
+            return bad_request(start_response, 'Incident type, priority, and narrative are required.')
+        conn = db()
+        assigned_site = conn.execute('SELECT site_id FROM guard_site_assignments WHERE company_id=? AND guard_id=? LIMIT 1', (user['company_id'], user.get('guard_id'))).fetchone() if user.get('guard_id') else None
+        if not assigned_site:
+            conn.close()
+            return redirect_with_feedback(start_response, '/guard/incident-reports', error='No assigned site found for your account.')
+        _, attachment_path = save_upload(files.get('attachment'), 'incident_attachments') if files.get('attachment') else (None, None)
+        conn.execute('''
+            INSERT INTO incident_reports (company_id, site_id, officer_id, incident_type, priority, narrative, persons_involved, witnesses, police_notified, client_notified, attachment_path, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Open', ?)
+        ''', (user['company_id'], assigned_site['site_id'], user['id'], data['incident_type'], data['priority'], data['narrative'], data.get('persons_involved', ''), data.get('witnesses', ''), 1 if data.get('police_notified') else 0, 1 if data.get('client_notified') else 0, attachment_path, utc_now_str()))
+        conn.commit()
+        conn.close()
+        return redirect_with_feedback(start_response, '/guard/incident-reports', message='Incident report submitted.')
     if path == '/admin/paystubs/upload' and method == 'GET':
         user, response = require_admin(environ, start_response)
         if response: return response
