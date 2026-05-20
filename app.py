@@ -3363,6 +3363,7 @@ GUARD_DAILY_ACTIVITY_REPORTS_HTML = r'''{% extends "app_shell.html" %}
   <div class="card">
     <div class="section-head"><h3>Daily Activity Report</h3><span>Submit daily guard activity</span></div>
     <form method="post" action="/guard/daily-activity-reports/new" enctype="multipart/form-data" class="stack">
+      {{ csrf_input|safe }}
       <div class="row-2"><label>Officer<input type="text" value="{{ user.full_name }}" readonly></label><label>Assigned Site<input type="text" value="{{ assigned_site.name if assigned_site else 'Unassigned' }}" readonly></label></div>
       <div class="row-2"><label>Report Timestamp<input type="text" value="{{ server_now }}" readonly></label><label>Activity Type<select name="activity_type" required><option>Patrol</option><option>Gate Check</option><option>Visitor Log</option><option>Truck Entry</option><option>Parking Patrol</option><option>Perimeter Check</option><option>General Activity</option></select></label></div>
       <label>Summary / Notes<textarea name="summary" rows="5" required></textarea></label>
@@ -3420,6 +3421,7 @@ GUARD_INCIDENT_REPORTS_HTML = r'''{% extends "app_shell.html" %}
   <div class="card">
     <div class="section-head"><h3>Incident Report</h3><span>Submit security incidents separately from DAR submissions</span></div>
     <form method="post" action="/guard/incident-reports/new" enctype="multipart/form-data" class="stack">
+      {{ csrf_input|safe }}
       <div class="row-2"><label>Officer<input type="text" value="{{ user.full_name }}" readonly></label><label>Assigned Site<input type="text" value="{{ assigned_site.name if assigned_site else 'Unassigned' }}" readonly></label></div>
       <div class="row-2"><label>Report Timestamp<input type="text" value="{{ server_now }}" readonly></label><label>Status<input type="text" value="Open" readonly></label></div>
       <div class="row-2"><label>Incident Type<select name="incident_type" required><option>Trespassing</option><option>Theft</option><option>Property Damage</option><option>Medical</option><option>Suspicious Activity</option><option>Alarm Response</option><option>Vehicle Incident</option><option>Fight / Disturbance</option><option>Fire / Safety</option><option>Other</option></select></label><label>Priority<select name="priority" required><option>Low</option><option selected>Medium</option><option>High</option><option>Critical</option></select></label></div>
