@@ -3383,7 +3383,33 @@ GUARD_MY_REPORTS_HTML = r'''{% extends "app_shell.html" %}
 <section class="card">
   <div class="section-head"><h3>My Reports</h3><span>Daily Activity + Incident reports submitted by you</span></div>
   {% for report in my_reports %}
-  <div class="list-item detailed"><div><strong>{{ report.report_type }}</strong><div class="small-muted">{{ report.site_name }} · {{ report.created_at }}</div><div class="small-muted">{% if report.report_type == 'Incident Report' %}{{ report.incident_type }}{% else %}{{ report.activity_type }}{% endif %}</div></div><div><span class="badge {{ report.status }}">{{ report.status }}</span>{% if report.priority %}<span class="badge">{{ report.priority }}</span>{% endif %}<a class="btn ghost" href="/guard/my-reports">View details</a></div></div>
+  <details class="report-details">
+    <summary class="list-item detailed">
+      <div>
+        <strong>{{ report.report_type }}</strong>
+        <div class="small-muted">{{ report.site_name }} · {{ report.created_at }}</div>
+      </div>
+      <div class="actions">
+        <span class="badge {{ report.status }}">{{ report.status }}</span>
+        {% if report.priority %}<span class="badge">{{ report.priority }}</span>{% endif %}
+        <span class="btn ghost">View details</span>
+      </div>
+    </summary>
+    <div class="report-card">
+      <div class="small-muted"><strong>Type:</strong> {{ report.report_type }}</div>
+      <div class="small-muted"><strong>Site:</strong> {{ report.site_name }}</div>
+      <div class="small-muted"><strong>Timestamp:</strong> {{ report.created_at }}</div>
+      <div class="small-muted"><strong>Status:</strong> {{ report.status }}</div>
+      {% if report.priority %}<div class="small-muted"><strong>Priority:</strong> {{ report.priority }}</div>{% endif %}
+      {% if report.report_type == 'Incident Report' %}
+      <p><strong>Incident Type:</strong> {{ report.incident_type }}</p>
+      <p>{{ report.narrative or '' }}</p>
+      {% else %}
+      <p><strong>Activity:</strong> {{ report.activity_type }}</p>
+      <p>{{ report.summary or '' }}</p>
+      {% endif %}
+    </div>
+  </details>
   {% else %}<div class="empty">No reports submitted yet.</div>{% endfor %}
 </section>
 {% endblock %}'''
@@ -3399,9 +3425,12 @@ GUARD_INCIDENT_REPORTS_HTML = r'''{% extends "app_shell.html" %}
       <div class="row-2"><label>Incident Type<select name="incident_type" required><option>Trespassing</option><option>Theft</option><option>Property Damage</option><option>Medical</option><option>Suspicious Activity</option><option>Alarm Response</option><option>Vehicle Incident</option><option>Fight / Disturbance</option><option>Fire / Safety</option><option>Other</option></select></label><label>Priority<select name="priority" required><option>Low</option><option selected>Medium</option><option>High</option><option>Critical</option></select></label></div>
       <label>Detailed Narrative<textarea name="narrative" rows="6" required></textarea></label>
       <div class="row-2"><label>Persons Involved<input type="text" name="persons_involved"></label><label>Witnesses<input type="text" name="witnesses"></label></div>
-      <div class="row-2"><label><input type="checkbox" name="police_notified" value="1"> Police Notified</label><label><input type="checkbox" name="client_notified" value="1"> Client Notified</label></div>
+      <div class="row-2 checkbox-row">
+        <label class="checkbox-inline"><input type="checkbox" name="police_notified" value="1"><span>Police Notified</span></label>
+        <label class="checkbox-inline"><input type="checkbox" name="client_notified" value="1"><span>Client Notified</span></label>
+      </div>
       <label>Optional Photo / Document<input type="file" name="attachment"></label>
-      <button class="btn primary" type="submit" {% if not assigned_site %}disabled{% endif %}>Submit Incident Report</button>
+      <div class="sticky-submit-wrap"><button class="btn primary sticky-submit" type="submit" {% if not assigned_site %}disabled{% endif %}>Submit Incident Report</button></div>
     </form>
   </div>
   <div class="card">
@@ -3730,6 +3759,13 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
 .availability-row { display: grid; grid-template-columns: 120px 1fr 1fr; gap: 10px; align-items: center; }
 .checkbox-inline { display: flex; align-items: center; gap: 8px; }
 .checkbox-inline input { width: auto; }
+.checkbox-row label { margin-top: 4px; }
+.checkbox-row .checkbox-inline span { line-height: 1.2; }
+.report-details { border-bottom: 1px solid rgba(255,255,255,.06); padding: 8px 0; }
+.report-details summary { list-style: none; cursor: pointer; }
+.report-details summary::-webkit-details-marker { display: none; }
+.sticky-submit-wrap { position: sticky; bottom: 8px; padding-top: 4px; background: linear-gradient(180deg, rgba(13,21,34,0), rgba(13,21,34,.96) 36%); }
+.sticky-submit { width: 100%; }
 .slim-gap { margin-top: 16px; }
 
 @media (max-width: 1040px) {
@@ -4429,6 +4465,41 @@ def init_db():
     _old_init_db()
     ensure_assets()
     conn = db()
+    conn.cursor().executescript('''
+    CREATE TABLE IF NOT EXISTS daily_activity_reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER NOT NULL,
+        site_id INTEGER NOT NULL,
+        officer_id INTEGER NOT NULL,
+        activity_type TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        photo_path TEXT,
+        status TEXT NOT NULL DEFAULT 'submitted',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(company_id) REFERENCES companies(id),
+        FOREIGN KEY(site_id) REFERENCES sites(id),
+        FOREIGN KEY(officer_id) REFERENCES users(id)
+    );
+    CREATE TABLE IF NOT EXISTS incident_reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER NOT NULL,
+        site_id INTEGER NOT NULL,
+        officer_id INTEGER NOT NULL,
+        incident_type TEXT NOT NULL,
+        priority TEXT NOT NULL DEFAULT 'Medium',
+        narrative TEXT NOT NULL,
+        persons_involved TEXT,
+        witnesses TEXT,
+        police_notified INTEGER NOT NULL DEFAULT 0,
+        client_notified INTEGER NOT NULL DEFAULT 0,
+        attachment_path TEXT,
+        status TEXT NOT NULL DEFAULT 'Open',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(company_id) REFERENCES companies(id),
+        FOREIGN KEY(site_id) REFERENCES sites(id),
+        FOREIGN KEY(officer_id) REFERENCES users(id)
+    );
+    ''')
     if conn.backend == 'postgres':
         conn.cursor().executescript('''
         CREATE TABLE IF NOT EXISTS password_reset_tokens (
@@ -5627,13 +5698,13 @@ def application(environ, start_response):
             return redirect(start_response, '/dashboard')
         conn = db()
         daily_reports = conn.execute('''
-            SELECT d.activity_type, d.status, d.created_at, s.name as site_name, 'Daily Activity Report' as report_type, NULL as priority, NULL as incident_type
+            SELECT d.activity_type, d.summary, d.status, d.created_at, s.name as site_name, 'Daily Activity Report' as report_type, NULL as priority, NULL as incident_type, NULL as narrative
             FROM daily_activity_reports d
             JOIN sites s ON d.site_id=s.id
             WHERE d.company_id=? AND d.officer_id=?
         ''', (user['company_id'], user['id'])).fetchall()
         incident_reports = conn.execute('''
-            SELECT NULL as activity_type, i.status, i.created_at, s.name as site_name, 'Incident Report' as report_type, i.priority, i.incident_type
+            SELECT NULL as activity_type, NULL as summary, i.status, i.created_at, s.name as site_name, 'Incident Report' as report_type, i.priority, i.incident_type, i.narrative
             FROM incident_reports i
             JOIN sites s ON i.site_id=s.id
             WHERE i.company_id=? AND i.officer_id=?
