@@ -3414,16 +3414,19 @@ GUARD_MY_REPORTS_HTML = r'''{% extends "app_shell.html" %}
 <section class="card">
   <div class="section-head"><h3>My Reports</h3><span>Daily Activity + Incident reports submitted by you</span></div>
   <form method="get" action="/guard/my-reports" class="stack">
+    <input type="hidden" name="report_type" value="{{ filters.report_type }}">
+    <div class="actions" style="gap:8px;flex-wrap:wrap;">
+      <a class="btn {% if not filters.report_type %}primary{% else %}ghost{% endif %}" href="/guard/my-reports?q={{ filters.q|urlencode }}&site_id={{ filters.site_id|urlencode }}&date_from={{ filters.date_from|urlencode }}&date_to={{ filters.date_to|urlencode }}">All</a>
+      <a class="btn {% if filters.report_type == 'daily_activity' %}primary{% else %}ghost{% endif %}" href="/guard/my-reports?report_type=daily_activity&q={{ filters.q|urlencode }}&site_id={{ filters.site_id|urlencode }}&date_from={{ filters.date_from|urlencode }}&date_to={{ filters.date_to|urlencode }}">Daily Activity</a>
+      <a class="btn {% if filters.report_type == 'incident' %}primary{% else %}ghost{% endif %}" href="/guard/my-reports?report_type=incident&q={{ filters.q|urlencode }}&site_id={{ filters.site_id|urlencode }}&date_from={{ filters.date_from|urlencode }}&date_to={{ filters.date_to|urlencode }}">Incident</a>
+    </div>
     <div class="row-4">
-      <label>Search<input type="search" name="q" value="{{ filters.q }}" placeholder="Search report text"></label>
-      <label>Report Type<select name="report_type"><option value="">All types</option><option value="daily_activity" {% if filters.report_type == 'daily_activity' %}selected{% endif %}>Daily Activity</option><option value="incident" {% if filters.report_type == 'incident' %}selected{% endif %}>Incident</option></select></label>
+      <label>Search<input type="search" name="q" value="{{ filters.q }}" placeholder="Search summary, narrative, or site"></label>
       <label>Site<select name="site_id"><option value="">All sites</option>{% for site in filter_sites %}<option value="{{ site.id }}" {% if filters.site_id == site.id|string %}selected{% endif %}>{{ site.name }}</option>{% endfor %}</select></label>
       <label>Date From<input type="date" name="date_from" value="{{ filters.date_from }}"></label>
-    </div>
-    <div class="row-4">
       <label>Date To<input type="date" name="date_to" value="{{ filters.date_to }}"></label>
-      <div class="actions"><button class="btn primary" type="submit">Apply</button><a class="btn ghost" href="/guard/my-reports">Reset</a></div>
     </div>
+    <div class="actions"><button class="btn primary" type="submit">Apply</button><a class="btn ghost" href="/guard/my-reports">Reset</a></div>
   </form>
   <div style="max-height:65vh;overflow:auto;padding-right:6px;">
     {% for report in my_reports %}
@@ -3432,6 +3435,7 @@ GUARD_MY_REPORTS_HTML = r'''{% extends "app_shell.html" %}
         <div class="report-top"><strong>{{ report.report_type }}</strong><div class="actions"><span class="badge {{ report.status|lower }}">{{ report.status }}</span><span class="badge">Submitted</span>{% if report.priority %}<span class="badge">{{ report.priority }}</span>{% endif %}</div></div>
         <div class="small-muted">{{ report.site_name }} · {{ report.created_at }}</div>
         <p>{{ report.preview }}</p>
+        <div class="actions" style="margin-top:8px;"><span class="btn ghost">View Details</span></div>
       </div>
     </a>
     {% else %}<div class="empty">No reports found. Try broadening filters or submit your first report.</div>{% endfor %}
