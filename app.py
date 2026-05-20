@@ -280,6 +280,7 @@ def ensure_assets():
         'guard_daily_activity_reports.html': GUARD_DAILY_ACTIVITY_REPORTS_HTML,
         'guard_incident_reports.html': GUARD_INCIDENT_REPORTS_HTML,
         'guard_my_reports.html': GUARD_MY_REPORTS_HTML,
+        'guard_my_report_detail.html': GUARD_MY_REPORT_DETAIL_HTML,
     }
     for name, content in templates.items():
         path = os.path.join(TEMPLATE_DIR, name)
@@ -3383,35 +3384,54 @@ GUARD_MY_REPORTS_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
 <section class="card">
   <div class="section-head"><h3>My Reports</h3><span>Daily Activity + Incident reports submitted by you</span></div>
-  {% for report in my_reports %}
-  <details class="report-details">
-    <summary class="list-item detailed">
-      <div>
-        <strong>{{ report.report_type }}</strong>
-        <div class="small-muted">{{ report.site_name }} · {{ report.created_at }}</div>
-      </div>
-      <div class="actions">
-        <span class="badge {{ report.status }}">{{ report.status }}</span>
-        {% if report.priority %}<span class="badge">{{ report.priority }}</span>{% endif %}
-        <span class="btn ghost">View details</span>
-      </div>
-    </summary>
-    <div class="report-card">
-      <div class="small-muted"><strong>Type:</strong> {{ report.report_type }}</div>
-      <div class="small-muted"><strong>Site:</strong> {{ report.site_name }}</div>
-      <div class="small-muted"><strong>Timestamp:</strong> {{ report.created_at }}</div>
-      <div class="small-muted"><strong>Status:</strong> {{ report.status }}</div>
-      {% if report.priority %}<div class="small-muted"><strong>Priority:</strong> {{ report.priority }}</div>{% endif %}
-      {% if report.report_type == 'Incident Report' %}
-      <p><strong>Incident Type:</strong> {{ report.incident_type }}</p>
-      <p>{{ report.narrative or '' }}</p>
-      {% else %}
-      <p><strong>Activity:</strong> {{ report.activity_type }}</p>
-      <p>{{ report.summary or '' }}</p>
-      {% endif %}
+  <form method="get" action="/guard/my-reports" class="stack">
+    <div class="row-4">
+      <label>Search<input type="search" name="q" value="{{ filters.q }}" placeholder="Search report text"></label>
+      <label>Report Type<select name="report_type"><option value="">All types</option><option value="daily_activity" {% if filters.report_type == 'daily_activity' %}selected{% endif %}>Daily Activity</option><option value="incident" {% if filters.report_type == 'incident' %}selected{% endif %}>Incident</option></select></label>
+      <label>Site<select name="site_id"><option value="">All sites</option>{% for site in filter_sites %}<option value="{{ site.id }}" {% if filters.site_id == site.id|string %}selected{% endif %}>{{ site.name }}</option>{% endfor %}</select></label>
+      <label>Date From<input type="date" name="date_from" value="{{ filters.date_from }}"></label>
     </div>
-  </details>
-  {% else %}<div class="empty">No reports submitted yet.</div>{% endfor %}
+    <div class="row-4">
+      <label>Date To<input type="date" name="date_to" value="{{ filters.date_to }}"></label>
+      <div class="actions"><button class="btn primary" type="submit">Apply</button><a class="btn ghost" href="/guard/my-reports">Reset</a></div>
+    </div>
+  </form>
+  <div style="max-height:65vh;overflow:auto;padding-right:6px;">
+    {% for report in my_reports %}
+    <a href="/guard/my-reports/{{ report.report_kind }}/{{ report.report_id }}" style="text-decoration:none;color:inherit;">
+      <div class="report-card" style="transition:transform .2s ease,border-color .2s ease;border:1px solid rgba(255,255,255,.08);margin-top:10px;">
+        <div class="report-top"><strong>{{ report.report_type }}</strong><div class="actions"><span class="badge {{ report.status|lower }}">{{ report.status }}</span><span class="badge">Submitted</span>{% if report.priority %}<span class="badge">{{ report.priority }}</span>{% endif %}</div></div>
+        <div class="small-muted">{{ report.site_name }} · {{ report.created_at }}</div>
+        <p>{{ report.preview }}</p>
+      </div>
+    </a>
+    {% else %}<div class="empty">No reports found. Try broadening filters or submit your first report.</div>{% endfor %}
+  </div>
+</section>
+{% endblock %}'''
+
+GUARD_MY_REPORT_DETAIL_HTML = r'''{% extends "app_shell.html" %}
+{% block page_content %}
+<section class="card">
+  <div class="section-head"><h3>Report Detail</h3><span>Full report details</span></div>
+  <div class="report-card">
+    <div class="report-top"><strong>{{ report.report_type }}</strong><div class="actions"><span class="badge {{ report.status|lower }}">{{ report.status }}</span><span class="badge">Submitted</span>{% if report.priority %}<span class="badge">{{ report.priority }}</span>{% endif %}</div></div>
+    <div class="small-muted">{{ report.site_name }} · {{ report.created_at }}</div>
+    {% if report.report_kind == 'incident' %}
+      <p><strong>Incident Type:</strong> {{ report.incident_type }}</p>
+      <p><strong>Narrative:</strong> {{ report.narrative }}</p>
+      <p><strong>Persons Involved:</strong> {{ report.persons_involved or 'N/A' }}</p>
+      <p><strong>Witnesses:</strong> {{ report.witnesses or 'N/A' }}</p>
+      <p><strong>Police Notified:</strong> {{ 'Yes' if report.police_notified else 'No' }}</p>
+      <p><strong>Client Notified:</strong> {{ 'Yes' if report.client_notified else 'No' }}</p>
+    {% else %}
+      <p><strong>Activity Type:</strong> {{ report.activity_type }}</p>
+      <p><strong>Summary:</strong> {{ report.summary }}</p>
+    {% endif %}
+    {% if report.photo_path %}<p><img class="report-photo" src="/{{ report.photo_path }}" alt="Report photo"></p>{% endif %}
+    {% if report.attachment_path %}<p><a class="btn ghost" href="/{{ report.attachment_path }}" target="_blank" rel="noopener">Open Attachment</a></p>{% endif %}
+    <p><a class="btn ghost" href="/guard/my-reports">Back to My Reports</a></p>
+  </div>
 </section>
 {% endblock %}'''
 
@@ -5021,7 +5041,7 @@ def ensure_assets():
     templates = {'layout.html': LAYOUT_HTML, 'app_shell.html': APP_SHELL_HTML, 'login.html': LOGIN_HTML, 'dashboard.html': DASHBOARD_HTML, 'schedule.html': SCHEDULE_HTML, 'guards.html': GUARDS_HTML, 'reports.html': REPORTS_HTML, 'payroll.html': PAYROLL_HTML, 'profile.html': PROFILE_HTML, 'admin_paystub_upload.html': ADMIN_PAYSTUB_UPLOAD_HTML, 'guard_paystubs.html': GUARD_PAYSTUBS_HTML,
         'guard_daily_activity_reports.html': GUARD_DAILY_ACTIVITY_REPORTS_HTML,
         'guard_incident_reports.html': GUARD_INCIDENT_REPORTS_HTML,
-        'guard_my_reports.html': GUARD_MY_REPORTS_HTML, 'password_reset_request.html': PASSWORD_RESET_REQUEST_HTML, 'password_reset_form.html': PASSWORD_RESET_FORM_HTML, 'guard_login_list.html': GUARD_LOGIN_LIST_HTML, 'guard_login_site_list.html': GUARD_LOGIN_SITE_LIST_HTML, 'guard_login_guard_list.html': GUARD_LOGIN_GUARD_LIST_HTML, 'guard_login_password.html': GUARD_LOGIN_PASSWORD_HTML}
+        'guard_my_reports.html': GUARD_MY_REPORTS_HTML, 'guard_my_report_detail.html': GUARD_MY_REPORT_DETAIL_HTML, 'password_reset_request.html': PASSWORD_RESET_REQUEST_HTML, 'password_reset_form.html': PASSWORD_RESET_FORM_HTML, 'guard_login_list.html': GUARD_LOGIN_LIST_HTML, 'guard_login_site_list.html': GUARD_LOGIN_SITE_LIST_HTML, 'guard_login_guard_list.html': GUARD_LOGIN_GUARD_LIST_HTML, 'guard_login_password.html': GUARD_LOGIN_PASSWORD_HTML}
     for name, content in templates.items():
         with open(os.path.join(TEMPLATE_DIR, name), 'w', encoding='utf-8') as f:
             f.write(content)
@@ -5698,22 +5718,90 @@ def application(environ, start_response):
         if response: return response
         if user['role'] != 'guard':
             return redirect(start_response, '/dashboard')
+        q = (query.get('q') or '').strip().lower()
+        report_type_filter = (query.get('report_type') or '').strip().lower()
+        site_id_filter = (query.get('site_id') or '').strip()
+        date_from = (query.get('date_from') or '').strip()
+        date_to = (query.get('date_to') or '').strip()
         conn = db()
+        filter_sites = conn.execute('''
+            SELECT DISTINCT s.id, s.name
+            FROM sites s
+            JOIN (
+                SELECT site_id FROM daily_activity_reports WHERE company_id=? AND officer_id=?
+                UNION
+                SELECT site_id FROM incident_reports WHERE company_id=? AND officer_id=?
+            ) used_sites ON used_sites.site_id=s.id
+            ORDER BY s.name
+        ''', (user['company_id'], user['id'], user['company_id'], user['id'])).fetchall()
         daily_reports = conn.execute('''
-            SELECT d.activity_type, d.summary, d.status, d.created_at, s.name as site_name, 'Daily Activity Report' as report_type, NULL as priority, NULL as incident_type, NULL as narrative
+            SELECT d.id as report_id, d.activity_type, d.summary, d.status, d.created_at, d.site_id, d.photo_path, s.name as site_name, 'Daily Activity Report' as report_type, 'daily_activity' as report_kind, NULL as priority, NULL as incident_type, NULL as narrative, NULL as persons_involved, NULL as witnesses, 0 as police_notified, 0 as client_notified, NULL as attachment_path
             FROM daily_activity_reports d
             JOIN sites s ON d.site_id=s.id
             WHERE d.company_id=? AND d.officer_id=?
         ''', (user['company_id'], user['id'])).fetchall()
         incident_reports = conn.execute('''
-            SELECT NULL as activity_type, NULL as summary, i.status, i.created_at, s.name as site_name, 'Incident Report' as report_type, i.priority, i.incident_type, i.narrative
+            SELECT i.id as report_id, NULL as activity_type, NULL as summary, i.status, i.created_at, i.site_id, NULL as photo_path, s.name as site_name, 'Incident Report' as report_type, 'incident' as report_kind, i.priority, i.incident_type, i.narrative, i.persons_involved, i.witnesses, i.police_notified, i.client_notified, i.attachment_path
             FROM incident_reports i
             JOIN sites s ON i.site_id=s.id
             WHERE i.company_id=? AND i.officer_id=?
         ''', (user['company_id'], user['id'])).fetchall()
-        my_reports = sorted(list(daily_reports) + list(incident_reports), key=lambda x: x['created_at'], reverse=True)
+        my_reports = []
+        for row in list(daily_reports) + list(incident_reports):
+            haystack = ' '.join([
+                str(row.get('report_type') or ''),
+                str(row.get('site_name') or ''),
+                str(row.get('status') or ''),
+                str(row.get('activity_type') or ''),
+                str(row.get('summary') or ''),
+                str(row.get('incident_type') or ''),
+                str(row.get('narrative') or ''),
+            ]).lower()
+            if q and q not in haystack:
+                continue
+            if report_type_filter and row.get('report_kind') != report_type_filter:
+                continue
+            if site_id_filter and str(row.get('site_id')) != site_id_filter:
+                continue
+            row_date = str(row.get('created_at') or '')[:10]
+            if date_from and row_date < date_from:
+                continue
+            if date_to and row_date > date_to:
+                continue
+            preview = (row.get('narrative') or row.get('summary') or '').strip()
+            row['preview'] = preview[:180] + ('…' if len(preview) > 180 else '')
+            my_reports.append(row)
+        my_reports = sorted(my_reports, key=lambda x: x['created_at'], reverse=True)
         conn.close()
-        return app_page(environ, start_response, user, 'guard_my_reports.html', active_path='/guard/my-reports', view='week', title='My Reports', my_reports=my_reports)
+        filters = {'q': q, 'report_type': report_type_filter, 'site_id': site_id_filter, 'date_from': date_from, 'date_to': date_to}
+        return app_page(environ, start_response, user, 'guard_my_reports.html', active_path='/guard/my-reports', view='week', title='My Reports', my_reports=my_reports, filter_sites=filter_sites, filters=filters)
+    if path.startswith('/guard/my-reports/') and method == 'GET':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        if user['role'] != 'guard':
+            return redirect(start_response, '/dashboard')
+        parts = [p for p in path.split('/') if p]
+        if len(parts) != 4:
+            return bad_request(start_response, 'Invalid report path')
+        report_kind, report_id = parts[2], parts[3]
+        conn = db()
+        report = None
+        if report_kind == 'daily_activity':
+            report = conn.execute('''
+                SELECT d.id as report_id, d.activity_type, d.summary, d.status, d.created_at, d.photo_path, s.name as site_name, 'Daily Activity Report' as report_type, 'daily_activity' as report_kind, NULL as priority, NULL as incident_type, NULL as narrative, NULL as persons_involved, NULL as witnesses, 0 as police_notified, 0 as client_notified, NULL as attachment_path
+                FROM daily_activity_reports d JOIN sites s ON s.id=d.site_id
+                WHERE d.id=? AND d.company_id=? AND d.officer_id=?
+            ''', (report_id, user['company_id'], user['id'])).fetchone()
+        elif report_kind == 'incident':
+            report = conn.execute('''
+                SELECT i.id as report_id, NULL as activity_type, NULL as summary, i.status, i.created_at, NULL as photo_path, s.name as site_name, 'Incident Report' as report_type, 'incident' as report_kind, i.priority, i.incident_type, i.narrative, i.persons_involved, i.witnesses, i.police_notified, i.client_notified, i.attachment_path
+                FROM incident_reports i JOIN sites s ON s.id=i.site_id
+                WHERE i.id=? AND i.company_id=? AND i.officer_id=?
+            ''', (report_id, user['company_id'], user['id'])).fetchone()
+        conn.close()
+        if not report:
+            return redirect_with_feedback(start_response, '/guard/my-reports', error='Report not found or access denied.')
+        return app_page(environ, start_response, user, 'guard_my_report_detail.html', active_path='/guard/my-reports', view='week', title='Report Detail', report=report)
     if path == '/guard/incident-reports' and method == 'GET':
         user, response = require_login(environ, start_response)
         if response: return response
