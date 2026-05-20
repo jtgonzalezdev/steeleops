@@ -40,8 +40,8 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 
 APP_ENV = os.getenv('APP_ENV', 'development').lower()
 DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
-PORT = int(os.getenv('PORT', '8000'))
-HOST = os.getenv('HOST', '0.0.0.0' if APP_ENV == 'production' else '127.0.0.1')
+PORT = int(os.getenv('PORT', '10000'))
+HOST = os.getenv('HOST', '0.0.0.0')
 SECRET_KEY = os.getenv('SECRET_KEY', 'change-me-in-production')
 SESSION_COOKIE_NAME = os.getenv('SESSION_COOKIE_NAME', 'steeleops_session')
 SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_SECURE', '1' if APP_ENV == 'production' else '0') == '1'
@@ -2302,6 +2302,8 @@ def application(environ, start_response):
     user = get_current_user(environ)
     query = parse_query(environ)
 
+    if path in {'/health', '/healthz', '/ready', '/readyz'}:
+        return json_response(start_response, {'status': 'ok', 'service': 'steeleops'})
     if path.startswith('/static/') or path.startswith('/uploads/'):
         return serve_static(environ, start_response, path.lstrip('/'))
 
@@ -3708,6 +3710,7 @@ MISSED_CLOCK_SCHEDULER_STALE_SECONDS = int(
     )
 )
 MISSED_CLOCK_SCHEDULER_LOCK_NAME = 'missed_clock_check_scheduler'
+MISSED_CLOCK_SCHEDULER_STARTUP_DELAY_SECONDS = int(os.getenv('MISSED_CLOCK_SCHEDULER_STARTUP_DELAY_SECONDS', '15'))
 SCHEDULER_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}"
 _scheduler_start_lock = threading.Lock()
 _missed_clock_scheduler_thread = None
@@ -4248,9 +4251,11 @@ def run_missed_clock_scheduler_cycle():
 def missed_clock_scheduler_loop():
     print(
         '[missed_clock_scheduler] ' +
-        f'background thread started instance={SCHEDULER_INSTANCE_ID} interval_seconds={MISSED_CLOCK_SCHEDULER_INTERVAL_SECONDS}',
+        f'background thread started instance={SCHEDULER_INSTANCE_ID} interval_seconds={MISSED_CLOCK_SCHEDULER_INTERVAL_SECONDS} startup_delay_seconds={MISSED_CLOCK_SCHEDULER_STARTUP_DELAY_SECONDS}',
         flush=True,
     )
+    if MISSED_CLOCK_SCHEDULER_STARTUP_DELAY_SECONDS > 0 and _missed_clock_scheduler_stop.wait(MISSED_CLOCK_SCHEDULER_STARTUP_DELAY_SECONDS):
+        return
     while not _missed_clock_scheduler_stop.is_set():
         try:
             run_missed_clock_scheduler_cycle()
@@ -4263,7 +4268,7 @@ def missed_clock_scheduler_loop():
 
 def start_missed_clock_scheduler_once():
     global _missed_clock_scheduler_thread
-    if not MISSED_CLOCK_SCHEDULER_ENABLED:
+    if not MISSED_CLOCK_SCHEDULER_ENABLED or os.getenv('RUN_MISSED_CLOCK_SCHEDULER', '1').strip() != '1':
         return False
     with _scheduler_start_lock:
         if _missed_clock_scheduler_thread and _missed_clock_scheduler_thread.is_alive():
@@ -4926,11 +4931,12 @@ def _new_report_id(conn):
 
 
 def application(environ, start_response):
-    init_db()
     path = environ.get('PATH_INFO', '/')
     method = environ.get('REQUEST_METHOD', 'GET').upper()
     user = get_current_user(environ)
     query = parse_query(environ)
+    if path in {'/health', '/healthz', '/ready', '/readyz'}:
+        return json_response(start_response, {'status': 'ok', 'service': 'steeleops'})
     if path.startswith('/static/') or path.startswith('/uploads/'):
         return serve_static(environ, start_response, path.lstrip('/'))
     if method == 'POST':
@@ -6066,8 +6072,9 @@ if __name__ == '__main__':
             create_admin_account(args.company, args.username, args.password, args.full_name, args.email); print(f'Created company admin {args.username} for {args.company}.')
         elif command == 'serve':
             init_db(); print(f'SteeleOps running on http://{HOST}:{PORT}')
-            start_missed_clock_scheduler_once()
             with make_server(HOST, PORT, application) as httpd:
+                scheduler_started = start_missed_clock_scheduler_once()
+                print(f'[startup] scheduler_started={scheduler_started}', flush=True)
                 httpd.serve_forever()
         else:
             raise ValueError(f'Unsupported command: {command}')
