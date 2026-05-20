@@ -870,7 +870,7 @@ def init_db():
     );
 
     CREATE TABLE IF NOT EXISTS incident_reports (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         company_id INTEGER NOT NULL,
         site_id INTEGER NOT NULL,
         officer_id INTEGER NOT NULL,
@@ -890,7 +890,7 @@ def init_db():
     );
 
     CREATE TABLE IF NOT EXISTS daily_activity_reports (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         company_id INTEGER NOT NULL,
         site_id INTEGER NOT NULL,
         officer_id INTEGER NOT NULL,
@@ -4625,41 +4625,78 @@ def init_db():
     _old_init_db()
     ensure_assets()
     conn = db()
-    conn.cursor().executescript('''
-    CREATE TABLE IF NOT EXISTS daily_activity_reports (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        company_id INTEGER NOT NULL,
-        site_id INTEGER NOT NULL,
-        officer_id INTEGER NOT NULL,
-        activity_type TEXT NOT NULL,
-        summary TEXT NOT NULL,
-        photo_path TEXT,
-        status TEXT NOT NULL DEFAULT 'submitted',
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(company_id) REFERENCES companies(id),
-        FOREIGN KEY(site_id) REFERENCES sites(id),
-        FOREIGN KEY(officer_id) REFERENCES users(id)
-    );
-    CREATE TABLE IF NOT EXISTS incident_reports (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        company_id INTEGER NOT NULL,
-        site_id INTEGER NOT NULL,
-        officer_id INTEGER NOT NULL,
-        incident_type TEXT NOT NULL,
-        priority TEXT NOT NULL DEFAULT 'Medium',
-        narrative TEXT NOT NULL,
-        persons_involved TEXT,
-        witnesses TEXT,
-        police_notified INTEGER NOT NULL DEFAULT 0,
-        client_notified INTEGER NOT NULL DEFAULT 0,
-        attachment_path TEXT,
-        status TEXT NOT NULL DEFAULT 'Open',
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(company_id) REFERENCES companies(id),
-        FOREIGN KEY(site_id) REFERENCES sites(id),
-        FOREIGN KEY(officer_id) REFERENCES users(id)
-    );
-    ''')
+    if conn.backend == 'postgres':
+        conn.cursor().executescript('''
+        CREATE TABLE IF NOT EXISTS daily_activity_reports (
+            id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            company_id INTEGER NOT NULL,
+            site_id INTEGER NOT NULL,
+            officer_id INTEGER NOT NULL,
+            activity_type TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            photo_path TEXT,
+            status TEXT NOT NULL DEFAULT 'submitted',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(company_id) REFERENCES companies(id),
+            FOREIGN KEY(site_id) REFERENCES sites(id),
+            FOREIGN KEY(officer_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS incident_reports (
+            id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            company_id INTEGER NOT NULL,
+            site_id INTEGER NOT NULL,
+            officer_id INTEGER NOT NULL,
+            incident_type TEXT NOT NULL,
+            priority TEXT NOT NULL DEFAULT 'Medium',
+            narrative TEXT NOT NULL,
+            persons_involved TEXT,
+            witnesses TEXT,
+            police_notified INTEGER NOT NULL DEFAULT 0,
+            client_notified INTEGER NOT NULL DEFAULT 0,
+            attachment_path TEXT,
+            status TEXT NOT NULL DEFAULT 'Open',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(company_id) REFERENCES companies(id),
+            FOREIGN KEY(site_id) REFERENCES sites(id),
+            FOREIGN KEY(officer_id) REFERENCES users(id)
+        );
+        ''')
+    else:
+        conn.cursor().executescript('''
+        CREATE TABLE IF NOT EXISTS daily_activity_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL,
+            site_id INTEGER NOT NULL,
+            officer_id INTEGER NOT NULL,
+            activity_type TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            photo_path TEXT,
+            status TEXT NOT NULL DEFAULT 'submitted',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(company_id) REFERENCES companies(id),
+            FOREIGN KEY(site_id) REFERENCES sites(id),
+            FOREIGN KEY(officer_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS incident_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL,
+            site_id INTEGER NOT NULL,
+            officer_id INTEGER NOT NULL,
+            incident_type TEXT NOT NULL,
+            priority TEXT NOT NULL DEFAULT 'Medium',
+            narrative TEXT NOT NULL,
+            persons_involved TEXT,
+            witnesses TEXT,
+            police_notified INTEGER NOT NULL DEFAULT 0,
+            client_notified INTEGER NOT NULL DEFAULT 0,
+            attachment_path TEXT,
+            status TEXT NOT NULL DEFAULT 'Open',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(company_id) REFERENCES companies(id),
+            FOREIGN KEY(site_id) REFERENCES sites(id),
+            FOREIGN KEY(officer_id) REFERENCES users(id)
+        );
+        ''')
     if conn.backend == 'postgres':
         conn.cursor().executescript('''
         CREATE TABLE IF NOT EXISTS password_reset_tokens (
