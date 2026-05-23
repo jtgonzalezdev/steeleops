@@ -6426,16 +6426,18 @@ def application(environ, start_response):
         conn = db()
         if report_kind == 'daily_activity':
             row = conn.execute(
-                'SELECT company_id, site_id, officer_id, photo_path, attachment_path FROM daily_activity_reports WHERE id=?',
+                'SELECT company_id, site_id, officer_id, photo_path FROM daily_activity_reports WHERE id=?',
                 (report_id,),
             ).fetchone()
-            file_path_value = (row.get('photo_path') or row.get('attachment_path')) if row else None
+            # Daily activity reports store uploads in photo_path only.
+            # Keep `/attachment` path compatibility by resolving to the same column.
+            file_path_value = row.get('photo_path') if row else None
         else:
             row = conn.execute(
-                'SELECT company_id, site_id, officer_id, attachment_path, photo_path FROM incident_reports WHERE id=?',
+                'SELECT company_id, site_id, officer_id, attachment_path FROM incident_reports WHERE id=?',
                 (report_id,),
             ).fetchone()
-            file_path_value = (row.get('attachment_path') or row.get('photo_path')) if row else None
+            file_path_value = row.get('attachment_path') if row else None
         if not row:
             conn.close()
             return bad_request(start_response, f'Report file unavailable: report not found for type "{report_kind}".')
