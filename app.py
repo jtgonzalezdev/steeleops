@@ -6399,33 +6399,54 @@ def application(environ, start_response):
         report_context = report_management_context(conn, user, parse_query(environ))
         conn.close()
         return app_page(environ, start_response, user, 'reports.html', active_path='/reports', view='week', title='Reports', **report_context)
-    report_file_match = re.match(r'^/report-files/(daily_activity|incident)/(\d+)/(photo|attachment)$', path)
+    report_file_match = re.match(r'^/report-files/([a-zA-Z_-]+)/(\d+)/(photo|attachment)$', path)
     if report_file_match and method == 'GET':
         user, response = require_login(environ, start_response)
         if response:
             return response
-        report_kind = report_file_match.group(1)
+        report_kind_raw = report_file_match.group(1)
+        report_kind = {
+            'incident': 'incident',
+            'daily_activity': 'daily_activity',
+            'daily-activity': 'daily_activity',
+            'dar': 'daily_activity',
+        }.get((report_kind_raw or '').strip().lower())
+        if not report_kind:
+            return bad_request(start_response, 'Invalid report type.')
         report_id = int(report_file_match.group(2))
         field_name = report_file_match.group(3)
-        if report_kind == 'daily_activity' and field_name != 'photo':
+        if report_kind == 'daily_activity' and field_name not in {'photo', 'attachment'}:
             return bad_request(start_response, 'Invalid file request.')
         if report_kind == 'incident' and field_name != 'attachment':
             return bad_request(start_response, 'Invalid file request.')
         conn = db()
         if report_kind == 'daily_activity':
-            row = conn.execute('SELECT company_id, officer_id, photo_path FROM daily_activity_reports WHERE id=?', (report_id,)).fetchone()
+            row = conn.execute('SELECT company_id, site_id, officer_id, photo_path FROM daily_activity_reports WHERE id=?', (report_id,)).fetchone()
             file_path_value = row.get('photo_path') if row else None
         else:
-            row = conn.execute('SELECT company_id, officer_id, attachment_path FROM incident_reports WHERE id=?', (report_id,)).fetchone()
+            row = conn.execute('SELECT company_id, site_id, officer_id, attachment_path FROM incident_reports WHERE id=?', (report_id,)).fetchone()
             file_path_value = row.get('attachment_path') if row else None
-        conn.close()
         if not row or not file_path_value:
+            conn.close()
             return not_found(start_response)
         if user['role'] == 'guard':
             if int(row['officer_id']) != int(user['id']) or int(row['company_id']) != int(user['company_id']):
+                conn.close()
                 return forbidden(start_response, 'Access denied.')
-        elif int(row['company_id']) != int(user['company_id']):
+        elif user['role'] == 'supervisor':
+            if int(row['company_id']) != int(user['company_id']) or not supervisor_can_access_site(conn, user, row['site_id']):
+                conn.close()
+                return forbidden(start_response, 'Access denied.')
+        elif user['role'] in {'company_admin', 'admin'}:
+            if int(row['company_id']) != int(user['company_id']):
+                conn.close()
+                return forbidden(start_response, 'Access denied.')
+        elif user['role'] == 'superadmin':
+            pass
+        else:
+            conn.close()
             return forbidden(start_response, 'Access denied.')
+        conn.close()
         local_file_path = local_path_from_upload(file_path_value)
         if not local_file_path or not os.path.isfile(local_file_path):
             return not_found(start_response)
