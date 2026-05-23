@@ -1238,6 +1238,9 @@ def init_db():
         ensure_column(conn, 'incident_reports', 'admin_notes TEXT')
     if table_exists(conn, 'daily_activity_reports'):
         ensure_column(conn, 'daily_activity_reports', 'admin_notes TEXT')
+        ensure_column(conn, 'daily_activity_reports', 'resolved_at TEXT')
+    if table_exists(conn, 'incident_reports'):
+        ensure_column(conn, 'incident_reports', 'resolved_at TEXT')
     if conn.backend == 'postgres':
         conn.execute('''
             CREATE TABLE IF NOT EXISTS report_status_history (
@@ -1251,6 +1254,17 @@ def init_db():
                 changed_at TEXT NOT NULL
             )
         ''')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS report_note_history (
+                id SERIAL PRIMARY KEY,
+                company_id INTEGER NOT NULL,
+                report_kind TEXT NOT NULL,
+                report_id INTEGER NOT NULL,
+                note_text TEXT NOT NULL,
+                created_by INTEGER,
+                created_at TEXT NOT NULL
+            )
+        ''')
     else:
         conn.execute('''
             CREATE TABLE IF NOT EXISTS report_status_history (
@@ -1262,6 +1276,17 @@ def init_db():
                 new_status TEXT,
                 changed_by INTEGER,
                 changed_at TEXT NOT NULL
+            )
+        ''')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS report_note_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL,
+                report_kind TEXT NOT NULL,
+                report_id INTEGER NOT NULL,
+                note_text TEXT NOT NULL,
+                created_by INTEGER,
+                created_at TEXT NOT NULL
             )
         ''')
 
@@ -1897,7 +1922,7 @@ def report_management_context(conn, user, query):
 
     daily_rows = conn.execute('''
         SELECT d.id as report_id, 'daily_activity' as report_kind, 'Daily Activity' as report_type, d.status, '' as priority, d.created_at, d.summary as narrative,
-               '' as persons_involved, '' as witnesses, d.photo_path, '' as attachment_path, s.name as site_name, u.full_name as officer_name, d.officer_id, d.site_id, d.admin_notes
+               '' as persons_involved, '' as witnesses, d.photo_path, '' as attachment_path, s.name as site_name, u.full_name as officer_name, d.officer_id, d.site_id, d.admin_notes, d.resolved_at
         FROM daily_activity_reports d
         JOIN sites s ON d.site_id=s.id
         JOIN users u ON d.officer_id=u.id
@@ -1905,7 +1930,7 @@ def report_management_context(conn, user, query):
     ''', (company_id,)).fetchall()
     incident_rows = conn.execute('''
         SELECT i.id as report_id, 'incident' as report_kind, 'Incident' as report_type, i.status, i.priority, i.created_at, i.narrative,
-               i.persons_involved, i.witnesses, '' as photo_path, i.attachment_path, s.name as site_name, u.full_name as officer_name, i.officer_id, i.site_id, i.admin_notes
+               i.persons_involved, i.witnesses, '' as photo_path, i.attachment_path, s.name as site_name, u.full_name as officer_name, i.officer_id, i.site_id, i.admin_notes, i.resolved_at
         FROM incident_reports i
         JOIN sites s ON i.site_id=s.id
         JOIN users u ON i.officer_id=u.id
@@ -1919,6 +1944,10 @@ def report_management_context(conn, user, query):
     history_by_key = {}
     for row in history_rows:
         history_by_key.setdefault(f"{row['report_kind']}:{row['report_id']}", []).append(row)
+    note_rows = conn.execute('SELECT * FROM report_note_history WHERE company_id=? ORDER BY created_at DESC', (company_id,)).fetchall()
+    notes_by_key = {}
+    for row in note_rows:
+        notes_by_key.setdefault(f"{row['report_kind']}:{row['report_id']}", []).append(row)
     filtered = []
     for row in all_rows:
         row = dict(row)
@@ -1936,6 +1965,7 @@ def report_management_context(conn, user, query):
             row['file_attachment'] = None
         key = f"{row['report_kind']}:{row['report_id']}"
         row['status_history'] = history_by_key.get(key, [])
+        row['note_history'] = notes_by_key.get(key, [])
         if selected_type and row['report_kind'] != selected_type:
             continue
         if selected_status and (row.get('status') or '').strip().lower() != selected_status:
@@ -3469,6 +3499,8 @@ REPORTS_HTML = r'''{% extends "app_shell.html" %}
       .attachment-item{border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:10px;background:rgba(9,12,19,.5)}
       .attachment-thumb{max-width:100%;max-height:130px;border-radius:8px;display:block;object-fit:cover}
       .attachment-links{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+      .history-block{margin-top:10px;padding:10px;border:1px solid rgba(255,255,255,.12);border-radius:10px;background:rgba(6,10,18,.4)}
+      .history-row{margin-top:6px}
     </style>
     <section class="card">
       <div class="section-head"><h3>Report Management</h3><span>Incident + Daily Activity reports</span></div>
@@ -3501,6 +3533,7 @@ REPORTS_HTML = r'''{% extends "app_shell.html" %}
         <p><strong>Narrative / Summary:</strong> {{ report.narrative or 'N/A' }}</p>
         <p><strong>Persons Involved:</strong> {{ report.persons_involved or 'N/A' }}</p>
         <p><strong>Witnesses:</strong> {{ report.witnesses or 'N/A' }}</p>
+        {% if report.resolved_at %}<div class="small-muted"><strong>Resolved:</strong> {{ report.resolved_at }}</div>{% endif %}
         <div class="small-muted">Uploaded {{ report.uploaded_at or 'N/A' }}{% if report.uploaded_by %} by {{ report.uploaded_by }}{% endif %}</div>
         {% if report.photo_attachment or report.file_attachment %}
         <div class="attachment-grid">
@@ -3526,13 +3559,19 @@ REPORTS_HTML = r'''{% extends "app_shell.html" %}
           {% endif %}
         </div>
         {% endif %}
-        <div class="small-muted">Status History:</div>
-        {% for history in report.status_history[:5] %}<div class="small-muted">• {{ history.changed_at }}: {{ history.old_status or 'N/A' }} → {{ history.new_status }}</div>{% else %}<div class="small-muted">No status history yet.</div>{% endfor %}
+        <div class="history-block">
+          <div class="small-muted"><strong>Status Timeline</strong> (Newest first)</div>
+          {% for history in report.status_history %}<div class="small-muted history-row">• {{ history.changed_at }}: {{ history.old_status or 'N/A' }} → {{ history.new_status }}</div>{% else %}<div class="small-muted history-row">No status history yet.</div>{% endfor %}
+        </div>
+        <div class="history-block">
+          <div class="small-muted"><strong>Admin Notes Timeline</strong> (Newest first)</div>
+          {% for note in report.note_history %}<div class="small-muted history-row">• {{ note.created_at }}: {{ note.note_text }}</div>{% else %}<div class="small-muted history-row">No admin notes yet.</div>{% endfor %}
+        </div>
         {% if user.role in ['company_admin', 'superadmin'] %}
         <form method="post" action="/admin/reports/manage" class="stack compact">
           <input type="hidden" name="report_kind" value="{{ report.report_kind }}">
           <input type="hidden" name="report_id" value="{{ report.report_id }}">
-          <div class="row-2"><label>Status<select name="status">{% for status in report_status_options %}<option value="{{ status }}" {% if report.status == status %}selected{% endif %}>{{ status }}</option>{% endfor %}</select></label><label>Admin Notes<textarea name="admin_notes" rows="2" placeholder="Internal admin notes">{{ report.admin_notes or '' }}</textarea></label></div>
+          <div class="row-2"><label>Status<select name="status">{% for status in report_status_options %}<option value="{{ status }}" {% if report.status == status %}selected{% endif %}>{{ status }}</option>{% endfor %}</select></label><label>Add Admin Note<textarea name="admin_note" rows="2" placeholder="Internal admin note (appends to history)"></textarea></label></div>
           <button class="btn primary" type="submit">Save</button>
         </form>
         {% endif %}
@@ -5942,8 +5981,22 @@ def application(environ, start_response):
             conn.close(); return bad_request(start_response, 'Report not found.')
         old_status = row.get('status') or ''
         now = utc_now_str()
-        conn.execute(f'UPDATE {table_name} SET status=?, admin_notes=? WHERE id=?', (new_status, (data.get('admin_notes') or '').strip(), report_id))
-        conn.execute('INSERT INTO report_status_history (company_id, report_kind, report_id, old_status, new_status, changed_by, changed_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], report_kind, report_id, old_status, new_status, user['id'], now))
+        new_note = (data.get('admin_note') or '').strip()
+        resolved_at_value = row.get('resolved_at')
+        if new_status.lower() == 'closed' and str(old_status).lower() != 'closed':
+            resolved_at_value = now
+        elif new_status.lower() != 'closed':
+            resolved_at_value = None
+        conn.execute(f'UPDATE {table_name} SET status=?, resolved_at=? WHERE id=?', (new_status, resolved_at_value, report_id))
+        if new_status != old_status:
+            conn.execute('INSERT INTO report_status_history (company_id, report_kind, report_id, old_status, new_status, changed_by, changed_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], report_kind, report_id, old_status, new_status, user['id'], now))
+        if new_note:
+            conn.execute(
+                'INSERT INTO report_note_history (company_id, report_kind, report_id, note_text, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+                (user['company_id'], report_kind, report_id, new_note, user['id'], now),
+            )
+            merged_notes = ((row.get('admin_notes') or '').strip() + '\n' + f'[{now}] {new_note}').strip()
+            conn.execute(f'UPDATE {table_name} SET admin_notes=? WHERE id=?', (merged_notes, report_id))
         conn.commit(); conn.close()
         return redirect_with_feedback(start_response, '/reports', message='Report updated.')
     if path == '/reports':
