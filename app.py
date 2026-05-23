@@ -406,7 +406,7 @@ def column_names(conn, table):
 def ensure_column(conn, table, column_def):
     col = column_def.split()[0]
     if table_exists(conn, table) and col not in column_names(conn, table):
-        cleaned = column_def.replace('INTEGER PRIMARY KEY AUTOINCREMENT', 'INTEGER').replace('AUTOINCREMENT', '').replace("CHECK(role IN ('superadmin', 'company_admin', 'guard'))", '')
+        cleaned = column_def.replace('INTEGER PRIMARY KEY AUTOINCREMENT', 'INTEGER').replace('AUTOINCREMENT', '').replace("CHECK(role IN ('superadmin', 'company_admin', 'supervisor', 'guard'))", '')
         default_source_col = None
         # Cross-column defaults such as "DEFAULT user_id" are not portable and
         # PostgreSQL rejects them during ALTER TABLE ... ADD COLUMN. Strip that
@@ -1022,7 +1022,7 @@ def init_db():
         password TEXT NOT NULL,
         pin_hash TEXT,
         full_name TEXT NOT NULL,
-        role TEXT NOT NULL CHECK(role IN ('superadmin', 'company_admin', 'guard')),
+        role TEXT NOT NULL CHECK(role IN ('superadmin', 'company_admin', 'supervisor', 'guard')),
         phone TEXT,
         email TEXT,
         license_number TEXT,
@@ -1517,8 +1517,14 @@ def require_admin(environ, start_response):
     user, response = require_login(environ, start_response)
     if response:
         return None, response
-    if user['role'] not in {'superadmin', 'company_admin'}:
+    if user['role'] not in {'superadmin', 'company_admin', 'supervisor'}:
         return None, redirect(start_response, '/dashboard')
+    if user['role'] == 'supervisor':
+        path = (environ.get('PATH_INFO') or '').strip()
+        blocked_prefixes = ('/admin/payroll', '/admin/paystubs', '/company', '/superadmin')
+        blocked_exact = {'/payroll'}
+        if path in blocked_exact or any(path.startswith(prefix) for prefix in blocked_prefixes):
+            return None, redirect_with_feedback(start_response, '/dashboard', error='Supervisor role cannot access that admin area.')
     return user, None
 
 
@@ -1529,13 +1535,16 @@ def sidebar_nav_items(user, active_path):
         {'label': 'Monthly Schedule', 'href': '/monthly-schedule', 'active': active_path == '/monthly-schedule'},
         {'label': 'My Profile', 'href': '/profile', 'active': active_path == '/profile'},
     ]
-    if user['role'] in {'company_admin', 'superadmin'}:
+    if user['role'] in {'company_admin', 'superadmin', 'supervisor'}:
         items.extend([
             {'label': 'Guards', 'href': '/guards', 'active': active_path == '/guards'},
-            {'label': 'Payroll', 'href': '/payroll', 'active': active_path == '/payroll'},
-            {'label': 'Paystubs', 'href': '/admin/paystubs/upload', 'active': active_path == '/admin/paystubs/upload'},
             {'label': 'Reports', 'href': '/reports', 'active': active_path == '/reports'},
         ])
+        if user['role'] in {'company_admin', 'superadmin'}:
+            items.extend([
+                {'label': 'Payroll', 'href': '/payroll', 'active': active_path == '/payroll'},
+                {'label': 'Paystubs', 'href': '/admin/paystubs/upload', 'active': active_path == '/admin/paystubs/upload'},
+            ])
     if user['role'] == 'guard':
         items.extend([
             {'label': 'Daily Activity Reports', 'href': '/guard/daily-activity-reports', 'active': active_path == '/guard/daily-activity-reports'},
@@ -2093,11 +2102,11 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         'end_time': (shift_form_values.get('end_time') or '').strip(),
         'notes': (shift_form_values.get('notes') or '').strip(),
     }
-    if user['role'] in {'company_admin', 'superadmin'} and not shift_form['shift_date']:
+    if user['role'] in {'company_admin', 'superadmin', 'supervisor'} and not shift_form['shift_date']:
         shift_form['shift_date'] = today.isoformat()
     guard_option_rows = []
     guard_availability = {}
-    if user['role'] in {'company_admin', 'superadmin'}:
+    if user['role'] in {'company_admin', 'superadmin', 'supervisor'}:
         guard_availability = guard_availability_metadata(
             conn,
             company_id,
@@ -2340,6 +2349,12 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         'guard_option_rows': guard_option_rows,
         'guard_availability': guard_availability,
         'guard_dashboard_summary': guard_dashboard_summary,
+        'supervisor_dashboard_summary': {
+            'open_incidents': stats['open_incidents'],
+            'guards_on_duty': stats['guards_on_duty'],
+            'pending_approvals': len([r for r in time_corrections if (r.get('status') or '').lower() == 'pending']) + len([r for r in admin_time_off_requests if (r.get('status') or '').lower() == 'pending']),
+            'upcoming_schedule_gaps': len(open_shift_alerts),
+        },
     }
 
 
@@ -6386,7 +6401,7 @@ def application(environ, start_response):
         if user['role'] == 'guard':
             if paystub['company_id'] != user['company_id'] or paystub['guard_id'] != user['id']:
                 return forbidden(start_response)
-        elif user['role'] in {'company_admin', 'superadmin'}:
+        elif user['role'] in {'company_admin', 'superadmin', 'supervisor'}:
             if paystub['company_id'] != user['company_id']:
                 return forbidden(start_response)
         else:
