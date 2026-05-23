@@ -1875,8 +1875,11 @@ def create_report_attachment(conn, company_id, report_type, report_id, uploaded_
         return False
     mime_type = upload_content_type(stored_path)
     file_size = len(file_info.get('content', b''))
-    conn.execute('INSERT INTO report_attachments (company_id, report_type, report_id, uploaded_by, file_name, stored_path, mime_type, file_size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        (company_id, report_type, report_id, uploaded_by, file_name or os.path.basename(stored_path), stored_path, mime_type, file_size, utc_now_str()))
+    insert_and_get_id(
+        conn,
+        'INSERT INTO report_attachments (company_id, report_type, report_id, uploaded_by, file_name, stored_path, mime_type, file_size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        (company_id, report_type, report_id, uploaded_by, file_name or os.path.basename(stored_path), stored_path, mime_type, file_size, utc_now_str())
+    )
     return True
 
 
@@ -5839,6 +5842,16 @@ def _new_report_id(conn):
     return conn.execute('SELECT MAX(id) AS id FROM reports').fetchone()['id']
 
 
+def insert_and_get_id(conn, insert_sql, params=()):
+    sql = insert_sql.strip().rstrip(';')
+    if conn.backend == 'postgres':
+        row = conn.execute(f'{sql} RETURNING id', params).fetchone()
+        return row['id'] if row else None
+    conn.execute(sql, params)
+    row = conn.execute('SELECT last_insert_rowid() AS id').fetchone()
+    return row['id'] if row else None
+
+
 def application(environ, start_response):
     path = environ.get('PATH_INFO', '/')
     method = environ.get('REQUEST_METHOD', 'GET').upper()
@@ -6637,11 +6650,10 @@ def application(environ, start_response):
         photo_path = None
         if dar_files:
             _, photo_path = save_upload(dar_files[0], 'dar_photos')
-        conn.execute('''
+        report_id = insert_and_get_id(conn, '''
             INSERT INTO daily_activity_reports (company_id, site_id, officer_id, activity_type, summary, photo_path, status, created_at)
             VALUES (?, ?, ?, ?, ?, ?, 'submitted', ?)
         ''', (user['company_id'], assigned_site['site_id'], user['id'], data['activity_type'], data['summary'], photo_path, utc_now_str()))
-        report_id = conn.execute('SELECT last_insert_rowid() AS id').fetchone()['id']
         for upload in dar_files:
             create_report_attachment(conn, user['company_id'], 'daily_activity', report_id, user['id'], upload, 'dar_photos')
         conn.commit()
@@ -6766,11 +6778,10 @@ def application(environ, start_response):
         first_attachment_path = None
         if incident_files:
             _, first_attachment_path = save_upload(incident_files[0], 'incident_attachments')
-        conn.execute('''
+        report_id = insert_and_get_id(conn, '''
             INSERT INTO incident_reports (company_id, site_id, officer_id, incident_type, priority, narrative, persons_involved, witnesses, police_notified, client_notified, attachment_path, status, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Open', ?)
         ''', (user['company_id'], assigned_site['site_id'], user['id'], data['incident_type'], data['priority'], data['narrative'], data.get('persons_involved', ''), data.get('witnesses', ''), 1 if data.get('police_notified') else 0, 1 if data.get('client_notified') else 0, first_attachment_path, utc_now_str()))
-        report_id = conn.execute('SELECT last_insert_rowid() as id').fetchone()['id']
         for f in incident_files:
             create_report_attachment(conn, user['company_id'], 'incident', report_id, user['id'], f, 'incident_attachments')
         conn.commit()
