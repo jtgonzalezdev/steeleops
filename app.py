@@ -6407,7 +6407,11 @@ def application(environ, start_response):
         report_kind_raw = report_file_match.group(1)
         report_kind = {
             'incident': 'incident',
+            'incident_report': 'incident',
+            'incident-report': 'incident',
             'daily_activity': 'daily_activity',
+            'daily_activity_report': 'daily_activity',
+            'daily-activity-report': 'daily_activity',
             'daily-activity': 'daily_activity',
             'dar': 'daily_activity',
         }.get((report_kind_raw or '').strip().lower())
@@ -6421,14 +6425,29 @@ def application(environ, start_response):
             return bad_request(start_response, 'Invalid file request.')
         conn = db()
         if report_kind == 'daily_activity':
-            row = conn.execute('SELECT company_id, site_id, officer_id, photo_path FROM daily_activity_reports WHERE id=?', (report_id,)).fetchone()
-            file_path_value = row.get('photo_path') if row else None
+            row = conn.execute(
+                'SELECT company_id, site_id, officer_id, photo_path, attachment_path FROM daily_activity_reports WHERE id=?',
+                (report_id,),
+            ).fetchone()
+            file_path_value = (row.get('photo_path') or row.get('attachment_path')) if row else None
         else:
-            row = conn.execute('SELECT company_id, site_id, officer_id, attachment_path FROM incident_reports WHERE id=?', (report_id,)).fetchone()
-            file_path_value = row.get('attachment_path') if row else None
-        if not row or not file_path_value:
+            row = conn.execute(
+                'SELECT company_id, site_id, officer_id, attachment_path, photo_path FROM incident_reports WHERE id=?',
+                (report_id,),
+            ).fetchone()
+            file_path_value = (row.get('attachment_path') or row.get('photo_path')) if row else None
+        if not row:
             conn.close()
-            return not_found(start_response)
+            return bad_request(start_response, f'Report file unavailable: report not found for type "{report_kind}".')
+        if report_kind_raw.strip().lower() in {'incident', 'incident_report', 'incident-report'} and report_kind != 'incident':
+            conn.close()
+            return bad_request(start_response, 'Report file unavailable: report type mismatch.')
+        if (report_kind_raw or '').strip().lower() in {'daily_activity', 'daily_activity_report', 'daily-activity', 'daily-activity-report', 'dar'} and report_kind != 'daily_activity':
+            conn.close()
+            return bad_request(start_response, 'Report file unavailable: report type mismatch.')
+        if not file_path_value:
+            conn.close()
+            return bad_request(start_response, f'Report file unavailable: attachment path missing for report #{report_id}.')
         if user['role'] == 'guard':
             if int(row['officer_id']) != int(user['id']) or int(row['company_id']) != int(user['company_id']):
                 conn.close()
@@ -6448,8 +6467,10 @@ def application(environ, start_response):
             return forbidden(start_response, 'Access denied.')
         conn.close()
         local_file_path = local_path_from_upload(file_path_value)
-        if not local_file_path or not os.path.isfile(local_file_path):
-            return not_found(start_response)
+        if not local_file_path:
+            return bad_request(start_response, 'Report file unavailable: invalid stored file path.')
+        if not os.path.isfile(local_file_path):
+            return bad_request(start_response, 'Report file unavailable: file is missing from storage.')
         disposition = 'attachment' if query.get('download') == '1' else 'inline'
         filename = os.path.basename(local_file_path)
         headers = [('Content-Type', upload_content_type(file_path_value)), ('Content-Disposition', f'{disposition}; filename="{filename}"')]
