@@ -2259,6 +2259,46 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         'checkpoint_logs_today': fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM patrol_checkpoints WHERE company_id=? AND date(check_time)=date(?)', (company_id, today.isoformat())),
         'weekly_hours': fetch_scalar(conn, 'SELECT COALESCE(SUM(worked_hours),0) AS cnt FROM shifts WHERE company_id=? AND shift_date BETWEEN ? AND ?', (company_id, (today - timedelta(days=today.weekday())).isoformat(), (today - timedelta(days=today.weekday()) + timedelta(days=6)).isoformat())),
     }
+    guard_dashboard_summary = {
+        'current_shift': None,
+        'assigned_site': None,
+        'hours_worked_week': 0,
+        'open_reports': 0,
+    }
+    if user['role'] == 'guard':
+        now_time = datetime.now().strftime('%H:%M')
+        today_shift = next((shift for shift in my_shifts if shift['shift_date'] == today.isoformat()), None)
+        active_shift = next(
+            (
+                shift for shift in my_shifts
+                if shift['shift_date'] == today.isoformat() and shift['start_time'] <= now_time <= shift['end_time']
+            ),
+            None,
+        )
+        guard_dashboard_summary['current_shift'] = active_shift or today_shift
+        assigned_site_name = None
+        if guard_dashboard_summary['current_shift']:
+            assigned_site_name = guard_dashboard_summary['current_shift'].get('site_name')
+        elif my_shifts:
+            upcoming = [shift for shift in my_shifts if shift['shift_date'] >= today.isoformat()]
+            if upcoming:
+                assigned_site_name = upcoming[0].get('site_name')
+        guard_dashboard_summary['assigned_site'] = assigned_site_name or 'Unassigned'
+        guard_dashboard_summary['hours_worked_week'] = fetch_scalar(
+            conn,
+            'SELECT COALESCE(SUM(worked_hours),0) AS cnt FROM shifts WHERE company_id=? AND COALESCE(user_id, guard_id)=? AND shift_date BETWEEN ? AND ?',
+            (
+                company_id,
+                user['id'],
+                (today - timedelta(days=today.weekday())).isoformat(),
+                (today - timedelta(days=today.weekday()) + timedelta(days=6)).isoformat(),
+            ),
+        )
+        guard_dashboard_summary['open_reports'] = fetch_scalar(
+            conn,
+            'SELECT COUNT(*) AS cnt FROM reports WHERE company_id=? AND officer_name=? AND status!=?',
+            (company_id, user['full_name'], 'closed'),
+        )
 
     overtime_rows = conn.execute('''
         SELECT u.full_name, COALESCE(SUM(s.worked_hours),0) as total_hours
@@ -2299,6 +2339,7 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         'shift_form': shift_form,
         'guard_option_rows': guard_option_rows,
         'guard_availability': guard_availability,
+        'guard_dashboard_summary': guard_dashboard_summary,
     }
 
 
@@ -3072,10 +3113,29 @@ APP_SHELL_HTML = r'''{% extends "layout.html" %}
 DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
     <section class="grid stats-grid">
+      {% if user.role == 'guard' %}
+      <div class="stat card guard-stat-highlight">
+        <div class="stat-label">My Current Shift</div>
+        <div class="stat-text">{% if guard_dashboard_summary.current_shift %}{{ guard_dashboard_summary.current_shift.shift_date }} · {{ guard_dashboard_summary.current_shift.start_time }} - {{ guard_dashboard_summary.current_shift.end_time }}{% else %}No shift today{% endif %}</div>
+      </div>
+      <div class="stat card">
+        <div class="stat-label">My Assigned Site</div>
+        <div class="stat-text">{{ guard_dashboard_summary.assigned_site }}</div>
+      </div>
+      <div class="stat card">
+        <div class="stat-label">Hours Worked This Week</div>
+        <div class="stat-number">{{ '%.2f'|format(guard_dashboard_summary.hours_worked_week|float) }}</div>
+      </div>
+      <div class="stat card">
+        <div class="stat-label">My Open Reports</div>
+        <div class="stat-number">{{ guard_dashboard_summary.open_reports }}</div>
+      </div>
+      {% else %}
       <div class="stat card"><div class="stat-label">Guards On Duty</div><div class="stat-number">{{ stats.guards_on_duty }}</div></div>
-      <div class="stat card"><div class="stat-label">Open Incidents</div><div class="stat-number">{{ stats.open_incidents }}</div></div>
+      <div class="stat card"><div class="stat-label">Company-wide Open Incidents</div><div class="stat-number">{{ stats.open_incidents }}</div></div>
       <div class="stat card"><div class="stat-label">Sites Active Today</div><div class="stat-number">{{ stats.sites_active_today }}</div></div>
       <div class="stat card"><div class="stat-label">Checkpoint Logs Today</div><div class="stat-number">{{ stats.checkpoint_logs_today }}</div></div>
+      {% endif %}
     </section>
 
     {% if user.role in ['company_admin', 'superadmin'] %}
@@ -3217,8 +3277,8 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
 
     <section class="grid two-col">
       {% if user.role == 'guard' %}
-      <div class="card">
-        <div class="section-head"><h3>My Shifts</h3><span>Assigned shifts for your account</span></div>
+      <div class="card compact-card">
+        <div class="section-head"><h3>My Shift Today</h3><span>Assigned shifts for your account</span></div>
         {% for shift in my_shifts %}
           <div class="list-item detailed">
             <div>
@@ -3976,15 +4036,18 @@ button, .btn { display: inline-flex; justify-content: center; align-items: cente
 .nav-links a { padding: 12px 14px; border-radius: 14px; color: #d8e6f6; }
 .nav-links a:hover { background: rgba(255,255,255,.05); }
 .nav-links a.active { background: rgba(61,153,255,.18); color: #fff; box-shadow: inset 0 0 0 1px rgba(61,153,255,.35); }
-.content { padding: 24px; display: grid; gap: 18px; }
-.card { background: linear-gradient(180deg, rgba(20,31,49,.94), rgba(13,21,34,.94)); border: 1px solid var(--line); border-radius: 24px; padding: 20px; box-shadow: var(--shadow); }
+.content { padding: 20px; display: grid; gap: 14px; }
+.card { background: linear-gradient(180deg, rgba(20,31,49,.94), rgba(13,21,34,.94)); border: 1px solid var(--line); border-radius: 20px; padding: 16px; box-shadow: var(--shadow); }
 .topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .user-chip { padding: 10px 14px; border: 1px solid var(--line); border-radius: 999px; color: #d6e4f7; }
-.grid { display: grid; gap: 18px; }
+.grid { display: grid; gap: 12px; }
 .stats-grid { grid-template-columns: repeat(4, 1fr); }
 .two-col { grid-template-columns: repeat(2, 1fr); }
 .stat-number { font-size: 34px; font-weight: 800; margin-top: 6px; }
 .stat-label { color: var(--muted); }
+.stat-text { font-size: 16px; font-weight: 700; margin-top: 8px; line-height: 1.35; }
+.guard-stat-highlight { border-color: rgba(78,164,255,.5); background: linear-gradient(145deg, rgba(78,164,255,.26), rgba(13,21,34,.95)); }
+.compact-card .list-item { padding: 10px 0; }
 .section-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 14px; }
 .table-wrap { overflow: auto; border-radius: 16px; border: 1px solid var(--line); }
 table { width: 100%; border-collapse: collapse; min-width: 640px; }
@@ -4027,6 +4090,10 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
   .sidebar { position: static; height: auto; }
   .topbar, .section-head, .list-item, .simple-header { flex-direction: column; align-items: flex-start; }
   .availability-row { grid-template-columns: 1fr; }
+  .content { padding: 14px; gap: 10px; }
+  .card { padding: 14px; border-radius: 16px; }
+  .stat-number { font-size: 28px; }
+  .stat-text { font-size: 15px; }
 }
 '''
 
