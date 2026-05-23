@@ -2380,13 +2380,12 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
 
     stats = {
         'guards_on_duty': fetch_scalar(conn, '''
-            SELECT COUNT(DISTINCT g.id) AS cnt
-            FROM guards g
-            JOIN guard_site_assignments gsa ON g.id=gsa.guard_id AND gsa.company_id=g.company_id
-            WHERE g.company_id=? AND g.status='active'
-        ''', (company_id,)),
+            SELECT COUNT(DISTINCT COALESCE(sh.user_id, sh.guard_id)) AS cnt
+            FROM shifts sh
+            WHERE sh.company_id=? AND sh.shift_date=? AND COALESCE(sh.user_id, sh.guard_id) IS NOT NULL
+        ''', (company_id, today.isoformat())),
         'open_incidents': fetch_scalar(conn, '''
-            SELECT COUNT(*) AS cnt FROM reports WHERE company_id=? AND report_type='incident' AND status!='closed'
+            SELECT COUNT(*) AS cnt FROM incident_reports WHERE company_id=? AND LOWER(COALESCE(status, 'open'))!='closed'
         ''', (company_id,)),
         'sites_active_today': fetch_scalar(conn, '''
             SELECT COUNT(DISTINCT site_id) AS cnt FROM shifts WHERE company_id=? AND shift_date=?
@@ -2395,6 +2394,26 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         'checkpoint_logs_today': fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM patrol_checkpoints WHERE company_id=? AND date(check_time)=date(?)', (company_id, today.isoformat())),
         'weekly_hours': fetch_scalar(conn, 'SELECT COALESCE(SUM(worked_hours),0) AS cnt FROM shifts WHERE company_id=? AND shift_date BETWEEN ? AND ?', (company_id, (today - timedelta(days=today.weekday())).isoformat(), (today - timedelta(days=today.weekday()) + timedelta(days=6)).isoformat())),
     }
+    if allowed_site_ids is not None:
+        site_params = tuple(sorted(allowed_site_ids))
+        if site_params:
+            placeholders = ','.join(['?'] * len(site_params))
+            stats['guards_on_duty'] = fetch_scalar(
+                conn,
+                f'''SELECT COUNT(DISTINCT COALESCE(sh.user_id, sh.guard_id)) AS cnt
+                    FROM shifts sh
+                    WHERE sh.company_id=? AND sh.shift_date=? AND COALESCE(sh.user_id, sh.guard_id) IS NOT NULL
+                    AND sh.site_id IN ({placeholders})''',
+                (company_id, today.isoformat(), *site_params),
+            )
+            stats['open_incidents'] = fetch_scalar(
+                conn,
+                f"SELECT COUNT(*) AS cnt FROM incident_reports WHERE company_id=? AND LOWER(COALESCE(status, 'open'))!='closed' AND site_id IN ({placeholders})",
+                (company_id, *site_params),
+            )
+        else:
+            stats['guards_on_duty'] = 0
+            stats['open_incidents'] = 0
     guard_dashboard_summary = {
         'current_shift': None,
         'assigned_site': None,
@@ -2461,6 +2480,21 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         """,
         (company_id,),
     ).fetchall()
+    supervisor_assignments = conn.execute(
+        '''
+        SELECT ssa.supervisor_user_id, ssa.site_id, s.name as site_name
+        FROM supervisor_site_assignments ssa
+        JOIN sites s ON s.id=ssa.site_id
+        WHERE ssa.company_id=?
+        ''',
+        (company_id,),
+    ).fetchall()
+    supervisor_sites_by_user = {}
+    for row in supervisor_assignments:
+        supervisor_sites_by_user.setdefault(row['supervisor_user_id'], []).append({'id': row['site_id'], 'name': row['site_name']})
+    staff_users = [dict(row) for row in staff_users]
+    for row in staff_users:
+        row['supervisor_sites'] = supervisor_sites_by_user.get(row['id'], [])
 
     conn.close()
     return {
@@ -3421,7 +3455,7 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
           <button class="btn" type="submit" {% if not my_open_shift_options %}disabled{% endif %}>Claim Shift</button>
         </form>
         {% endif %}
-        {% if user.role in ['company_admin', 'superadmin'] %}
+        {% if user.role in ['company_admin', 'superadmin', 'supervisor'] %}
         <hr>
         <form method="post" action="/admin/shift/new" class="stack compact">
           <h4>Create Shift</h4>
@@ -3703,7 +3737,7 @@ SCHEDULE_HTML = r'''{% extends "app_shell.html" %}
 GUARDS_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
     <section class="card" id="guards">
-      <div class="section-head"><h3>Guards</h3><span>View, add, edit, and assign</span></div>
+      <div class="section-head"><h3>Staff Users</h3><span>View and manage guards, supervisors, and admins</span></div>
       <form method="post" action="/admin/guards/new" class="stack compact">
         <h4>Add Guard</h4>
         <div class="row-2"><label>First Name<input type="text" name="first_name" required></label><label>Last Name<input type="text" name="last_name" required></label></div>
@@ -3729,6 +3763,33 @@ GUARDS_HTML = r'''{% extends "app_shell.html" %}
         </div>
       </div>
       {% else %}<div class="empty">No guards added yet.</div>{% endfor %}
+    </section>
+    <section class="card">
+      <div class="section-head"><h3>Staff Accounts</h3><span>Role and supervisor site assignment management</span></div>
+      {% for staff in staff_users %}
+      <div class="list-item detailed">
+        <div>
+          <strong>{{ staff.full_name }}</strong>
+          <div class="small-muted">{{ staff.username }} · {{ staff.email or 'No email' }} · {{ staff.role }}</div>
+          {% if staff.role == 'supervisor' %}
+          <div class="small-muted">Assigned Sites: {% if staff.supervisor_sites %}{% for site in staff.supervisor_sites %}{{ site.name }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}None{% endif %}</div>
+          {% endif %}
+        </div>
+        <form method="post" action="/admin/user/update" class="inline-form">
+          <input type="hidden" name="user_id" value="{{ staff.id }}">
+          <label>Role<select name="role"><option value="guard" {% if staff.role == 'guard' %}selected{% endif %}>guard</option><option value="supervisor" {% if staff.role == 'supervisor' %}selected{% endif %}>supervisor</option><option value="admin" {% if staff.role in ['company_admin','admin'] %}selected{% endif %}>admin</option></select></label>
+          {% if staff.role == 'supervisor' %}
+          <div class="stack compact">
+            <div class="small-muted">Assigned Sites</div>
+            {% for site in active_sites %}
+            <label><input type="checkbox" name="supervisor_site_{{ site.id }}" value="1" {% if staff.supervisor_sites and (site.id in staff.supervisor_sites|map(attribute='id')|list) %}checked{% endif %}> {{ site.name }}</label>
+            {% endfor %}
+          </div>
+          {% endif %}
+          <button class="btn" type="submit">Save</button>
+        </form>
+      </div>
+      {% else %}<div class="empty">No staff users found.</div>{% endfor %}
     </section>
 {% endblock %}'''
 
@@ -6150,6 +6211,8 @@ def application(environ, start_response):
         requested_role = (data.get('role') or 'guard').strip().lower()
         role_map = {'guard': 'guard', 'supervisor': 'supervisor', 'admin': 'company_admin'}
         db_role = role_map.get(requested_role, 'guard')
+        if user['role'] == 'supervisor' and db_role in {'company_admin', 'superadmin'}:
+            return redirect_with_feedback(start_response, '/dashboard', error='Supervisors cannot create admin users.')
         conn = db(); conn.execute("INSERT INTO users (company_id, username, password, full_name, role, phone, email, license_number, hourly_rate, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)", (user['company_id'], data.get('username'), hash_password(data.get('password', 'password123')), data.get('full_name'), db_role, data.get('phone', ''), data.get('email', ''), data.get('license_number', ''), float(data.get('hourly_rate') or 18), utc_now_str()))
         new_row = conn.execute('SELECT id FROM users WHERE username=?', (data.get('username'),)).fetchone(); new_id = new_row['id'] if new_row else None
         if db_role == 'guard':
@@ -6167,9 +6230,20 @@ def application(environ, start_response):
         target = conn.execute('SELECT id, role FROM users WHERE id=? AND company_id=?', (data.get('user_id'), user['company_id'])).fetchone()
         if not target:
             conn.close(); return bad_request(start_response, 'User not found')
+        if user['role'] == 'supervisor' and role_map[requested_role] in {'company_admin', 'superadmin'}:
+            conn.close(); return redirect_with_feedback(start_response, '/guards', error='Supervisors cannot create or promote admins.')
         conn.execute('UPDATE users SET role=? WHERE id=?', (role_map[requested_role], target['id']))
+        if role_map[requested_role] == 'supervisor':
+            conn.execute('DELETE FROM supervisor_site_assignments WHERE company_id=? AND supervisor_user_id=?', (user['company_id'], target['id']))
+            sites = conn.execute('SELECT id FROM sites WHERE company_id=?', (user['company_id'],)).fetchall()
+            for site in sites:
+                if (data.get(f'supervisor_site_{site["id"]}') or '').strip():
+                    conn.execute(
+                        'INSERT INTO supervisor_site_assignments (company_id, supervisor_user_id, site_id, assigned_at) VALUES (?, ?, ?, ?)',
+                        (user['company_id'], target['id'], site['id'], utc_now_str()),
+                    )
         conn.commit(); conn.close()
-        return redirect(start_response, '/dashboard')
+        return redirect(start_response, '/guards')
     if path == '/admin/client/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
