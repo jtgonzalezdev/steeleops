@@ -2345,7 +2345,7 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
     if allowed_site_ids is not None:
         time_corrections = [row for row in time_corrections if row.get('site_id') in allowed_site_ids]
     my_time_off_requests = conn.execute('''
-        SELECT tor.*, s.site_id, u.full_name as guard_name, reviewer.full_name as reviewed_by_name
+        SELECT tor.*, u.full_name as guard_name, reviewer.full_name as reviewed_by_name
         FROM time_off_requests tor
         JOIN users u ON tor.guard_id=u.id
         LEFT JOIN users reviewer ON tor.reviewed_by=reviewer.id
