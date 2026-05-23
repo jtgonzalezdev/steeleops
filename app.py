@@ -1393,6 +1393,46 @@ def init_db():
                 ),
             )
 
+    supervisor_account = conn.execute(
+        "SELECT id, company_id FROM users WHERE username=? OR email=? ORDER BY id LIMIT 1",
+        ('supervisor1', 'supervisor@demo.local'),
+    ).fetchone()
+    if supervisor_account:
+        supervisor_company_id = supervisor_account['company_id'] or demo_company
+        if supervisor_company_id is None:
+            first_company = conn.execute('SELECT id FROM companies ORDER BY id LIMIT 1').fetchone()
+            supervisor_company_id = first_company['id'] if first_company else None
+        if supervisor_company_id is not None:
+            conn.execute(
+                """
+                UPDATE users
+                SET company_id=?, username=?, password=?, full_name=?, role='supervisor', email=?, active=1
+                WHERE id=?
+                """,
+                (
+                    supervisor_company_id,
+                    'supervisor1',
+                    hash_password('password123'),
+                    'Sam Supervisor',
+                    'supervisor@demo.local',
+                    supervisor_account['id'],
+                ),
+            )
+            active_site = conn.execute(
+                'SELECT id FROM sites WHERE company_id=? AND active=1 ORDER BY id LIMIT 1',
+                (supervisor_company_id,),
+            ).fetchone()
+            if active_site:
+                has_assignment = conn.execute(
+                    'SELECT id FROM supervisor_site_assignments WHERE company_id=? AND supervisor_user_id=? AND site_id=?',
+                    (supervisor_company_id, supervisor_account['id'], active_site['id']),
+                ).fetchone()
+                if not has_assignment:
+                    conn.execute(
+                        'INSERT INTO supervisor_site_assignments (company_id, supervisor_user_id, site_id, assigned_at) VALUES (?, ?, ?, ?)',
+                        (supervisor_company_id, supervisor_account['id'], active_site['id'], now),
+                    )
+
     if not bootstrap_created and fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM clients') == 0:
         clients = [
             (demo_company, 'Steele Commercial', 'Facility Manager', 'manager@steele-commercial.local', '210-555-1111', 'Primary point of contact', 1, now),
