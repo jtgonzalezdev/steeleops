@@ -1269,20 +1269,36 @@ def init_db():
         ensure_column(conn, 'daily_activity_reports', 'resolved_at TEXT')
     if table_exists(conn, 'incident_reports'):
         ensure_column(conn, 'incident_reports', 'resolved_at TEXT')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS report_attachments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_id INTEGER NOT NULL,
-            report_type TEXT NOT NULL,
-            report_id INTEGER NOT NULL,
-            uploaded_by INTEGER,
-            file_name TEXT NOT NULL,
-            stored_path TEXT NOT NULL,
-            mime_type TEXT,
-            file_size INTEGER,
-            created_at TEXT NOT NULL
-        )
-    ''')
+    if conn.backend == 'postgres':
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS report_attachments (
+                id SERIAL PRIMARY KEY,
+                company_id INTEGER NOT NULL,
+                report_type TEXT NOT NULL,
+                report_id INTEGER NOT NULL,
+                uploaded_by INTEGER,
+                file_name TEXT NOT NULL,
+                stored_path TEXT NOT NULL,
+                mime_type TEXT,
+                file_size INTEGER,
+                created_at TEXT NOT NULL
+            )
+        ''')
+    else:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS report_attachments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL,
+                report_type TEXT NOT NULL,
+                report_id INTEGER NOT NULL,
+                uploaded_by INTEGER,
+                file_name TEXT NOT NULL,
+                stored_path TEXT NOT NULL,
+                mime_type TEXT,
+                file_size INTEGER,
+                created_at TEXT NOT NULL
+            )
+        ''')
     if conn.backend == 'postgres':
         conn.execute('''
             CREATE TABLE IF NOT EXISTS report_status_history (
