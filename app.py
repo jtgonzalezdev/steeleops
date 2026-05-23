@@ -31,7 +31,8 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'steeleops.db')
-UPLOAD_DIR = os.path.join(BASE_DIR, 'uploads')
+UPLOAD_ROOT = os.path.abspath(os.getenv('UPLOAD_ROOT', '/var/data/uploads' if os.getenv('APP_ENV', 'development').lower() == 'production' else os.path.join(BASE_DIR, 'uploads')))
+UPLOAD_DIR = UPLOAD_ROOT
 TEMPLATE_DIR = os.path.join(BASE_DIR, 'templates')
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -3881,21 +3882,29 @@ REPORTS_HTML = r'''{% extends "app_shell.html" %}
           {% if report.photo_attachment %}
           <div class="attachment-item">
             <div class="small-muted">Photo Attachment</div>
-            <a href="{{ report.photo_attachment.secure_url }}" target="_blank" rel="noopener">
-              <img class="attachment-thumb" src="{{ report.photo_attachment.secure_url }}" alt="Report image attachment">
-            </a>
-            <div class="attachment-links"><a class="btn ghost" href="{{ report.photo_attachment.secure_url }}" target="_blank" rel="noopener">Preview</a><a class="btn ghost" href="{{ report.photo_attachment.secure_url }}?download=1">Download</a></div>
+            {% if report.photo_attachment.is_available %}
+              <a href="{{ report.photo_attachment.secure_url }}" target="_blank" rel="noopener">
+                <img class="attachment-thumb" src="{{ report.photo_attachment.secure_url }}" alt="Report image attachment">
+              </a>
+              <div class="attachment-links"><a class="btn ghost" href="{{ report.photo_attachment.secure_url }}" target="_blank" rel="noopener">Preview</a><a class="btn ghost" href="{{ report.photo_attachment.secure_url }}?download=1">Download</a></div>
+            {% else %}
+              <div class="small-muted">Unavailable (missing from storage)</div>
+            {% endif %}
           </div>
           {% endif %}
           {% if report.file_attachment %}
           <div class="attachment-item">
             <div class="small-muted">Document Attachment</div>
-            {% if report.file_attachment.is_image %}
+            {% if not report.file_attachment.is_available %}
+            <div class="small-muted">Unavailable (missing from storage)</div>
+            {% elif report.file_attachment.is_image %}
             <a href="{{ report.file_attachment.secure_url }}" target="_blank" rel="noopener"><img class="attachment-thumb" src="{{ report.file_attachment.secure_url }}" alt="Report attachment"></a>
             {% else %}
             <div>{{ report.file_attachment.name }}</div>
             {% endif %}
+            {% if report.file_attachment.is_available %}
             <div class="attachment-links"><a class="btn ghost" href="{{ report.file_attachment.secure_url }}" target="_blank" rel="noopener">View</a><a class="btn ghost" href="{{ report.file_attachment.secure_url }}?download=1">Download</a></div>
+            {% endif %}
           </div>
           {% endif %}
         </div>
@@ -4585,17 +4594,27 @@ def is_pdf_upload(file_info):
     return ext == '.pdf' and content.startswith(b'%PDF-')
 
 
+def _safe_join(base_path, relative_path):
+    normalized_base = os.path.normpath(base_path)
+    candidate = os.path.normpath(os.path.join(normalized_base, relative_path))
+    if candidate == normalized_base or candidate.startswith(normalized_base + os.sep):
+        return candidate
+    return None
+
+
 def local_path_from_upload(upload_path):
-    normalized = (upload_path or '').strip()
-    if not normalized.startswith('/'):
-        normalized = '/' + normalized
-    if not normalized.startswith('/uploads/'):
+    normalized = (upload_path or '').strip().replace('\\', '/')
+    if not normalized:
         return None
-    local_path = os.path.normpath(os.path.join(BASE_DIR, normalized.lstrip('/')))
-    upload_root = os.path.normpath(UPLOAD_DIR)
-    if not local_path.startswith(upload_root + os.sep):
-        return None
-    return local_path
+    normalized = normalized.lstrip('/')
+    if normalized.startswith('uploads/'):
+        normalized = normalized[len('uploads/'):]
+    return _safe_join(UPLOAD_DIR, normalized)
+
+
+def upload_exists(upload_path):
+    local_file_path = local_path_from_upload(upload_path)
+    return bool(local_file_path and os.path.isfile(local_file_path))
 
 
 def upload_content_type(upload_path):
@@ -4623,6 +4642,8 @@ def attachment_meta(path_value):
         'name': file_name or 'attachment',
         'is_image': content_type.startswith('image/'),
         'content_type': content_type,
+        'is_available': upload_exists(path_value),
+        'status': 'available' if upload_exists(path_value) else 'missing',
     }
 
 
@@ -6472,7 +6493,11 @@ def application(environ, start_response):
         if not local_file_path:
             return bad_request(start_response, 'Report file unavailable: invalid stored file path.')
         if not os.path.isfile(local_file_path):
-            return bad_request(start_response, 'Report file unavailable: file is missing from storage.')
+            return redirect_with_feedback(
+                start_response,
+                '/reports' if user['role'] in {'company_admin', 'admin', 'superadmin', 'supervisor'} else '/guard/my-reports',
+                error='This attachment is no longer available in storage. Existing legacy files may be unavailable after a restart/deploy.',
+            )
         disposition = 'attachment' if query.get('download') == '1' else 'inline'
         filename = os.path.basename(local_file_path)
         headers = [('Content-Type', upload_content_type(file_path_value)), ('Content-Disposition', f'{disposition}; filename="{filename}"')]

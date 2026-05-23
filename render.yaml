@@ -26,3 +26,5 @@ services:
         fromDatabase:
           name: steeleops-db
           property: connectionString
+      - key: UPLOAD_ROOT
+        value: /var/data/uploads
