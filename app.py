@@ -31,7 +31,9 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'steeleops.db')
-UPLOAD_ROOT = os.path.abspath(os.getenv('UPLOAD_ROOT', '/var/data/uploads' if os.getenv('APP_ENV', 'development').lower() == 'production' else os.path.join(BASE_DIR, 'uploads')))
+RENDER_DISK_PATH = (os.getenv('RENDER_DISK_PATH') or '').strip()
+DEFAULT_UPLOAD_ROOT = os.path.join(RENDER_DISK_PATH, 'uploads') if RENDER_DISK_PATH else os.path.join(BASE_DIR, 'uploads')
+UPLOAD_ROOT = os.path.abspath(os.getenv('UPLOAD_ROOT', DEFAULT_UPLOAD_ROOT))
 UPLOAD_DIR = UPLOAD_ROOT
 TEMPLATE_DIR = os.path.join(BASE_DIR, 'templates')
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
