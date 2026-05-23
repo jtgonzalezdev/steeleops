@@ -32,8 +32,13 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'steeleops.db')
 RENDER_DISK_PATH = (os.getenv('RENDER_DISK_PATH') or '').strip()
-DEFAULT_UPLOAD_ROOT = os.path.join(RENDER_DISK_PATH, 'uploads') if RENDER_DISK_PATH else os.path.join(BASE_DIR, 'uploads')
-UPLOAD_ROOT = os.path.abspath(os.getenv('UPLOAD_ROOT', DEFAULT_UPLOAD_ROOT))
+UPLOAD_DIR_ENV = (os.getenv('UPLOAD_DIR') or '').strip()
+if UPLOAD_DIR_ENV:
+    UPLOAD_ROOT = os.path.abspath(UPLOAD_DIR_ENV)
+elif RENDER_DISK_PATH:
+    UPLOAD_ROOT = os.path.abspath(os.path.join(RENDER_DISK_PATH, 'uploads'))
+else:
+    UPLOAD_ROOT = os.path.abspath(os.path.join(BASE_DIR, 'uploads'))
 UPLOAD_DIR = UPLOAD_ROOT
 TEMPLATE_DIR = os.path.join(BASE_DIR, 'templates')
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
@@ -1884,7 +1889,7 @@ def serve_static(environ, start_response, path):
     normalized = path.lstrip('/').replace('\\', '/')
     if normalized.startswith('uploads/paystubs/') or normalized.startswith('uploads/dar_photos/') or normalized.startswith('uploads/incident_attachments/'):
         return forbidden(start_response, 'Secure files must be accessed through protected routes.')
-    file_path = os.path.join(BASE_DIR, path.lstrip('/'))
+    file_path = _safe_join(UPLOAD_DIR, normalized[len('uploads/'):]) if normalized.startswith('uploads/') else os.path.join(BASE_DIR, normalized)
     if not os.path.isfile(file_path):
         return not_found(start_response)
     ext = os.path.splitext(file_path)[1].lower()
@@ -4504,6 +4509,12 @@ _missed_clock_scheduler_thread = None
 _missed_clock_scheduler_stop = threading.Event()
 
 
+def upload_relative_path(folder, filename):
+    safe_folder = (folder or 'general').strip('/').replace('\\', '/')
+    safe_file = os.path.basename(filename or '')
+    return f"uploads/{safe_folder}/{safe_file}"
+
+
 def parse_cookies(environ):
     cookie = environ.get('HTTP_COOKIE', '')
     cookies = {}
@@ -4619,8 +4630,7 @@ class _LocalStorageBackend:
         dest = os.path.join(safe_dir, safe_name)
         with open(dest, 'wb') as f:
             f.write(file_info['content'])
-        rel = os.path.relpath(dest, BASE_DIR).replace('\\', '/')
-        return original, '/' + rel
+        return original, upload_relative_path(folder, safe_name)
 
 
 class _S3StorageBackend:
@@ -7255,6 +7265,9 @@ if __name__ == '__main__':
     
     try:
         print(f'[startup] command={command} app_env={APP_ENV} backend={'postgres' if USE_POSTGRES else 'sqlite'} host={HOST} port={PORT}', flush=True)
+        print(f'[startup] upload_dir={UPLOAD_DIR} upload_dir_env_set={bool(UPLOAD_DIR_ENV)} render_disk_path={RENDER_DISK_PATH or "(not set)"}', flush=True)
+        if not RENDER_DISK_PATH and not UPLOAD_DIR_ENV and STORAGE_BACKEND != 's3':
+            print('[startup][warning] Uploads are not persistent without a Render disk or cloud storage.', flush=True)
         if command == 'init-db':
             init_db(); print('Database initialized.')
         elif command == 'create-admin':
