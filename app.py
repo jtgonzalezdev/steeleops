@@ -1325,6 +1325,49 @@ def init_db():
             if row['role'] == 'admin':
                 conn.execute("UPDATE users SET role='company_admin' WHERE id=?", (row['id'],))
 
+    if demo_company is not None:
+        supervisor_user = conn.execute(
+            "SELECT id FROM users WHERE username=? OR email=? ORDER BY id LIMIT 1",
+            ('supervisor@demo.local', 'supervisor@demo.local'),
+        ).fetchone()
+        if supervisor_user:
+            conn.execute(
+                """
+                UPDATE users
+                SET company_id=?, username=?, password=?, full_name=?, role='supervisor', phone=?, email=?, license_number=?, hourly_rate=?, active=1
+                WHERE id=?
+                """,
+                (
+                    demo_company,
+                    'supervisor@demo.local',
+                    hash_password('supervisor123'),
+                    'Sam Supervisor',
+                    '210-555-0177',
+                    'supervisor@demo.local',
+                    'SUP-100',
+                    24,
+                    supervisor_user['id'],
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO users (company_id, username, password, full_name, role, phone, email, license_number, hourly_rate, active, created_at)
+                VALUES (?, ?, ?, ?, 'supervisor', ?, ?, ?, ?, 1, ?)
+                """,
+                (
+                    demo_company,
+                    'supervisor@demo.local',
+                    hash_password('supervisor123'),
+                    'Sam Supervisor',
+                    '210-555-0177',
+                    'supervisor@demo.local',
+                    'SUP-100',
+                    24,
+                    now,
+                ),
+            )
+
     if not bootstrap_created and fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM clients') == 0:
         clients = [
             (demo_company, 'Steele Commercial', 'Facility Manager', 'manager@steele-commercial.local', '210-555-1111', 'Primary point of contact', 1, now),
