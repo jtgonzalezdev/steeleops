@@ -1393,19 +1393,6 @@ def init_db():
                 ),
             )
 
-        supervisor_row = conn.execute("SELECT id FROM users WHERE company_id=? AND role='supervisor' ORDER BY id LIMIT 1", (demo_company,)).fetchone()
-        first_site = conn.execute("SELECT id FROM sites WHERE company_id=? ORDER BY id LIMIT 1", (demo_company,)).fetchone()
-        if supervisor_row and first_site:
-            existing_assignment = conn.execute(
-                'SELECT id FROM supervisor_site_assignments WHERE company_id=? AND supervisor_user_id=? AND site_id=?',
-                (demo_company, supervisor_row['id'], first_site['id']),
-            ).fetchone()
-            if not existing_assignment:
-                conn.execute(
-                    'INSERT INTO supervisor_site_assignments (company_id, supervisor_user_id, site_id, assigned_at) VALUES (?, ?, ?, ?)',
-                    (demo_company, supervisor_row['id'], first_site['id'], now),
-                )
-
     if not bootstrap_created and fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM clients') == 0:
         clients = [
             (demo_company, 'Steele Commercial', 'Facility Manager', 'manager@steele-commercial.local', '210-555-1111', 'Primary point of contact', 1, now),
@@ -1456,6 +1443,19 @@ def init_db():
     elif demo_company is not None:
         conn.execute('UPDATE sites SET company_id=? WHERE company_id IS NULL', (demo_company,))
         conn.execute("UPDATE sites SET client_company_name = COALESCE(client_company_name, '')")
+    if demo_company is not None:
+        supervisor_row = conn.execute("SELECT id FROM users WHERE company_id=? AND username='supervisor1' ORDER BY id LIMIT 1", (demo_company,)).fetchone()
+        riverfront_site = conn.execute("SELECT id FROM sites WHERE company_id=? AND name='Riverfront Logistics' ORDER BY id LIMIT 1", (demo_company,)).fetchone()
+        if supervisor_row and riverfront_site:
+            existing_assignment = conn.execute(
+                'SELECT id FROM supervisor_site_assignments WHERE company_id=? AND supervisor_user_id=? AND site_id=?',
+                (demo_company, supervisor_row['id'], riverfront_site['id']),
+            ).fetchone()
+            if not existing_assignment:
+                conn.execute(
+                    'INSERT INTO supervisor_site_assignments (company_id, supervisor_user_id, site_id, assigned_at) VALUES (?, ?, ?, ?)',
+                    (demo_company, supervisor_row['id'], riverfront_site['id'], now),
+                )
     if not bootstrap_created and fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM shifts') == 0:
         g1 = conn.execute("SELECT id FROM users WHERE username='guard1'").fetchone()['id']
         g2 = conn.execute("SELECT id FROM users WHERE username='guard2'").fetchone()['id']
@@ -2443,6 +2443,24 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         GROUP BY u.id ORDER BY total_hours DESC
     ''', ((today - timedelta(days=today.weekday())).isoformat(), (today - timedelta(days=today.weekday()) + timedelta(days=6)).isoformat(), company_id)).fetchall()
     overtime_alerts = [row for row in overtime_rows if row['total_hours'] > 40]
+    staff_users = conn.execute(
+        """
+        SELECT id, full_name, username, email, role, active
+        FROM users
+        WHERE company_id=? AND role IN ('guard', 'supervisor', 'company_admin', 'admin', 'superadmin')
+        ORDER BY
+            CASE role
+                WHEN 'superadmin' THEN 0
+                WHEN 'company_admin' THEN 1
+                WHEN 'admin' THEN 1
+                WHEN 'supervisor' THEN 2
+                WHEN 'guard' THEN 3
+                ELSE 4
+            END,
+            full_name
+        """,
+        (company_id,),
+    ).fetchall()
 
     conn.close()
     return {
@@ -2472,6 +2490,7 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         'checkpoints': checkpoints,
         'availability': availability,
         'overtime_alerts': overtime_alerts,
+        'staff_users': staff_users,
         'shift_form': shift_form,
         'guard_option_rows': guard_option_rows,
         'guard_availability': guard_availability,
@@ -3523,12 +3542,31 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
       <div class="card">
         <div class="section-head"><h3>Admin · Guards & Sites</h3><span>Create accounts and posts</span></div>
         <form method="post" action="/admin/guard/new" class="stack compact">
-          <h4>Create Guard Account</h4>
+          <h4>Create Staff Account</h4>
           <div class="row-2"><label>Full Name<input type="text" name="full_name" required></label><label>Username<input type="text" name="username" required></label></div>
-          <div class="row-2"><label>Password<input type="text" name="password" value="guard123"></label><label>Hourly Rate<input type="number" step="0.01" name="hourly_rate" value="18.00"></label></div>
+          <div class="row-3"><label>Password<input type="text" name="password" value="password123"></label><label>Role<select name="role"><option value="guard">guard</option><option value="supervisor">supervisor</option><option value="admin">admin</option></select></label><label>Hourly Rate<input type="number" step="0.01" name="hourly_rate" value="18.00"></label></div>
           <div class="row-3"><label>Email<input type="email" name="email"></label><label>Phone<input type="text" name="phone"></label><label>License #<input type="text" name="license_number"></label></div>
-          <button class="btn primary" type="submit">Create Guard</button>
+          <button class="btn primary" type="submit">Create User</button>
         </form>
+        <hr>
+        <h4>Staff / Users</h4>
+        {% for staff_user in staff_users %}
+        <form method="post" action="/admin/user/update" class="list-item detailed">
+          <input type="hidden" name="user_id" value="{{ staff_user.id }}">
+          <div>
+            <strong>{{ staff_user.full_name }}</strong>
+            <div class="small-muted">{{ staff_user.username }}{% if staff_user.email %} · {{ staff_user.email }}{% endif %}</div>
+          </div>
+          <div class="actions">
+            <select name="role">
+              <option value="guard" {% if staff_user.role == 'guard' %}selected{% endif %}>guard</option>
+              <option value="supervisor" {% if staff_user.role == 'supervisor' %}selected{% endif %}>supervisor</option>
+              <option value="admin" {% if staff_user.role in ['admin', 'company_admin', 'superadmin'] %}selected{% endif %}>admin</option>
+            </select>
+            <button class="btn ghost" type="submit">Save</button>
+          </div>
+        </form>
+        {% else %}<div class="empty">No users found.</div>{% endfor %}
         <hr>
         <form method="post" action="/admin/client/new" class="stack compact">
           <h4>Create Client</h4>
@@ -6108,10 +6146,30 @@ def application(environ, start_response):
     if path == '/admin/guard/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
-        data, _ = parse_post(environ); conn = db(); conn.execute("INSERT INTO users (company_id, username, password, full_name, role, phone, email, license_number, hourly_rate, active, created_at) VALUES (?, ?, ?, ?, 'guard', ?, ?, ?, ?, 1, ?)", (user['company_id'], data.get('username'), hash_password(data.get('password', 'guard123')), data.get('full_name'), data.get('phone', ''), data.get('email', ''), data.get('license_number', ''), float(data.get('hourly_rate') or 18), utc_now_str()))
+        data, _ = parse_post(environ)
+        requested_role = (data.get('role') or 'guard').strip().lower()
+        role_map = {'guard': 'guard', 'supervisor': 'supervisor', 'admin': 'company_admin'}
+        db_role = role_map.get(requested_role, 'guard')
+        conn = db(); conn.execute("INSERT INTO users (company_id, username, password, full_name, role, phone, email, license_number, hourly_rate, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)", (user['company_id'], data.get('username'), hash_password(data.get('password', 'password123')), data.get('full_name'), db_role, data.get('phone', ''), data.get('email', ''), data.get('license_number', ''), float(data.get('hourly_rate') or 18), utc_now_str()))
         new_row = conn.execute('SELECT id FROM users WHERE username=?', (data.get('username'),)).fetchone(); new_id = new_row['id'] if new_row else None
-        for weekday in range(7): conn.execute("INSERT INTO availability (company_id, user_id, weekday, available_start, available_end, is_available) VALUES (?, ?, ?, '08:00', '20:00', 1)", (user['company_id'], new_id, weekday))
+        if db_role == 'guard':
+            for weekday in range(7): conn.execute("INSERT INTO availability (company_id, user_id, weekday, available_start, available_end, is_available) VALUES (?, ?, ?, '08:00', '20:00', 1)", (user['company_id'], new_id, weekday))
         conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='user', target_id=new_id, message='guard account created', environ=environ); return redirect(start_response, '/dashboard')
+    if path == '/admin/user/update' and method == 'POST':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        data, _ = parse_post(environ)
+        role_map = {'guard': 'guard', 'supervisor': 'supervisor', 'admin': 'company_admin'}
+        requested_role = (data.get('role') or '').strip().lower()
+        if requested_role not in role_map:
+            return bad_request(start_response, 'Invalid role')
+        conn = db()
+        target = conn.execute('SELECT id, role FROM users WHERE id=? AND company_id=?', (data.get('user_id'), user['company_id'])).fetchone()
+        if not target:
+            conn.close(); return bad_request(start_response, 'User not found')
+        conn.execute('UPDATE users SET role=? WHERE id=?', (role_map[requested_role], target['id']))
+        conn.commit(); conn.close()
+        return redirect(start_response, '/dashboard')
     if path == '/admin/client/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
