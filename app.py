@@ -1635,8 +1635,8 @@ def parse_query(environ):
 
 def serve_static(environ, start_response, path):
     normalized = path.lstrip('/').replace('\\', '/')
-    if normalized.startswith('uploads/paystubs/'):
-        return forbidden(start_response, 'Paystub files must be accessed through the secure paystub route.')
+    if normalized.startswith('uploads/paystubs/') or normalized.startswith('uploads/dar_photos/') or normalized.startswith('uploads/incident_attachments/'):
+        return forbidden(start_response, 'Secure files must be accessed through protected routes.')
     file_path = os.path.join(BASE_DIR, path.lstrip('/'))
     if not os.path.isfile(file_path):
         return not_found(start_response)
@@ -1922,6 +1922,18 @@ def report_management_context(conn, user, query):
     filtered = []
     for row in all_rows:
         row = dict(row)
+        row['uploaded_at'] = row.get('created_at')
+        row['uploaded_by'] = row.get('officer_name') or 'Unknown officer'
+        if row.get('report_kind') == 'daily_activity' and row.get('photo_path'):
+            row['photo_attachment'] = attachment_meta(row.get('photo_path'))
+            row['photo_attachment']['secure_url'] = f"/report-files/{row['report_kind']}/{row['report_id']}/photo"
+        else:
+            row['photo_attachment'] = None
+        if row.get('report_kind') == 'incident' and row.get('attachment_path'):
+            row['file_attachment'] = attachment_meta(row.get('attachment_path'))
+            row['file_attachment']['secure_url'] = f"/report-files/{row['report_kind']}/{row['report_id']}/attachment"
+        else:
+            row['file_attachment'] = None
         key = f"{row['report_kind']}:{row['report_id']}"
         row['status_history'] = history_by_key.get(key, [])
         if selected_type and row['report_kind'] != selected_type:
@@ -3452,6 +3464,12 @@ GUARDS_HTML = r'''{% extends "app_shell.html" %}
 
 REPORTS_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
+    <style>
+      .attachment-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-top:8px}
+      .attachment-item{border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:10px;background:rgba(9,12,19,.5)}
+      .attachment-thumb{max-width:100%;max-height:130px;border-radius:8px;display:block;object-fit:cover}
+      .attachment-links{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+    </style>
     <section class="card">
       <div class="section-head"><h3>Report Management</h3><span>Incident + Daily Activity reports</span></div>
       <form method="get" action="/reports" class="stack compact">
@@ -3483,8 +3501,31 @@ REPORTS_HTML = r'''{% extends "app_shell.html" %}
         <p><strong>Narrative / Summary:</strong> {{ report.narrative or 'N/A' }}</p>
         <p><strong>Persons Involved:</strong> {{ report.persons_involved or 'N/A' }}</p>
         <p><strong>Witnesses:</strong> {{ report.witnesses or 'N/A' }}</p>
-        {% if report.photo_path %}<p><img class="report-photo" src="/{{ report.photo_path }}" alt="Report photo"></p>{% endif %}
-        {% if report.attachment_path %}<p><a class="btn ghost" href="/{{ report.attachment_path }}" target="_blank" rel="noopener">Open Attachment</a></p>{% endif %}
+        <div class="small-muted">Uploaded {{ report.uploaded_at or 'N/A' }}{% if report.uploaded_by %} by {{ report.uploaded_by }}{% endif %}</div>
+        {% if report.photo_attachment or report.file_attachment %}
+        <div class="attachment-grid">
+          {% if report.photo_attachment %}
+          <div class="attachment-item">
+            <div class="small-muted">Photo Attachment</div>
+            <a href="{{ report.photo_attachment.secure_url }}" target="_blank" rel="noopener">
+              <img class="attachment-thumb" src="{{ report.photo_attachment.secure_url }}" alt="Report image attachment">
+            </a>
+            <div class="attachment-links"><a class="btn ghost" href="{{ report.photo_attachment.secure_url }}" target="_blank" rel="noopener">Preview</a><a class="btn ghost" href="{{ report.photo_attachment.secure_url }}?download=1">Download</a></div>
+          </div>
+          {% endif %}
+          {% if report.file_attachment %}
+          <div class="attachment-item">
+            <div class="small-muted">Document Attachment</div>
+            {% if report.file_attachment.is_image %}
+            <a href="{{ report.file_attachment.secure_url }}" target="_blank" rel="noopener"><img class="attachment-thumb" src="{{ report.file_attachment.secure_url }}" alt="Report attachment"></a>
+            {% else %}
+            <div>{{ report.file_attachment.name }}</div>
+            {% endif %}
+            <div class="attachment-links"><a class="btn ghost" href="{{ report.file_attachment.secure_url }}" target="_blank" rel="noopener">View</a><a class="btn ghost" href="{{ report.file_attachment.secure_url }}?download=1">Download</a></div>
+          </div>
+          {% endif %}
+        </div>
+        {% endif %}
         <div class="small-muted">Status History:</div>
         {% for history in report.status_history[:5] %}<div class="small-muted">• {{ history.changed_at }}: {{ history.old_status or 'N/A' }} → {{ history.new_status }}</div>{% else %}<div class="small-muted">No status history yet.</div>{% endfor %}
         {% if user.role in ['company_admin', 'superadmin'] %}
@@ -3580,8 +3621,8 @@ GUARD_MY_REPORT_DETAIL_HTML = r'''{% extends "app_shell.html" %}
       <p><strong>Activity Type:</strong> {{ report.activity_type }}</p>
       <p><strong>Summary:</strong> {{ report.summary }}</p>
     {% endif %}
-    {% if report.photo_path %}<p><img class="report-photo" src="/{{ report.photo_path }}" alt="Report photo"></p>{% endif %}
-    {% if report.attachment_path %}<p><a class="btn ghost" href="/{{ report.attachment_path }}" target="_blank" rel="noopener">Open Attachment</a></p>{% endif %}
+    {% if report.photo_path %}<p><img class="report-photo" src="/report-files/daily_activity/{{ report.report_id }}/photo" alt="Report photo"></p><p><a class="btn ghost" href="/report-files/daily_activity/{{ report.report_id }}/photo?download=1">Download Photo</a></p>{% endif %}
+    {% if report.attachment_path %}<p><a class="btn ghost" href="/report-files/incident/{{ report.report_id }}/attachment" target="_blank" rel="noopener">Open Attachment</a> <a class="btn ghost" href="/report-files/incident/{{ report.report_id }}/attachment?download=1">Download</a></p>{% endif %}
     <p><a class="btn ghost" href="/guard/my-reports">Back to My Reports</a></p>
   </div>
 </section>
@@ -4168,6 +4209,34 @@ def local_path_from_upload(upload_path):
     if not local_path.startswith(upload_root + os.sep):
         return None
     return local_path
+
+
+def upload_content_type(upload_path):
+    ext = os.path.splitext((upload_path or '').lower())[1]
+    return {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+        '.pdf': 'application/pdf',
+        '.doc': 'application/msword',
+        '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        '.txt': 'text/plain; charset=utf-8',
+    }.get(ext, 'application/octet-stream')
+
+
+def attachment_meta(path_value):
+    if not path_value:
+        return None
+    file_name = os.path.basename(path_value.split('?', 1)[0].rstrip('/'))
+    content_type = upload_content_type(path_value)
+    return {
+        'path': path_value,
+        'name': file_name or 'attachment',
+        'is_image': content_type.startswith('image/'),
+        'content_type': content_type,
+    }
 
 
 def build_absolute_url(environ, path):
@@ -5884,6 +5953,42 @@ def application(environ, start_response):
         report_context = report_management_context(conn, user, parse_query(environ))
         conn.close()
         return app_page(environ, start_response, user, 'reports.html', active_path='/reports', view='week', title='Reports', **report_context)
+    report_file_match = re.match(r'^/report-files/(daily_activity|incident)/(\d+)/(photo|attachment)$', path)
+    if report_file_match and method == 'GET':
+        user, response = require_login(environ, start_response)
+        if response:
+            return response
+        report_kind = report_file_match.group(1)
+        report_id = int(report_file_match.group(2))
+        field_name = report_file_match.group(3)
+        if report_kind == 'daily_activity' and field_name != 'photo':
+            return bad_request(start_response, 'Invalid file request.')
+        if report_kind == 'incident' and field_name != 'attachment':
+            return bad_request(start_response, 'Invalid file request.')
+        conn = db()
+        if report_kind == 'daily_activity':
+            row = conn.execute('SELECT company_id, officer_id, photo_path FROM daily_activity_reports WHERE id=?', (report_id,)).fetchone()
+            file_path_value = row.get('photo_path') if row else None
+        else:
+            row = conn.execute('SELECT company_id, officer_id, attachment_path FROM incident_reports WHERE id=?', (report_id,)).fetchone()
+            file_path_value = row.get('attachment_path') if row else None
+        conn.close()
+        if not row or not file_path_value:
+            return not_found(start_response)
+        if user['role'] == 'guard':
+            if int(row['officer_id']) != int(user['id']) or int(row['company_id']) != int(user['company_id']):
+                return forbidden(start_response, 'Access denied.')
+        elif int(row['company_id']) != int(user['company_id']):
+            return forbidden(start_response, 'Access denied.')
+        local_file_path = local_path_from_upload(file_path_value)
+        if not local_file_path or not os.path.isfile(local_file_path):
+            return not_found(start_response)
+        disposition = 'attachment' if query.get('download') == '1' else 'inline'
+        filename = os.path.basename(local_file_path)
+        headers = [('Content-Type', upload_content_type(file_path_value)), ('Content-Disposition', f'{disposition}; filename="{filename}"')]
+        start_response('200 OK', response_headers(headers))
+        with open(local_file_path, 'rb') as f:
+            return [f.read()]
     if path == '/guard/daily-activity-reports' and method == 'GET':
         user, response = require_login(environ, start_response)
         if response: return response
