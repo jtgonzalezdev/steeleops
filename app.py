@@ -1269,6 +1269,20 @@ def init_db():
         ensure_column(conn, 'daily_activity_reports', 'resolved_at TEXT')
     if table_exists(conn, 'incident_reports'):
         ensure_column(conn, 'incident_reports', 'resolved_at TEXT')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS report_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL,
+            report_type TEXT NOT NULL,
+            report_id INTEGER NOT NULL,
+            uploaded_by INTEGER,
+            file_name TEXT NOT NULL,
+            stored_path TEXT NOT NULL,
+            mime_type TEXT,
+            file_size INTEGER,
+            created_at TEXT NOT NULL
+        )
+    ''')
     if conn.backend == 'postgres':
         conn.execute('''
             CREATE TABLE IF NOT EXISTS report_status_history (
@@ -1785,7 +1799,7 @@ def parse_multipart(environ, content_type):
             continue
         content = content.rstrip(b'\r\n')
         if filename:
-            files[name] = {'filename': filename, 'content': content}
+            files.setdefault(name, []).append({'filename': filename, 'content': content})
         else:
             fields[name] = content.decode('utf-8', errors='ignore')
     return fields, files
@@ -1805,6 +1819,49 @@ def parse_post(environ):
 
 def parse_query(environ):
     return {k: v[0] for k, v in parse_qs(environ.get('QUERY_STRING', '')).items()}
+
+
+def files_for_field(files, field_name):
+    value = files.get(field_name)
+    if not value:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def collect_attachments(files, field_name):
+    collected = []
+    for item in files_for_field(files, field_name):
+        collected.append(item)
+    for key, value in files.items():
+        if key.startswith(field_name + '_'):
+            vals = value if isinstance(value, list) else [value]
+            collected.extend(vals)
+    return [f for f in collected if f and f.get('filename')]
+
+
+def is_allowed_attachment(file_info):
+    ext = os.path.splitext(os.path.basename((file_info or {}).get('filename', '')))[1].lower()
+    allowed = {'.jpg','.jpeg','.png','.gif','.webp','.pdf','.doc','.docx','.txt'}
+    blocked = {'.exe','.js','.sh','.bat','.cmd','.php','.py','.jar','.msi','.com'}
+    return ext in allowed and ext not in blocked
+
+
+def create_report_attachment(conn, company_id, report_type, report_id, uploaded_by, file_info, folder):
+    if not is_allowed_attachment(file_info):
+        return False
+    file_name, stored_path = save_upload(file_info, folder)
+    if not stored_path:
+        return False
+    mime_type = upload_content_type(stored_path)
+    file_size = len(file_info.get('content', b''))
+    conn.execute('INSERT INTO report_attachments (company_id, report_type, report_id, uploaded_by, file_name, stored_path, mime_type, file_size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        (company_id, report_type, report_id, uploaded_by, file_name or os.path.basename(stored_path), stored_path, mime_type, file_size, utc_now_str()))
+    return True
+
+
+def fetch_report_attachments(conn, report_type, report_id):
+    rows = conn.execute('SELECT ra.*, u.full_name as uploaded_by_name FROM report_attachments ra LEFT JOIN users u ON u.id=ra.uploaded_by WHERE ra.report_type=? AND ra.report_id=? ORDER BY ra.created_at ASC, ra.id ASC', (report_type, report_id)).fetchall()
+    return [dict(r) for r in rows]
 
 
 def serve_static(environ, start_response, path):
@@ -3948,7 +4005,7 @@ GUARD_DAILY_ACTIVITY_REPORTS_HTML = r'''{% extends "app_shell.html" %}
       <div class="row-2"><label>Officer<input type="text" value="{{ user.full_name }}" readonly></label><label>Assigned Site<input type="text" value="{{ assigned_site.name if assigned_site else 'Unassigned' }}" readonly></label></div>
       <div class="row-2"><label>Report Timestamp<input type="text" value="{{ server_now }}" readonly></label><label>Activity Type<select name="activity_type" required><option>Patrol</option><option>Gate Check</option><option>Visitor Log</option><option>Truck Entry</option><option>Parking Patrol</option><option>Perimeter Check</option><option>General Activity</option></select></label></div>
       <label>Summary / Notes<textarea name="summary" rows="5" required></textarea></label>
-      <label>Optional Photo<input type="file" name="photo" accept="image/*"></label>
+      <label>Optional Photo(s)<input type="file" name="photo" accept="image/*" multiple></label>
       <button class="btn primary" type="submit" {% if not assigned_site %}disabled{% endif %}>Submit Daily Activity Report</button>
       {% if not assigned_site %}<div class="small-muted">You need an assigned site before submitting a DAR.</div>{% endif %}
     </form>
@@ -4012,8 +4069,9 @@ GUARD_MY_REPORT_DETAIL_HTML = r'''{% extends "app_shell.html" %}
       <p><strong>Activity Type:</strong> {{ report.activity_type }}</p>
       <p><strong>Summary:</strong> {{ report.summary }}</p>
     {% endif %}
+    {% if report.attachments %}{% for file in report.attachments %}<div class="report-card" style="margin-top:8px;"><div class="small-muted">{{ file.file_name }} · {{ file.created_at }}{% if file.uploaded_by_name %} · {{ file.uploaded_by_name }}{% endif %}</div>{% if file.mime_type and file.mime_type.startswith('image/') %}<p><img class="report-photo" src="/report-files/{{ report.report_kind }}/{{ report.report_id }}/attachment/{{ file.id }}" alt="Report attachment"></p>{% endif %}<p><a class="btn ghost" href="/report-files/{{ report.report_kind }}/{{ report.report_id }}/attachment/{{ file.id }}" target="_blank" rel="noopener">Preview</a> <a class="btn ghost" href="/report-files/{{ report.report_kind }}/{{ report.report_id }}/attachment/{{ file.id }}?download=1">Download</a></p></div>{% endfor %}{% else %}
     {% if report.photo_path %}<p><img class="report-photo" src="/report-files/daily_activity/{{ report.report_id }}/photo" alt="Report photo"></p><p><a class="btn ghost" href="/report-files/daily_activity/{{ report.report_id }}/photo?download=1">Download Photo</a></p>{% endif %}
-    {% if report.attachment_path %}<p><a class="btn ghost" href="/report-files/incident/{{ report.report_id }}/attachment" target="_blank" rel="noopener">Open Attachment</a> <a class="btn ghost" href="/report-files/incident/{{ report.report_id }}/attachment?download=1">Download</a></p>{% endif %}
+    {% if report.attachment_path %}<p><a class="btn ghost" href="/report-files/incident/{{ report.report_id }}/attachment" target="_blank" rel="noopener">Open Attachment</a> <a class="btn ghost" href="/report-files/incident/{{ report.report_id }}/attachment?download=1">Download</a></p>{% endif %}{% endif %}
     <p><a class="btn ghost" href="/guard/my-reports">Back to My Reports</a></p>
   </div>
 </section>
@@ -4035,7 +4093,7 @@ GUARD_INCIDENT_REPORTS_HTML = r'''{% extends "app_shell.html" %}
         <label class="checkbox-inline"><input type="checkbox" name="police_notified" value="1"><span>Police Notified</span></label>
         <label class="checkbox-inline"><input type="checkbox" name="client_notified" value="1"><span>Client Notified</span></label>
       </div>
-      <label>Optional Photo / Document<input type="file" name="attachment"></label>
+      <label>Optional Photo / Document(s)<input type="file" name="attachment" multiple></label>
       <div class="sticky-submit-wrap"><button class="btn primary sticky-submit" type="submit" {% if not assigned_site %}disabled{% endif %}>Submit Incident Report</button></div>
     </form>
   </div>
@@ -6422,7 +6480,7 @@ def application(environ, start_response):
         report_context = report_management_context(conn, user, parse_query(environ))
         conn.close()
         return app_page(environ, start_response, user, 'reports.html', active_path='/reports', view='week', title='Reports', **report_context)
-    report_file_match = re.match(r'^/report-files/([a-zA-Z_-]+)/(\d+)/(photo|attachment)$', path)
+    report_file_match = re.match(r'^/report-files/([a-zA-Z_-]+)/(\d+)/(photo|attachment)(?:/(\d+))?$', path)
     if report_file_match and method == 'GET':
         user, response = require_login(environ, start_response)
         if response:
@@ -6442,6 +6500,7 @@ def application(environ, start_response):
             return bad_request(start_response, 'Invalid report type.')
         report_id = int(report_file_match.group(2))
         field_name = report_file_match.group(3)
+        attachment_id = int(report_file_match.group(4)) if report_file_match.group(4) else None
         if report_kind == 'daily_activity' and field_name not in {'photo', 'attachment'}:
             return bad_request(start_response, 'Invalid file request.')
         if report_kind == 'incident' and field_name != 'attachment':
@@ -6470,6 +6529,13 @@ def application(environ, start_response):
         if (report_kind_raw or '').strip().lower() in {'daily_activity', 'daily_activity_report', 'daily-activity', 'daily-activity-report', 'dar'} and report_kind != 'daily_activity':
             conn.close()
             return bad_request(start_response, 'Report file unavailable: report type mismatch.')
+        if attachment_id:
+            attachment_row = conn.execute(
+                'SELECT * FROM report_attachments WHERE id=? AND report_type=? AND report_id=?',
+                (attachment_id, report_kind, report_id),
+            ).fetchone()
+            if attachment_row:
+                file_path_value = attachment_row['stored_path']
         if not file_path_value:
             conn.close()
             return bad_request(start_response, f'Report file unavailable: attachment path missing for report #{report_id}.')
@@ -6541,11 +6607,17 @@ def application(environ, start_response):
         if not assigned_site:
             conn.close()
             return redirect_with_feedback(start_response, '/guard/daily-activity-reports', error='No assigned site found for your account.')
-        _, photo_path = save_upload(files.get('photo'), 'dar_photos') if files.get('photo') else (None, None)
+        dar_files = collect_attachments(files, 'photo')
+        photo_path = None
+        if dar_files:
+            _, photo_path = save_upload(dar_files[0], 'dar_photos')
         conn.execute('''
             INSERT INTO daily_activity_reports (company_id, site_id, officer_id, activity_type, summary, photo_path, status, created_at)
             VALUES (?, ?, ?, ?, ?, ?, 'submitted', ?)
         ''', (user['company_id'], assigned_site['site_id'], user['id'], data['activity_type'], data['summary'], photo_path, utc_now_str()))
+        report_id = conn.execute('SELECT last_insert_rowid() AS id').fetchone()['id']
+        for upload in dar_files:
+            create_report_attachment(conn, user['company_id'], 'daily_activity', report_id, user['id'], upload, 'dar_photos')
         conn.commit()
         conn.close()
         return redirect_with_feedback(start_response, '/guard/daily-activity-reports', message='Daily activity report submitted.')
@@ -6634,9 +6706,12 @@ def application(environ, start_response):
                 FROM incident_reports i JOIN sites s ON s.id=i.site_id
                 WHERE i.id=? AND i.company_id=? AND i.officer_id=?
             ''', (report_id, user['company_id'], user['id'])).fetchone()
-        conn.close()
         if not report:
+            conn.close()
             return redirect_with_feedback(start_response, '/guard/my-reports', error='Report not found or access denied.')
+        report = dict(report)
+        report['attachments'] = fetch_report_attachments(conn, report_kind, report['report_id'])
+        conn.close()
         return app_page(environ, start_response, user, 'guard_my_report_detail.html', active_path='/guard/my-reports', view='week', title='Report Detail', report=report)
     if path == '/guard/incident-reports' and method == 'GET':
         user, response = require_login(environ, start_response)
@@ -6661,11 +6736,17 @@ def application(environ, start_response):
         if not assigned_site:
             conn.close()
             return redirect_with_feedback(start_response, '/guard/incident-reports', error='No assigned site found for your account.')
-        _, attachment_path = save_upload(files.get('attachment'), 'incident_attachments') if files.get('attachment') else (None, None)
+        incident_files = collect_attachments(files, 'attachment')
+        first_attachment_path = None
+        if incident_files:
+            _, first_attachment_path = save_upload(incident_files[0], 'incident_attachments')
         conn.execute('''
             INSERT INTO incident_reports (company_id, site_id, officer_id, incident_type, priority, narrative, persons_involved, witnesses, police_notified, client_notified, attachment_path, status, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Open', ?)
-        ''', (user['company_id'], assigned_site['site_id'], user['id'], data['incident_type'], data['priority'], data['narrative'], data.get('persons_involved', ''), data.get('witnesses', ''), 1 if data.get('police_notified') else 0, 1 if data.get('client_notified') else 0, attachment_path, utc_now_str()))
+        ''', (user['company_id'], assigned_site['site_id'], user['id'], data['incident_type'], data['priority'], data['narrative'], data.get('persons_involved', ''), data.get('witnesses', ''), 1 if data.get('police_notified') else 0, 1 if data.get('client_notified') else 0, first_attachment_path, utc_now_str()))
+        report_id = conn.execute('SELECT last_insert_rowid() as id').fetchone()['id']
+        for f in incident_files:
+            create_report_attachment(conn, user['company_id'], 'incident', report_id, user['id'], f, 'incident_attachments')
         conn.commit()
         conn.close()
         return redirect_with_feedback(start_response, '/guard/incident-reports', message='Incident report submitted.')
