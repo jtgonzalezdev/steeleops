@@ -230,3 +230,48 @@ Railway is still supported with the same environment variables:
 ## Private beta notes
 - For a no-email private beta, you can temporarily set `ALLOW_BROWSER_PASSWORD_RESET_LINKS=1` so SteeleOps shows one-time reset links in the browser after a valid request.
 - For normal production behavior, leave that value at `0` and wire the reset token to your email workflow later.
+
+## SteeleOps Phase 1 Complete
+
+The current working version is officially marked as **SteeleOps Phase 1 Complete**.
+
+### Completed features
+- Authentication/Login
+- Guard accounts
+- Supervisor accounts
+- Admin accounts
+- Role-based permissions
+- Dashboard
+- Guard management
+- Site management
+- Weekly schedule view
+- Monthly schedule view
+- Daily Activity Reports
+- Incident Reports
+- Persistent report attachments
+- Image preview/download
+- Render persistent disk support
+- PostgreSQL compatibility
+- Supervisor/Admin report review
+- Status timeline
+- Supervisor/Admin notes timeline
+- Guard-only report submission permissions
+
+### Database documentation
+Major tables used in Phase 1:
+- `users`
+- `guards` / `staff`
+- `sites`
+- `shifts`
+- `daily_activity_reports`
+- `incident_reports`
+- `report_attachments`
+- `report_status_history`
+- `report_notes`
+
+### Next Planned Phase
+Scheduling Module Phase 1:
+- time off requests
+- open shifts
+- shift coverage
+- supervisor approvals
