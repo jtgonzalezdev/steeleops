@@ -1318,7 +1318,7 @@ def init_db():
             )
         ''')
         conn.execute('''
-            CREATE TABLE IF NOT EXISTS report_note_history (
+            CREATE TABLE IF NOT EXISTS report_notes (
                 id SERIAL PRIMARY KEY,
                 company_id INTEGER NOT NULL,
                 report_kind TEXT NOT NULL,
@@ -1342,7 +1342,7 @@ def init_db():
             )
         ''')
         conn.execute('''
-            CREATE TABLE IF NOT EXISTS report_note_history (
+            CREATE TABLE IF NOT EXISTS report_notes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 company_id INTEGER NOT NULL,
                 report_kind TEXT NOT NULL,
@@ -2136,7 +2136,7 @@ def normalized_recent_reports(base_reports, daily_activity_reports, incident_rep
 
 
 def report_status_options():
-    return ['Open', 'In Progress', 'Closed', 'Escalated']
+    return ['Open', 'Under Review', 'Escalated', 'Closed']
 
 
 def report_management_context(conn, user, query):
@@ -2170,11 +2170,25 @@ def report_management_context(conn, user, query):
         all_rows = list(daily_rows) + list(incident_rows)
     else:
         all_rows = [r for r in list(daily_rows) + list(incident_rows) if str(r['officer_id']) == str(user['id'])]
-    history_rows = conn.execute('SELECT * FROM report_status_history WHERE company_id=? ORDER BY changed_at DESC', (company_id,)).fetchall()
+    history_rows = conn.execute('''
+        SELECT h.*, u.full_name AS changed_by_name, u.role AS changed_by_role
+        FROM report_status_history h
+        LEFT JOIN users u ON u.id=h.changed_by
+        WHERE h.company_id=?
+        ORDER BY h.changed_at DESC
+    ''', (company_id,)).fetchall()
     history_by_key = {}
     for row in history_rows:
-        history_by_key.setdefault(f"{row['report_kind']}:{row['report_id']}", []).append(row)
-    note_rows = conn.execute('SELECT * FROM report_note_history WHERE company_id=? ORDER BY created_at DESC', (company_id,)).fetchall()
+        history_row = dict(row)
+        history_row['report_type_label'] = 'Incident' if history_row.get('report_kind') == 'incident' else 'Daily Activity'
+        history_by_key.setdefault(f"{row['report_kind']}:{row['report_id']}", []).append(history_row)
+    note_rows = conn.execute('''
+        SELECT n.*, u.full_name AS created_by_name, u.role AS created_by_role
+        FROM report_notes n
+        LEFT JOIN users u ON u.id=n.created_by
+        WHERE n.company_id=?
+        ORDER BY n.created_at DESC
+    ''', (company_id,)).fetchall()
     notes_by_key = {}
     for row in note_rows:
         notes_by_key.setdefault(f"{row['report_kind']}:{row['report_id']}", []).append(row)
@@ -3457,7 +3471,7 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
       {% endif %}
     </section>
 
-    {% if user.role in ['company_admin', 'superadmin'] %}
+    {% if user.role in ['company_admin', 'superadmin', 'supervisor', 'admin'] %}
     <section class="card admin-action-card">
       <div class="section-head">
         <div>
@@ -3695,7 +3709,7 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
       {% endif %}
     </section>
 
-    {% if user.role in ['company_admin', 'superadmin'] %}
+    {% if user.role in ['company_admin', 'superadmin', 'supervisor', 'admin'] %}
     <section class="grid two-col">
       <div class="card">
         <div class="section-head"><h3>Admin · Guards & Sites</h3><span>Create accounts and posts</span></div>
@@ -3753,7 +3767,7 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
     </section>
     {% endif %}
 
-    {% if user.role in ['company_admin', 'superadmin'] %}
+    {% if user.role in ['company_admin', 'superadmin', 'supervisor', 'admin'] %}
     <section class="card">
       <div class="section-head"><h3>Pending Time Corrections</h3><span>Approval queue</span></div>
       {% for item in time_corrections %}
@@ -3842,7 +3856,7 @@ SCHEDULE_HTML = r'''{% extends "app_shell.html" %}
           <button class="btn" type="submit" {% if not my_open_shift_options %}disabled{% endif %}>Claim Shift</button>
         </form>
         {% endif %}
-        {% if user.role in ['company_admin', 'superadmin'] %}
+        {% if user.role in ['company_admin', 'superadmin', 'supervisor', 'admin'] %}
         <hr>
         <form method="post" action="/admin/shift/new" class="stack compact">
           <h4>Create Shift</h4>
@@ -3994,18 +4008,18 @@ REPORTS_HTML = r'''{% extends "app_shell.html" %}
         {% endif %}
         <div class="history-block">
           <div class="small-muted"><strong>Status Timeline</strong> (Newest first)</div>
-          {% for history in report.status_history %}<div class="small-muted history-row">• {{ history.changed_at }}: {{ history.old_status or 'N/A' }} → {{ history.new_status }}</div>{% else %}<div class="small-muted history-row">No status history yet.</div>{% endfor %}
+          {% for history in report.status_history %}<div class="small-muted history-row">• {{ history.changed_at }}: {{ history.report_type_label or report.report_type }} #{{ history.report_id }} — {{ history.old_status or 'N/A' }} → {{ history.new_status }} by {{ history.changed_by_name or 'Unknown' }}</div>{% else %}<div class="small-muted history-row">No status history yet.</div>{% endfor %}
         </div>
         <div class="history-block">
-          <div class="small-muted"><strong>Admin Notes Timeline</strong> (Newest first)</div>
-          {% for note in report.note_history %}<div class="small-muted history-row">• {{ note.created_at }}: {{ note.note_text }}</div>{% else %}<div class="small-muted history-row">No admin notes yet.</div>{% endfor %}
+          <div class="small-muted"><strong>Supervisor/Admin Notes Timeline</strong> (Newest first)</div>
+          {% for note in report.note_history %}<div class="small-muted history-row">• {{ note.created_at }} — {{ note.created_by_name or 'Unknown' }} ({{ note.created_by_role or 'n/a' }}): {{ note.note_text }}</div>{% else %}<div class="small-muted history-row">No admin notes yet.</div>{% endfor %}
         </div>
-        {% if user.role in ['company_admin', 'superadmin'] %}
+        {% if user.role in ['company_admin', 'superadmin', 'supervisor', 'admin'] %}
         <form method="post" action="/admin/reports/manage" class="stack compact">
           <input type="hidden" name="report_kind" value="{{ report.report_kind }}">
           <input type="hidden" name="report_id" value="{{ report.report_id }}">
-          <div class="row-2"><label>Status<select name="status">{% for status in report_status_options %}<option value="{{ status }}" {% if report.status == status %}selected{% endif %}>{{ status }}</option>{% endfor %}</select></label><label>Add Admin Note<textarea name="admin_note" rows="2" placeholder="Internal admin note (appends to history)"></textarea></label></div>
-          <button class="btn primary" type="submit">Save</button>
+          <div class="row-2"><label>Status<select name="status">{% for status in report_status_options %}<option value="{{ status }}" {% if report.status == status %}selected{% endif %}>{{ status }}</option>{% endfor %}</select></label><label>Supervisor/Admin Note<textarea name="admin_note" rows="2" placeholder="Add internal review note"></textarea></label></div>
+          <button class="btn primary" type="submit">Update Status / Add Note</button>
         </form>
         {% endif %}
       </details>
@@ -6477,8 +6491,10 @@ def application(environ, start_response):
         if response: return response
         pdf = export_reports_pdf(user['company_id']); log_audit('reports_exported_pdf', actor_user_id=user['id'], company_id=user['company_id'], target_type='report', target_id='export', message='PDF report export generated', environ=environ); start_response('200 OK', response_headers([('Content-Disposition', 'attachment; filename="steeleops_reports.pdf"')], 'application/pdf')); return [pdf]
     if path == '/admin/reports/manage' and method == 'POST':
-        user, response = require_admin(environ, start_response)
+        user, response = require_login(environ, start_response)
         if response: return response
+        if user.get('role') not in {'company_admin', 'superadmin', 'admin', 'supervisor'}:
+            return redirect_with_feedback(start_response, '/reports', error='Only supervisors/admins can manage reports.')
         data, _ = parse_post(environ)
         report_kind = (data.get('report_kind') or '').strip()
         table_name = 'daily_activity_reports' if report_kind == 'daily_activity' else 'incident_reports' if report_kind == 'incident' else ''
@@ -6492,6 +6508,8 @@ def application(environ, start_response):
         row = conn.execute(f'SELECT * FROM {table_name} WHERE id=? AND company_id=?', (report_id, user['company_id'])).fetchone()
         if not row:
             conn.close(); return bad_request(start_response, 'Report not found.')
+        if user.get('role') == 'supervisor' and not supervisor_can_access_site(conn, user, row['site_id']):
+            conn.close(); return redirect_with_feedback(start_response, '/reports', error='Supervisors can only manage reports for assigned sites.')
         old_status = row.get('status') or ''
         now = utc_now_str()
         new_note = (data.get('admin_note') or '').strip()
@@ -6505,7 +6523,7 @@ def application(environ, start_response):
             conn.execute('INSERT INTO report_status_history (company_id, report_kind, report_id, old_status, new_status, changed_by, changed_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], report_kind, report_id, old_status, new_status, user['id'], now))
         if new_note:
             conn.execute(
-                'INSERT INTO report_note_history (company_id, report_kind, report_id, note_text, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+                'INSERT INTO report_notes (company_id, report_kind, report_id, note_text, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)',
                 (user['company_id'], report_kind, report_id, new_note, user['id'], now),
             )
             merged_notes = ((row.get('admin_notes') or '').strip() + '\n' + f'[{now}] {new_note}').strip()
