@@ -2564,7 +2564,10 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         ORDER BY tor.created_at DESC
     ''', (company_id,)).fetchall()
     if user['role'] == 'supervisor':
-        admin_time_off_requests = [row for row in admin_time_off_requests if row['status'] == 'pending']
+        admin_time_off_requests = [
+            row for row in admin_time_off_requests
+            if (row.get('status') or '').strip().lower() == 'pending'
+        ]
     elif allowed_site_ids is not None:
         if allowed_site_ids:
             placeholders = ','.join(['?'] * len(allowed_site_ids))
