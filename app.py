@@ -2559,13 +2559,43 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         SELECT tor.*, u.full_name as guard_name, reviewer.full_name as reviewed_by_name
         FROM time_off_requests tor
         JOIN users u ON tor.guard_id=u.id
-        LEFT JOIN shifts s ON COALESCE(s.user_id, s.guard_id)=u.id
         LEFT JOIN users reviewer ON tor.reviewed_by=reviewer.id
         WHERE tor.company_id=?
         ORDER BY tor.created_at DESC
     ''', (company_id,)).fetchall()
     if allowed_site_ids is not None:
-        admin_time_off_requests = [row for row in admin_time_off_requests if row.get('site_id') in allowed_site_ids]
+        if allowed_site_ids:
+            placeholders = ','.join(['?'] * len(allowed_site_ids))
+            admin_time_off_requests = conn.execute(
+                f'''
+                SELECT tor.*, u.full_name as guard_name, reviewer.full_name as reviewed_by_name
+                FROM time_off_requests tor
+                JOIN users u ON tor.guard_id=u.id
+                LEFT JOIN users reviewer ON tor.reviewed_by=reviewer.id
+                WHERE tor.company_id=?
+                  AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM guard_site_assignments gsa
+                        WHERE gsa.company_id=tor.company_id
+                          AND gsa.guard_id=tor.guard_id
+                          AND gsa.site_id IN ({placeholders})
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM shifts sh
+                        WHERE sh.company_id=tor.company_id
+                          AND COALESCE(sh.user_id, sh.guard_id)=tor.guard_id
+                          AND sh.shift_date BETWEEN tor.start_date AND tor.end_date
+                          AND sh.site_id IN ({placeholders})
+                    )
+                  )
+                ORDER BY tor.created_at DESC
+                ''',
+                tuple([company_id] + sorted(allowed_site_ids) + sorted(allowed_site_ids)),
+            ).fetchall()
+        else:
+            admin_time_off_requests = []
 
     checkpoints = conn.execute('''
         SELECT pc.*, u.full_name, s.name as site_name
@@ -6325,14 +6355,35 @@ def application(environ, start_response):
         if user['role'] == 'supervisor':
             supervisor_sites = supervisor_site_ids(conn, user)
             if not supervisor_sites:
-                conn.close(); return redirect_with_feedback(start_response, '/dashboard', error='Supervisor has no assigned sites.')
-            placeholders = ','.join(['?'] * len(supervisor_sites))
+                conn.close(); return redirect_with_feedback(start_response, '/dashboard', error='Supervisor can only review time off for guards at assigned sites.')
+            site_ids = sorted(supervisor_sites)
+            placeholders = ','.join(['?'] * len(site_ids))
             guard_in_scope = conn.execute(
-                f'''SELECT 1
-                    FROM guard_site_assignments
-                    WHERE company_id=? AND guard_id=? AND site_id IN ({placeholders})
-                    LIMIT 1''',
-                tuple([user['company_id'], req['guard_id']] + list(supervisor_sites)),
+                f'''
+                SELECT 1
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM guard_site_assignments gsa
+                    WHERE gsa.company_id=?
+                      AND gsa.guard_id=?
+                      AND gsa.site_id IN ({placeholders})
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM shifts sh
+                    WHERE sh.company_id=?
+                      AND COALESCE(sh.user_id, sh.guard_id)=?
+                      AND sh.shift_date BETWEEN ? AND ?
+                      AND sh.site_id IN ({placeholders})
+                )
+                LIMIT 1
+                ''',
+                tuple(
+                    [user['company_id'], req['guard_id']]
+                    + site_ids
+                    + [user['company_id'], req['guard_id'], req['start_date'], req['end_date']]
+                    + site_ids
+                ),
             ).fetchone()
             if not guard_in_scope:
                 conn.close(); return redirect_with_feedback(start_response, '/dashboard', error='Supervisor can only review time off for guards at assigned sites.')
