@@ -1,6 +1,7 @@
 import csv
 import hashlib
 import hmac
+import html
 import io
 import json
 import os
@@ -4075,20 +4076,95 @@ PATROL_RUN_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
 <section class="card">
   <div class="section-head"><h3>{{ run.tour_name }}</h3><span>{{ run.site_name }} · {{ run.status.replace('_', ' ').title() }}</span></div>
-  <div class="row-4"><div><strong>Guard ID</strong><div class="small-muted">{{ run.guard_id }} · {{ run.guard_name }}</div></div><div><strong>Site ID</strong><div class="small-muted">{{ run.site_id }}</div></div><div><strong>Tour ID</strong><div class="small-muted">{{ run.tour_id }}</div></div><div><strong>Missed Checkpoints</strong><div class="small-muted">{{ run.missed_checkpoint_count or 0 }}</div></div></div>
+  <div class="row-4"><div><strong>Guard</strong><div class="small-muted">{{ run.guard_name }} · ID {{ run.guard_id }}</div></div><div><strong>Site ID</strong><div class="small-muted">{{ run.site_id }}</div></div><div><strong>Tour ID</strong><div class="small-muted">{{ run.tour_id }}</div></div><div><strong>Missed Checkpoints</strong><div class="small-muted">{{ run.missed_checkpoint_count or 0 }}</div></div></div>
   <div class="small-muted">Started {{ run.started_at }}{% if run.completed_at %} · Completed {{ run.completed_at }}{% endif %}</div>
 </section>
 <section class="card">
-  <div class="section-head"><h3>Checkpoint Scans</h3><span>QR/NFC scan log with GPS if available</span></div>
-  <div class="table-wrap"><table><thead><tr><th>Checkpoint</th><th>QR Code</th><th>NFC Tag</th><th>Status</th><th>Scan</th><th>GPS</th><th>Guard Action</th></tr></thead><tbody>{% for checkpoint in checkpoints %}<tr><td>{{ checkpoint.checkpoint_name }}<div class="small-muted">Checkpoint ID {{ checkpoint.id }}</div></td><td><code>{{ checkpoint.qr_code }}</code></td><td><code>{{ checkpoint.nfc_tag_id }}</code></td><td>{% if checkpoint.missed_checkpoint %}<span class="badge declined">Missed</span>{% elif checkpoint.scanned_at %}<span class="badge completed">Completed</span>{% else %}<span class="badge pending">Pending</span>{% endif %}</td><td>{{ checkpoint.scan_method or '—' }}{% if checkpoint.scanned_at %}<div class="small-muted">{{ checkpoint.scanned_at }}</div>{% endif %}</td><td>{% if checkpoint.gps_latitude or checkpoint.gps_longitude %}{{ checkpoint.gps_latitude }}, {{ checkpoint.gps_longitude }}{% else %}—{% endif %}</td><td>{% if user.role == 'guard' and run.status == 'in_progress' and not checkpoint.scanned_at %}<form method="post" action="/patrol/scan" class="stack compact"><input type="hidden" name="run_id" value="{{ run.id }}"><input type="hidden" name="checkpoint_id" value="{{ checkpoint.id }}"><div class="row-2"><label>Method<select name="scan_method"><option value="QR">QR</option><option value="NFC">NFC</option></select></label><label>Scanned Code<input type="text" name="scan_value" required></label></div><div class="row-2"><label>GPS Lat<input type="text" name="gps_latitude"></label><label>GPS Lng<input type="text" name="gps_longitude"></label></div><button class="btn primary" type="submit">Log Scan</button></form>{% else %}—{% endif %}</td></tr>{% else %}<tr><td colspan="7">No checkpoints configured.</td></tr>{% endfor %}</tbody></table></div>
-  {% if user.role == 'guard' and run.status == 'in_progress' %}<form method="post" action="/patrol/complete" class="stack compact"><input type="hidden" name="run_id" value="{{ run.id }}"><button class="btn primary" type="submit">Complete Tour / Flag Missed Checkpoints</button></form>{% endif %}
+  <div class="section-head"><h3>Patrol Checklist</h3><span>Scan QR, tap/enter NFC, or use manual testing fallback</span></div>
+  <div class="checkpoint-grid">
+    {% for checkpoint in checkpoints %}
+    <article class="checkpoint-card {% if checkpoint.missed_checkpoint %}missed{% elif checkpoint.scanned_at %}done{% endif %}">
+      <div class="checkpoint-card-head">
+        <div><span class="checkpoint-order">{{ checkpoint.sort_order }}</span> <strong>{{ checkpoint.checkpoint_name }}</strong><div class="small-muted">Checkpoint ID {{ checkpoint.id }}</div></div>
+        <div>{% if checkpoint.missed_checkpoint %}<span class="badge declined">Missed</span>{% elif checkpoint.scanned_at %}<span class="badge completed">Completed</span>{% else %}<span class="badge pending">Pending</span>{% endif %}</div>
+      </div>
+      <div class="identifier-list"><div><span>QR</span><code>{{ checkpoint.qr_code }}</code></div><div><span>NFC</span><code>{{ checkpoint.nfc_tag_id }}</code></div></div>
+      {% if checkpoint.scanned_at %}<div class="small-muted">{{ checkpoint.scan_method }} completed at {{ checkpoint.scanned_at }}{% if checkpoint.gps_latitude or checkpoint.gps_longitude %} · GPS {{ checkpoint.gps_latitude }}, {{ checkpoint.gps_longitude }}{% endif %}</div>{% endif %}
+      {% if user.role == 'guard' and run.status == 'in_progress' and not checkpoint.scanned_at %}
+      <div class="scan-actions">
+        <form method="post" action="/patrol/scan" class="stack compact"><input type="hidden" name="run_id" value="{{ run.id }}"><input type="hidden" name="checkpoint_id" value="{{ checkpoint.id }}"><input type="hidden" name="scan_method" value="QR"><label>QR Identifier<input type="text" name="scan_value" placeholder="Scan or enter QR value" required></label><div class="row-2"><label>GPS Lat<input type="text" name="gps_latitude"></label><label>GPS Lng<input type="text" name="gps_longitude"></label></div><button class="btn primary" type="submit">Scan QR</button></form>
+        <form method="post" action="/patrol/scan" class="stack compact"><input type="hidden" name="run_id" value="{{ run.id }}"><input type="hidden" name="checkpoint_id" value="{{ checkpoint.id }}"><input type="hidden" name="scan_method" value="NFC"><label>NFC Identifier<input type="text" name="scan_value" placeholder="Tap or enter NFC value" required></label><button class="btn" type="submit">Tap/Enter NFC</button></form>
+        <form method="post" action="/patrol/scan" class="stack compact"><input type="hidden" name="run_id" value="{{ run.id }}"><input type="hidden" name="checkpoint_id" value="{{ checkpoint.id }}"><input type="hidden" name="scan_method" value="MANUAL"><label>Manual Note<input type="text" name="scan_value" placeholder="Testing fallback note"></label><button class="btn ghost" type="submit">Manual Entry Fallback</button></form>
+      </div>
+      {% endif %}
+    </article>
+    {% else %}<div class="empty">No checkpoints configured.</div>{% endfor %}
+  </div>
+  {% if user.role == 'guard' and run.status == 'in_progress' %}<form method="post" action="/patrol/complete" class="stack compact top-gap"><input type="hidden" name="run_id" value="{{ run.id }}"><button class="btn primary" type="submit">Complete Tour / Mark Unfinished Checkpoints Missed</button></form>{% endif %}
 </section>
 {% endblock %}'''
 
 PATROL_TOUR_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
-<section class="card"><div class="section-head"><h3>{{ tour.name }}</h3><span>{{ tour.site_name }} · {{ tour.checkpoint_count }} checkpoints</span></div><p>{{ tour.description or 'No description.' }}</p>{% if user.role in ['company_admin', 'superadmin', 'admin'] %}<form method="post" action="/admin/patrol/checkpoint/new" class="stack compact"><input type="hidden" name="tour_id" value="{{ tour.id }}"><div class="row-2"><label>Checkpoint Name<input type="text" name="checkpoint_name" required></label><label>Sort Order<input type="number" name="sort_order" value="{{ checkpoints|length + 1 }}"></label></div><button class="btn" type="submit">Add Checkpoint</button></form>{% endif %}</section>
-<section class="card"><div class="section-head"><h3>QR / NFC Checkpoints</h3><span>Unique checkpoint identifiers</span></div><div class="table-wrap"><table><thead><tr><th>Order</th><th>Checkpoint</th><th>QR Code</th><th>NFC Tag ID</th></tr></thead><tbody>{% for checkpoint in checkpoints %}<tr><td>{{ checkpoint.sort_order }}</td><td>{{ checkpoint.checkpoint_name }}<div class="small-muted">Checkpoint ID {{ checkpoint.id }}</div></td><td><code>{{ checkpoint.qr_code }}</code></td><td><code>{{ checkpoint.nfc_tag_id }}</code></td></tr>{% else %}<tr><td colspan="4">No checkpoints yet.</td></tr>{% endfor %}</tbody></table></div></section>
+<section class="card">
+  <div class="section-head"><h3>{{ tour.name }}</h3><span>{{ tour.site_name }} · {{ tour.checkpoint_count }} active checkpoints</span></div>
+  <p>{{ tour.description or 'No description.' }}</p>
+  {% if user.role in ['company_admin', 'superadmin', 'admin'] %}
+  <form method="post" action="/admin/patrol/checkpoint/new" class="stack compact">
+    <input type="hidden" name="tour_id" value="{{ tour.id }}">
+    <div class="row-3"><label>Checkpoint Name<input type="text" name="checkpoint_name" placeholder="Front Gate" required></label><label>QR Identifier (optional)<input type="text" name="qr_code" placeholder="Auto-generated if blank"></label><label>NFC Tag ID (optional)<input type="text" name="nfc_tag_id" placeholder="Auto-generated if blank"></label></div>
+    <div class="row-2"><label>Sort Order<input type="number" name="sort_order" value="{{ checkpoints|length + 1 }}"></label><label>Status<select name="active"><option value="1">Active</option><option value="0">Inactive</option></select></label></div>
+    <button class="btn primary" type="submit">Add Checkpoint</button>
+  </form>
+  {% endif %}
+</section>
+<section class="card">
+  <div class="section-head"><h3>Checkpoint Manager</h3><span>Individual checkpoint cards with QR/NFC tools</span></div>
+  <div class="checkpoint-grid">
+    {% for checkpoint in checkpoints %}
+    <article class="checkpoint-card">
+      <div class="checkpoint-card-head">
+        <div><span class="checkpoint-order">{{ checkpoint.sort_order }}</span> <strong>{{ checkpoint.checkpoint_name }}</strong><div class="small-muted">Checkpoint ID {{ checkpoint.id }}</div></div>
+        <span class="badge {% if checkpoint.active %}completed{% else %}declined{% endif %}">{% if checkpoint.active %}Active{% else %}Inactive{% endif %}</span>
+      </div>
+      <div class="identifier-list">
+        <div><span>QR Code</span><code>{{ checkpoint.qr_code }}</code><button class="btn ghost copy-btn" type="button" data-copy="{{ checkpoint.qr_code }}">Copy QR</button></div>
+        <div><span>NFC Tag</span><code>{{ checkpoint.nfc_tag_id }}</code><button class="btn ghost copy-btn" type="button" data-copy="{{ checkpoint.nfc_tag_id }}">Copy NFC</button></div>
+      </div>
+      <div class="actions">
+        <a class="btn" href="/patrol/checkpoint/qr?id={{ checkpoint.id }}" target="_blank" rel="noopener">View / Print QR</a>
+        {% if user.role in ['company_admin', 'superadmin', 'admin'] %}
+        <form method="post" action="/admin/patrol/checkpoint/generate-qr" class="inline-form"><input type="hidden" name="checkpoint_id" value="{{ checkpoint.id }}"><button class="btn ghost" type="submit">Generate QR</button></form>
+        <form method="post" action="/admin/patrol/checkpoint/delete" class="inline-form" onsubmit="return confirm('Delete this checkpoint? Existing run history remains available.');"><input type="hidden" name="checkpoint_id" value="{{ checkpoint.id }}"><button class="btn danger" type="submit">Delete</button></form>
+        {% endif %}
+      </div>
+      {% if user.role in ['company_admin', 'superadmin', 'admin'] %}
+      <details class="checkpoint-edit"><summary class="btn ghost">Edit checkpoint</summary>
+        <form method="post" action="/admin/patrol/checkpoint/update" class="stack compact">
+          <input type="hidden" name="checkpoint_id" value="{{ checkpoint.id }}">
+          <div class="row-2"><label>Name<input type="text" name="checkpoint_name" value="{{ checkpoint.checkpoint_name }}" required></label><label>Sort Order<input type="number" name="sort_order" value="{{ checkpoint.sort_order }}"></label></div>
+          <div class="row-2"><label>QR Identifier<input type="text" name="qr_code" value="{{ checkpoint.qr_code }}" required></label><label>NFC Tag Identifier<input type="text" name="nfc_tag_id" value="{{ checkpoint.nfc_tag_id }}" required></label></div>
+          <label>Status<select name="active"><option value="1" {% if checkpoint.active %}selected{% endif %}>Active</option><option value="0" {% if not checkpoint.active %}selected{% endif %}>Inactive</option></select></label>
+          <button class="btn primary" type="submit">Edit / Save</button>
+        </form>
+      </details>
+      {% endif %}
+    </article>
+    {% else %}<div class="empty">No checkpoints yet. Add the first checkpoint above.</div>{% endfor %}
+  </div>
+</section>
+<script>
+(function () {
+  document.querySelectorAll('.copy-btn').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var value = button.getAttribute('data-copy') || '';
+      function done() { var old = button.textContent; button.textContent = 'Copied'; setTimeout(function () { button.textContent = old; }, 1200); }
+      if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(value).then(done); }
+      else { var input = document.createElement('input'); input.value = value; document.body.appendChild(input); input.select(); document.execCommand('copy'); input.remove(); done(); }
+    });
+  });
+})();
+</script>
 {% endblock %}'''
 
 REPORTS_HTML = r'''{% extends "app_shell.html" %}
@@ -5939,6 +6015,25 @@ STYLES_CSS += r'''
 .result-grid > div { padding: 12px; border-radius: 14px; border: 1px solid var(--line); background: rgba(255,255,255,.03); display: grid; gap: 4px; }
 .result-grid strong { font-size: 1.2rem; }
 .result-list { margin: 12px 0 0; padding-left: 18px; display: grid; gap: 6px; }
+.row-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.btn.danger { background: rgba(239,68,68,.14); border-color: rgba(239,68,68,.35); color: #fecaca; }
+.checkpoint-grid { display: grid; gap: 14px; }
+.checkpoint-card { border: 1px solid var(--line); border-radius: 18px; padding: 14px; background: rgba(255,255,255,.03); display: grid; gap: 12px; }
+.checkpoint-card.done { border-color: rgba(34,197,94,.4); background: rgba(34,197,94,.07); }
+.checkpoint-card.missed { border-color: rgba(239,68,68,.45); background: rgba(239,68,68,.08); }
+.checkpoint-card-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.checkpoint-order { display: inline-grid; place-items: center; min-width: 30px; height: 30px; border-radius: 999px; background: rgba(78,164,255,.18); color: #bfdbfe; font-weight: 800; margin-right: 8px; }
+.identifier-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.identifier-list > div { border: 1px solid rgba(255,255,255,.08); border-radius: 14px; padding: 10px; background: rgba(6,10,18,.25); display: grid; gap: 8px; }
+.identifier-list span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+.identifier-list code { white-space: normal; word-break: break-all; }
+.scan-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: start; }
+.checkpoint-edit { border-top: 1px solid rgba(255,255,255,.08); padding-top: 12px; }
+.checkpoint-edit summary { cursor: pointer; width: fit-content; margin-bottom: 10px; list-style: none; }
+.checkpoint-edit summary::-webkit-details-marker { display: none; }
+.qr-print-layout { display: grid; grid-template-columns: 280px 1fr; gap: 20px; align-items: center; margin: 18px 0; }
+.qr-print-image { width: 260px; height: 260px; padding: 12px; border-radius: 18px; background: #fff; }
+@media (max-width: 900px) { .row-4, .identifier-list, .scan-actions, .qr-print-layout { grid-template-columns: 1fr; } }
 '''
 
 
@@ -5969,7 +6064,7 @@ def reset_admin_password_once(conn):
 
 def ensure_assets():
     env.cache.clear()
-    templates = {'layout.html': LAYOUT_HTML, 'app_shell.html': APP_SHELL_HTML, 'login.html': LOGIN_HTML, 'dashboard.html': DASHBOARD_HTML, 'schedule.html': SCHEDULE_HTML, 'guards.html': GUARDS_HTML, 'reports.html': REPORTS_HTML, 'payroll.html': PAYROLL_HTML, 'profile.html': PROFILE_HTML, 'admin_paystub_upload.html': ADMIN_PAYSTUB_UPLOAD_HTML, 'guard_paystubs.html': GUARD_PAYSTUBS_HTML,
+    templates = {'layout.html': LAYOUT_HTML, 'app_shell.html': APP_SHELL_HTML, 'login.html': LOGIN_HTML, 'dashboard.html': DASHBOARD_HTML, 'schedule.html': SCHEDULE_HTML, 'guards.html': GUARDS_HTML, 'patrol_run.html': PATROL_RUN_HTML, 'patrol_tour.html': PATROL_TOUR_HTML, 'reports.html': REPORTS_HTML, 'payroll.html': PAYROLL_HTML, 'profile.html': PROFILE_HTML, 'admin_paystub_upload.html': ADMIN_PAYSTUB_UPLOAD_HTML, 'guard_paystubs.html': GUARD_PAYSTUBS_HTML,
         'guard_daily_activity_reports.html': GUARD_DAILY_ACTIVITY_REPORTS_HTML,
         'guard_incident_reports.html': GUARD_INCIDENT_REPORTS_HTML,
         'guard_my_reports.html': GUARD_MY_REPORTS_HTML, 'guard_my_report_detail.html': GUARD_MY_REPORT_DETAIL_HTML, 'password_reset_request.html': PASSWORD_RESET_REQUEST_HTML, 'password_reset_form.html': PASSWORD_RESET_FORM_HTML, 'guard_login_list.html': GUARD_LOGIN_LIST_HTML, 'guard_login_site_list.html': GUARD_LOGIN_SITE_LIST_HTML, 'guard_login_guard_list.html': GUARD_LOGIN_GUARD_LIST_HTML, 'guard_login_password.html': GUARD_LOGIN_PASSWORD_HTML}
@@ -6032,8 +6127,22 @@ def patrol_token(prefix):
     return f"{prefix}-{secrets.token_urlsafe(10)}"
 
 
-def create_patrol_checkpoint(conn, company_id, tour_id, site_id, checkpoint_name, sort_order):
-    return insert_and_get_id(conn, '''INSERT INTO patrol_tour_checkpoints (company_id, tour_id, site_id, checkpoint_name, sort_order, qr_code, nfc_tag_id, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)''', (company_id, tour_id, site_id, checkpoint_name.strip(), sort_order, patrol_token('QR'), patrol_token('NFC'), utc_now_str()))
+def create_patrol_checkpoint(conn, company_id, tour_id, site_id, checkpoint_name, sort_order, qr_code=None, nfc_tag_id=None, active=1):
+    return insert_and_get_id(
+        conn,
+        '''INSERT INTO patrol_tour_checkpoints (company_id, tour_id, site_id, checkpoint_name, sort_order, qr_code, nfc_tag_id, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        (
+            company_id,
+            tour_id,
+            site_id,
+            (checkpoint_name or 'Checkpoint').strip(),
+            sort_order,
+            (qr_code or '').strip() or patrol_token('QR'),
+            (nfc_tag_id or '').strip() or patrol_token('NFC'),
+            1 if str(active) == '1' else 0,
+            utc_now_str(),
+        ),
+    )
 
 
 def patrol_dashboard_data(conn, user):
@@ -6650,6 +6759,25 @@ def application(environ, start_response):
             else:
                 client_id = None
         conn.execute('INSERT INTO sites (company_id, client_id, name, client_company_name, address, notes, active) VALUES (?, ?, ?, ?, ?, ?, 1)', (user['company_id'], client_id, data.get('name'), client_name, data.get('address'), data.get('notes'))); conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='site', target_id=data.get('name'), message='site created', environ=environ); return redirect(start_response, '/dashboard')
+    if path == '/patrol/checkpoint/qr' and method == 'GET':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        conn = db(); company_id = get_company_scope_id(user)
+        checkpoint = conn.execute('''SELECT pc.*, pt.name AS tour_name, s.name AS site_name FROM patrol_tour_checkpoints pc JOIN patrol_tours pt ON pt.id=pc.tour_id JOIN sites s ON s.id=pc.site_id WHERE pc.id=? AND pc.company_id=?''', (query.get('id'), company_id)).fetchone()
+        if not checkpoint: conn.close(); return not_found(start_response)
+        allowed = user['role'] in {'superadmin', 'company_admin', 'admin', 'client'} or (user['role'] == 'guard' and user['company_id'] == checkpoint['company_id']) or supervisor_can_access_site(conn, user, checkpoint['site_id'])
+        conn.close()
+        if not allowed: return redirect_with_feedback(start_response, '/dashboard', error='You do not have permission to view that checkpoint QR code.')
+        qr_value = urllib.parse.quote(checkpoint['qr_code'])
+        checkpoint_name = html.escape(str(checkpoint['checkpoint_name']))
+        site_name = html.escape(str(checkpoint['site_name']))
+        tour_name = html.escape(str(checkpoint['tour_name']))
+        qr_code = html.escape(str(checkpoint['qr_code']))
+        nfc_tag_id = html.escape(str(checkpoint['nfc_tag_id']))
+        sort_order = html.escape(str(checkpoint['sort_order']))
+        status_label = 'Active' if checkpoint['active'] else 'Inactive'
+        body = f'''<!doctype html><html><head><meta charset="utf-8"><title>Checkpoint QR</title><link rel="stylesheet" href="/static/styles.css"><style>@media print {{ .no-print {{ display:none }} body {{ background:#fff; color:#111 }} .print-card {{ box-shadow:none; border-color:#111 }} }}</style></head><body class="simple-shell"><main class="narrow-shell"><section class="card print-card"><div class="section-head"><div><h1>{checkpoint_name}</h1><div class="small-muted">{site_name} · {tour_name}</div></div><button class="btn primary no-print" onclick="window.print()">Print QR</button></div><div class="qr-print-layout"><img class="qr-print-image" alt="QR for {checkpoint_name}" src="https://api.qrserver.com/v1/create-qr-code/?size=260x260&data={qr_value}"><div class="stack compact"><div><strong>QR Identifier</strong><br><code>{qr_code}</code></div><div><strong>NFC Identifier</strong><br><code>{nfc_tag_id}</code></div><div><strong>Sort Order</strong><br>{sort_order}</div><div><strong>Status</strong><br>{status_label}</div></div></div><div class="small-muted">If the QR image does not load, print the QR identifier text and use manual entry during testing.</div></section></main></body></html>'''.encode('utf-8')
+        return html_response(start_response, body, extra_headers=csrf_headers(environ))
     if path == '/admin/patrol/tour/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
@@ -6669,12 +6797,53 @@ def application(environ, start_response):
         if response: return response
         if user['role'] not in {'superadmin', 'company_admin', 'admin'}:
             return redirect_with_feedback(start_response, '/dashboard', error='Only admins can edit patrol tours.')
-        data, _ = parse_post(environ); conn = db()
-        tour = conn.execute('SELECT * FROM patrol_tours WHERE id=? AND company_id=?', (data.get('tour_id'), user['company_id'])).fetchone()
+        data, _ = parse_post(environ); conn = db(); company_id = get_company_scope_id(user)
+        tour = conn.execute('SELECT * FROM patrol_tours WHERE id=? AND company_id=?', (data.get('tour_id'), company_id)).fetchone()
         if not tour: conn.close(); return bad_request(start_response, 'Tour not found')
-        create_patrol_checkpoint(conn, user['company_id'], tour['id'], tour['site_id'], data.get('checkpoint_name') or 'Checkpoint', int(data.get('sort_order') or 0))
-        conn.execute('UPDATE patrol_tours SET updated_at=? WHERE id=?', (utc_now_str(), tour['id'])); conn.commit(); conn.close()
-        return redirect_with_feedback(start_response, f'/patrol/tour?id={tour["id"]}', message='Checkpoint added.')
+        try:
+            create_patrol_checkpoint(conn, company_id, tour['id'], tour['site_id'], data.get('checkpoint_name') or 'Checkpoint', int(data.get('sort_order') or 0), data.get('qr_code'), data.get('nfc_tag_id'), data.get('active', '1'))
+            conn.execute('UPDATE patrol_tours SET updated_at=? WHERE id=?', (utc_now_str(), tour['id'])); conn.commit(); message = 'Checkpoint added.'
+        except Exception as exc:
+            conn.rollback(); conn.close(); return redirect_with_feedback(start_response, f'/patrol/tour?id={tour["id"]}', error=f'Checkpoint could not be saved: {exc}')
+        conn.close()
+        return redirect_with_feedback(start_response, f'/patrol/tour?id={tour["id"]}', message=message)
+    if path == '/admin/patrol/checkpoint/update' and method == 'POST':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        if user['role'] not in {'superadmin', 'company_admin', 'admin'}:
+            return redirect_with_feedback(start_response, '/dashboard', error='Only admins can edit patrol tours.')
+        data, _ = parse_post(environ); conn = db(); company_id = get_company_scope_id(user)
+        checkpoint = conn.execute('SELECT * FROM patrol_tour_checkpoints WHERE id=? AND company_id=?', (data.get('checkpoint_id'), company_id)).fetchone()
+        if not checkpoint: conn.close(); return bad_request(start_response, 'Checkpoint not found')
+        try:
+            conn.execute('''UPDATE patrol_tour_checkpoints SET checkpoint_name=?, sort_order=?, qr_code=?, nfc_tag_id=?, active=? WHERE id=? AND company_id=?''', ((data.get('checkpoint_name') or 'Checkpoint').strip(), int(data.get('sort_order') or 0), (data.get('qr_code') or checkpoint['qr_code']).strip(), (data.get('nfc_tag_id') or checkpoint['nfc_tag_id']).strip(), 1 if data.get('active') == '1' else 0, checkpoint['id'], company_id))
+            conn.execute('UPDATE patrol_tours SET updated_at=? WHERE id=?', (utc_now_str(), checkpoint['tour_id'])); conn.commit()
+        except Exception as exc:
+            conn.rollback(); conn.close(); return redirect_with_feedback(start_response, f'/patrol/tour?id={checkpoint["tour_id"]}', error=f'Checkpoint could not be updated: {exc}')
+        conn.close(); return redirect_with_feedback(start_response, f'/patrol/tour?id={checkpoint["tour_id"]}', message='Checkpoint updated.')
+    if path == '/admin/patrol/checkpoint/delete' and method == 'POST':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        if user['role'] not in {'superadmin', 'company_admin', 'admin'}:
+            return redirect_with_feedback(start_response, '/dashboard', error='Only admins can delete patrol checkpoints.')
+        data, _ = parse_post(environ); conn = db(); company_id = get_company_scope_id(user)
+        checkpoint = conn.execute('SELECT * FROM patrol_tour_checkpoints WHERE id=? AND company_id=?', (data.get('checkpoint_id'), company_id)).fetchone()
+        if not checkpoint: conn.close(); return bad_request(start_response, 'Checkpoint not found')
+        conn.execute('UPDATE patrol_tour_checkpoints SET active=0 WHERE id=? AND company_id=?', (checkpoint['id'], company_id))
+        conn.execute('UPDATE patrol_tours SET updated_at=? WHERE id=?', (utc_now_str(), checkpoint['tour_id'])); conn.commit(); conn.close()
+        return redirect_with_feedback(start_response, f'/patrol/tour?id={checkpoint["tour_id"]}', message='Checkpoint marked inactive.')
+    if path == '/admin/patrol/checkpoint/generate-qr' and method == 'POST':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        if user['role'] not in {'superadmin', 'company_admin', 'admin'}:
+            return redirect_with_feedback(start_response, '/dashboard', error='Only admins can generate checkpoint QR identifiers.')
+        data, _ = parse_post(environ); conn = db(); company_id = get_company_scope_id(user)
+        checkpoint = conn.execute('SELECT * FROM patrol_tour_checkpoints WHERE id=? AND company_id=?', (data.get('checkpoint_id'), company_id)).fetchone()
+        if not checkpoint: conn.close(); return bad_request(start_response, 'Checkpoint not found')
+        new_qr = patrol_token('QR')
+        conn.execute('UPDATE patrol_tour_checkpoints SET qr_code=? WHERE id=? AND company_id=?', (new_qr, checkpoint['id'], company_id))
+        conn.execute('UPDATE patrol_tours SET updated_at=? WHERE id=?', (utc_now_str(), checkpoint['tour_id'])); conn.commit(); conn.close()
+        return redirect_with_feedback(start_response, f'/patrol/tour?id={checkpoint["tour_id"]}', message='QR identifier generated.')
     if path == '/patrol/start' and method == 'POST':
         user, response = require_login(environ, start_response)
         if response: return response
@@ -6689,13 +6858,13 @@ def application(environ, start_response):
         if response: return response
         if user['role'] != 'guard': return redirect_with_feedback(start_response, '/dashboard', error='Only guards can scan patrol checkpoints.')
         data, _ = parse_post(environ); method_value = (data.get('scan_method') or '').strip().upper()
-        if method_value not in {'QR', 'NFC'}: return bad_request(start_response, 'Scan method must be QR or NFC')
+        if method_value not in {'QR', 'NFC', 'MANUAL'}: return bad_request(start_response, 'Scan method must be QR, NFC, or MANUAL')
         conn = db(); run = conn.execute("SELECT * FROM patrol_tour_runs WHERE id=? AND company_id=? AND guard_id=? AND status='in_progress'", (data.get('run_id'), user['company_id'], user['id'])).fetchone()
         if not run: conn.close(); return bad_request(start_response, 'Active patrol run not found')
         checkpoint = conn.execute('SELECT * FROM patrol_tour_checkpoints WHERE id=? AND company_id=? AND tour_id=? AND active=1', (data.get('checkpoint_id'), user['company_id'], run['tour_id'])).fetchone()
         if not checkpoint: conn.close(); return bad_request(start_response, 'Checkpoint not found')
         expected = checkpoint['qr_code'] if method_value == 'QR' else checkpoint['nfc_tag_id']
-        if (data.get('scan_value') or '').strip() != expected:
+        if method_value != 'MANUAL' and (data.get('scan_value') or '').strip() != expected:
             conn.close(); return redirect_with_feedback(start_response, f'/patrol/run?id={run["id"]}', error='Scanned QR/NFC value does not match this checkpoint.')
         existing = conn.execute('SELECT id FROM patrol_checkpoint_scans WHERE tour_run_id=? AND checkpoint_id=?', (run['id'], checkpoint['id'])).fetchone()
         if not existing:
@@ -6729,7 +6898,7 @@ def application(environ, start_response):
         tour = conn.execute('''SELECT pt.*, s.name AS site_name, COUNT(pc.id) AS checkpoint_count FROM patrol_tours pt JOIN sites s ON s.id=pt.site_id LEFT JOIN patrol_tour_checkpoints pc ON pc.tour_id=pt.id AND pc.active=1 WHERE pt.company_id=? AND pt.id=? GROUP BY pt.id, s.name''', (company_id, query.get('id'))).fetchone()
         if not tour: conn.close(); return not_found(start_response)
         allowed = user['role'] in {'superadmin', 'company_admin', 'admin'} or supervisor_can_access_site(conn, user, tour['site_id'])
-        checkpoints = conn.execute('SELECT * FROM patrol_tour_checkpoints WHERE company_id=? AND tour_id=? AND active=1 ORDER BY sort_order, id', (company_id, tour['id'])).fetchall(); conn.close()
+        checkpoints = conn.execute('SELECT * FROM patrol_tour_checkpoints WHERE company_id=? AND tour_id=? ORDER BY sort_order, id', (company_id, tour['id'])).fetchall(); conn.close()
         if not allowed: return redirect_with_feedback(start_response, '/dashboard', error='You do not have permission to view that patrol tour.')
         return html_response(start_response, render_page(environ, 'patrol_tour.html', title='Patrol Tour', user=user, tour=tour, checkpoints=checkpoints, **get_dashboard_context(user)), extra_headers=csrf_headers(environ))
     if path == '/admin/shift/new' and method == 'POST':
