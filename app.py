@@ -12,6 +12,7 @@ import sqlite3
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from base64 import b64encode
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlencode
@@ -3566,8 +3567,100 @@ APP_SHELL_HTML = r'''{% extends "layout.html" %}
     </section>
     {% if flash_message %}<div class="alert success">{{ flash_message }}</div>{% endif %}
     {% if flash_error %}<div class="alert error">{{ flash_error }}</div>{% endif %}
+    {% if user.role == 'guard' %}<div id="offline-sync-status" class="offline-sync-status" aria-live="polite">Sync status loading…</div>{% endif %}
 
     {% block page_content %}{% endblock %}
+  {% if user.role == 'guard' %}
+  <script>
+  (function () {
+    var key = 'steeleopsOfflineQueue:v1';
+    var statusEl = document.getElementById('offline-sync-status');
+    function loadQueue() { try { return JSON.parse(localStorage.getItem(key) || '[]'); } catch (err) { return []; } }
+    function saveQueue(queue) { localStorage.setItem(key, JSON.stringify(queue)); updateStatus(); }
+    function makeUuid() { return (crypto && crypto.randomUUID) ? crypto.randomUUID() : 'local-' + Date.now() + '-' + Math.random().toString(16).slice(2); }
+    function nowIso() { return new Date().toISOString(); }
+    function updateStatus(message) {
+      if (!statusEl) return;
+      var pending = loadQueue().filter(function (item) { return item.status !== 'synced'; }).length;
+      var online = navigator.onLine;
+      statusEl.className = 'offline-sync-status ' + (pending ? 'pending' : 'synced') + (online ? ' online' : ' offline');
+      statusEl.textContent = message || (pending ? ('Pending Sync: ' + pending + ' item' + (pending === 1 ? '' : 's') + (online ? ' · syncing automatically' : ' · offline')) : (online ? 'All records synced' : 'Offline · new records will be saved locally'));
+    }
+    function fileToDataUrl(file) { return new Promise(function (resolve, reject) { var reader = new FileReader(); reader.onload = function () { resolve({ name: file.name, type: file.type, size: file.size, data_url: reader.result }); }; reader.onerror = reject; reader.readAsDataURL(file); }); }
+    function formDataObject(form) {
+      var data = {};
+      Array.prototype.forEach.call(new FormData(form).entries(), function (entry) {
+        if (entry[1] instanceof File) return;
+        data[entry[0]] = entry[1];
+      });
+      return data;
+    }
+    function ensureHidden(form, name, value) {
+      var input = form.querySelector('input[name="' + name + '"]');
+      if (!input) { input = document.createElement('input'); input.type = 'hidden'; input.name = name; form.appendChild(input); }
+      input.value = value;
+      return value;
+    }
+    async function queueForm(form) {
+      var uuidInput = form.querySelector('input[name="local_uuid"]');
+      var tsInput = form.querySelector('input[name="device_timestamp"]');
+      var localUuid = ensureHidden(form, 'local_uuid', (uuidInput && uuidInput.value) || makeUuid());
+      var deviceTimestamp = ensureHidden(form, 'device_timestamp', (tsInput && tsInput.value) || nowIso());
+      var data = formDataObject(form);
+      data.local_uuid = localUuid;
+      data.device_timestamp = deviceTimestamp;
+      var fileField = form.dataset.offlineFileField;
+      var attachments = [];
+      if (fileField) {
+        var inputs = form.querySelectorAll('input[type="file"][name="' + fileField + '"]');
+        for (var i = 0; i < inputs.length; i++) {
+          for (var j = 0; j < inputs[i].files.length; j++) attachments.push(await fileToDataUrl(inputs[i].files[j]));
+        }
+      }
+      var queue = loadQueue();
+      queue.push({ kind: form.dataset.offlineKind, local_uuid: localUuid, device_timestamp: deviceTimestamp, data: data, attachments: attachments, status: 'pending' });
+      saveQueue(queue);
+      form.reset();
+      updateStatus('Pending Sync: saved locally and will auto-sync when internet returns.');
+    }
+    async function syncQueue() {
+      var queue = loadQueue().filter(function (item) { return item.status !== 'synced'; });
+      if (!navigator.onLine || !queue.length) { updateStatus(); return; }
+      updateStatus('Pending Sync: syncing ' + queue.length + ' item' + (queue.length === 1 ? '' : 's') + '…');
+      try {
+        var response = await fetch('/api/offline-sync', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ records: queue }) });
+        if (!response.ok) throw new Error('Sync failed with HTTP ' + response.status);
+        var payload = await response.json();
+        var results = payload.results || [];
+        var remaining = queue.filter(function (record) {
+          var result = results.find(function (item) { return item.local_uuid === record.local_uuid; });
+          return !result || result.status === 'error';
+        });
+        saveQueue(remaining);
+        updateStatus(remaining.length ? 'Pending Sync: some items need another retry.' : 'All records synced');
+      } catch (err) {
+        updateStatus('Pending Sync: retrying when internet returns.');
+      }
+    }
+    document.addEventListener('submit', function (event) {
+      var form = event.target.closest && event.target.closest('form.offline-queue-form');
+      if (!form) return;
+      var uuidInput = form.querySelector('input[name="local_uuid"]');
+      var tsInput = form.querySelector('input[name="device_timestamp"]');
+      ensureHidden(form, 'local_uuid', (uuidInput && uuidInput.value) || makeUuid());
+      ensureHidden(form, 'device_timestamp', (tsInput && tsInput.value) || nowIso());
+      if (!navigator.onLine) {
+        event.preventDefault();
+        queueForm(form);
+      }
+    }, true);
+    window.addEventListener('online', syncQueue);
+    window.addEventListener('offline', updateStatus);
+    updateStatus();
+    if (navigator.onLine) syncQueue();
+  }());
+  </script>
+  {% endif %}
   </main>
 </div>
 {% endblock %}'''
@@ -4118,9 +4211,9 @@ PATROL_RUN_HTML = r'''{% extends "app_shell.html" %}
       {% if checkpoint.scanned_at %}<div class="small-muted">{{ checkpoint.scan_method }} completed at {{ checkpoint.scanned_at }}{% if checkpoint.gps_latitude or checkpoint.gps_longitude %} · GPS {{ checkpoint.gps_latitude }}, {{ checkpoint.gps_longitude }}{% endif %}</div>{% endif %}
       {% if user.role == 'guard' and run.status == 'in_progress' and not checkpoint.scanned_at %}
       <div class="scan-actions">
-        <form method="post" action="/patrol/scan" class="stack compact"><input type="hidden" name="run_id" value="{{ run.id }}"><input type="hidden" name="checkpoint_id" value="{{ checkpoint.id }}"><input type="hidden" name="scan_method" value="QR"><label>QR Identifier<input type="text" name="scan_value" placeholder="Scan or enter QR value" required></label><div class="row-2"><label>GPS Lat<input type="text" name="gps_latitude"></label><label>GPS Lng<input type="text" name="gps_longitude"></label></div><button class="btn primary" type="submit">Scan QR</button></form>
-        <form method="post" action="/patrol/scan" class="stack compact"><input type="hidden" name="run_id" value="{{ run.id }}"><input type="hidden" name="checkpoint_id" value="{{ checkpoint.id }}"><input type="hidden" name="scan_method" value="NFC"><label>NFC Identifier<input type="text" name="scan_value" placeholder="Tap or enter NFC value" required></label><button class="btn" type="submit">Tap/Enter NFC</button></form>
-        <form method="post" action="/patrol/scan" class="stack compact"><input type="hidden" name="run_id" value="{{ run.id }}"><input type="hidden" name="checkpoint_id" value="{{ checkpoint.id }}"><input type="hidden" name="scan_method" value="MANUAL"><label>Manual Note<input type="text" name="scan_value" placeholder="Testing fallback note"></label><button class="btn ghost" type="submit">Manual Entry Fallback</button></form>
+        <form method="post" action="/patrol/scan" class="stack compact offline-queue-form" data-offline-kind="patrol_scan"><input type="hidden" name="run_id" value="{{ run.id }}"><input type="hidden" name="checkpoint_id" value="{{ checkpoint.id }}"><input type="hidden" name="scan_method" value="QR"><label>QR Identifier<input type="text" name="scan_value" placeholder="Scan or enter QR value" required></label><div class="row-2"><label>GPS Lat<input type="text" name="gps_latitude"></label><label>GPS Lng<input type="text" name="gps_longitude"></label></div><button class="btn primary" type="submit">Scan QR</button></form>
+        <form method="post" action="/patrol/scan" class="stack compact offline-queue-form" data-offline-kind="patrol_scan"><input type="hidden" name="run_id" value="{{ run.id }}"><input type="hidden" name="checkpoint_id" value="{{ checkpoint.id }}"><input type="hidden" name="scan_method" value="NFC"><label>NFC Identifier<input type="text" name="scan_value" placeholder="Tap or enter NFC value" required></label><button class="btn" type="submit">Tap/Enter NFC</button></form>
+        <form method="post" action="/patrol/scan" class="stack compact offline-queue-form" data-offline-kind="patrol_scan"><input type="hidden" name="run_id" value="{{ run.id }}"><input type="hidden" name="checkpoint_id" value="{{ checkpoint.id }}"><input type="hidden" name="scan_method" value="MANUAL"><label>Manual Note<input type="text" name="scan_value" placeholder="Testing fallback note"></label><button class="btn ghost" type="submit">Manual Entry Fallback</button></form>
       </div>
       {% endif %}
     </article>
@@ -4300,7 +4393,7 @@ GUARD_DAILY_ACTIVITY_REPORTS_HTML = r'''{% extends "app_shell.html" %}
 <section class="grid two-col">
   <div class="card">
     <div class="section-head"><h3>Daily Activity Report</h3><span>Submit daily guard activity</span></div>
-    <form method="post" action="/guard/daily-activity-reports/new" enctype="multipart/form-data" class="stack">
+    <form method="post" action="/guard/daily-activity-reports/new" enctype="multipart/form-data" class="stack offline-queue-form" data-offline-kind="daily_activity" data-offline-file-field="photo">
       {{ csrf_input|safe }}
       <div class="row-2"><label>Officer<input type="text" value="{{ user.full_name }}" readonly></label><label>Assigned Site<input type="text" value="{{ assigned_site.name if assigned_site else 'Unassigned' }}" readonly></label></div>
       <div class="row-2"><label>Report Timestamp<input type="text" value="{{ server_now }}" readonly></label><label>Activity Type<select name="activity_type" required><option>Patrol</option><option>Gate Check</option><option>Visitor Log</option><option>Truck Entry</option><option>Parking Patrol</option><option>Perimeter Check</option><option>General Activity</option></select></label></div>
@@ -4312,7 +4405,7 @@ GUARD_DAILY_ACTIVITY_REPORTS_HTML = r'''{% extends "app_shell.html" %}
   </div>
   <div class="card">
     <div class="section-head"><h3>Recent Daily Activity Reports</h3><span>Your latest submissions</span></div>
-    {% for report in dar_reports %}<div class="report-card"><div class="report-top"><strong>{{ report.activity_type }}</strong><span class="badge {{ report.status }}">{{ report.status }}</span></div><div class="small-muted">{{ report.site_name }} · {{ report.created_at }}</div><p>{{ report.summary }}</p>{% if report.photo_path %}<img class="report-photo" src="/{{ report.photo_path }}" alt="DAR photo">{% endif %}</div>{% else %}<div class="empty">No daily activity reports yet.</div>{% endfor %}
+    {% for report in dar_reports %}<div class="report-card"><div class="report-top"><strong>{{ report.activity_type }}</strong><span class="badge {{ report.status }}">{{ report.status }}</span>{% if report.offline_submitted %}<span class="badge pending">Offline Submitted</span>{% endif %}{% if report.synced_at %}<span class="badge completed">Synced</span>{% endif %}</div><div class="small-muted">{{ report.site_name }} · {{ report.created_at }}</div><p>{{ report.summary }}</p>{% if report.photo_path %}<img class="report-photo" src="/{{ report.photo_path }}" alt="DAR photo">{% endif %}</div>{% else %}<div class="empty">No daily activity reports yet.</div>{% endfor %}
   </div>
 </section>
 {% endblock %}'''
@@ -4382,7 +4475,7 @@ GUARD_INCIDENT_REPORTS_HTML = r'''{% extends "app_shell.html" %}
 <section class="grid two-col">
   <div class="card">
     <div class="section-head"><h3>Incident Report</h3><span>Submit security incidents separately from DAR submissions</span></div>
-    <form method="post" action="/guard/incident-reports/new" enctype="multipart/form-data" class="stack">
+    <form method="post" action="/guard/incident-reports/new" enctype="multipart/form-data" class="stack offline-queue-form" data-offline-kind="incident" data-offline-file-field="attachment">
       {{ csrf_input|safe }}
       <div class="row-2"><label>Officer<input type="text" value="{{ user.full_name }}" readonly></label><label>Assigned Site<input type="text" value="{{ assigned_site.name if assigned_site else 'Unassigned' }}" readonly></label></div>
       <div class="row-2"><label>Report Timestamp<input type="text" value="{{ server_now }}" readonly></label><label>Status<input type="text" value="Open" readonly></label></div>
@@ -4399,7 +4492,7 @@ GUARD_INCIDENT_REPORTS_HTML = r'''{% extends "app_shell.html" %}
   </div>
   <div class="card">
     <div class="section-head"><h3>Recent Incident Reports</h3><span>Your latest incident submissions</span></div>
-    {% for report in incident_reports %}<div class="report-card"><div class="report-top"><strong>{{ report.incident_type }}</strong><span class="badge">{{ report.priority }}</span><span class="badge {{ report.status|lower }}">{{ report.status }}</span></div><div class="small-muted">{{ report.site_name }} · {{ report.created_at }}</div><p>{{ report.narrative }}</p></div>{% else %}<div class="empty">No incident reports yet.</div>{% endfor %}
+    {% for report in incident_reports %}<div class="report-card"><div class="report-top"><strong>{{ report.incident_type }}</strong><span class="badge">{{ report.priority }}</span><span class="badge {{ report.status|lower }}">{{ report.status }}</span>{% if report.offline_submitted %}<span class="badge pending">Offline Submitted</span>{% endif %}{% if report.synced_at %}<span class="badge completed">Synced</span>{% endif %}</div><div class="small-muted">{{ report.site_name }} · {{ report.created_at }}</div><p>{{ report.narrative }}</p></div>{% else %}<div class="empty">No incident reports yet.</div>{% endfor %}
   </div>
 </section>
 {% endblock %}'''
@@ -5765,6 +5858,16 @@ def init_db():
         ''')
     if table_exists(conn, 'reports'):
         ensure_column(conn, 'reports', 'updated_at TEXT')
+    offline_cols = ['local_uuid TEXT', 'device_timestamp TEXT', 'synced_at TEXT', 'offline_submitted INTEGER DEFAULT 0']
+    if table_exists(conn, 'daily_activity_reports'):
+        for col in offline_cols:
+            ensure_column(conn, 'daily_activity_reports', col)
+    if table_exists(conn, 'incident_reports'):
+        for col in offline_cols:
+            ensure_column(conn, 'incident_reports', col)
+    if table_exists(conn, 'patrol_checkpoint_scans'):
+        for col in offline_cols:
+            ensure_column(conn, 'patrol_checkpoint_scans', col)
     if table_exists(conn, 'sites'):
         ensure_column(conn, 'sites', 'client_id INTEGER')
     if table_exists(conn, 'payroll_guard_records'):
@@ -6035,6 +6138,10 @@ STYLES_CSS += r'''
 .pin-input { text-align: center; letter-spacing: .65em; font-size: 1.5rem; font-weight: 700; padding-left: 1.1em; }
 .fallback-card { margin-top: 14px; padding: 14px 16px; }
 .fallback-card summary { cursor: pointer; font-weight: 600; }
+.offline-sync-status{position:sticky;top:10px;z-index:20;margin:0 0 14px;padding:10px 14px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(15,23,42,.92);color:#e5e7eb;font-weight:700;box-shadow:0 12px 30px rgba(0,0,0,.18)}
+.offline-sync-status.synced{border-color:rgba(34,197,94,.45);color:#bbf7d0}
+.offline-sync-status.pending{border-color:rgba(250,204,21,.5);color:#fde68a}
+.offline-sync-status.offline{border-color:rgba(248,113,113,.55);color:#fecaca}
 .top-gap { margin-top: 12px; }
 .subtle-card { background: rgba(255,255,255,.02); border: 1px solid var(--line); border-radius: 18px; }
 .admin-action-card .section-head { align-items: flex-start; }
@@ -6150,6 +6257,102 @@ def insert_and_get_id(conn, insert_sql, params=()):
     return row['id'] if row else None
 
 
+
+def row_value(row, key, default=None):
+    if not row:
+        return default
+    try:
+        return row[key]
+    except Exception:
+        return row.get(key, default) if hasattr(row, 'get') else default
+
+
+def guard_assignment_id(user):
+    return row_value(user, 'guard_id')
+
+
+def local_submission_uuid(value):
+    cleaned = (value or '').strip()
+    if cleaned:
+        cleaned = re.sub(r'[^A-Za-z0-9_.:-]', '', cleaned)[:80]
+    return cleaned or str(uuid.uuid4())
+
+
+def first_existing_by_local_uuid(conn, table_name, company_id, officer_id, local_uuid):
+    if not local_uuid or not table_exists(conn, table_name) or 'local_uuid' not in column_names(conn, table_name):
+        return None
+    return conn.execute(
+        f'SELECT id FROM {table_name} WHERE company_id=? AND officer_id=? AND local_uuid=?',
+        (company_id, officer_id, local_uuid),
+    ).fetchone()
+
+
+def first_patrol_scan_by_local_uuid(conn, company_id, guard_id, local_uuid):
+    if not local_uuid or not table_exists(conn, 'patrol_checkpoint_scans') or 'local_uuid' not in column_names(conn, 'patrol_checkpoint_scans'):
+        return None
+    return conn.execute(
+        'SELECT id FROM patrol_checkpoint_scans WHERE company_id=? AND guard_id=? AND local_uuid=?',
+        (company_id, guard_id, local_uuid),
+    ).fetchone()
+
+
+def file_info_from_offline_attachment(item):
+    if not isinstance(item, dict):
+        return None
+    data_url = item.get('data_url') or ''
+    if ',' not in data_url:
+        return None
+    _header, encoded = data_url.split(',', 1)
+    try:
+        content = __import__('base64').b64decode(encoded)
+    except Exception:
+        return None
+    return {'filename': os.path.basename(item.get('name') or 'offline-upload.bin'), 'content': content}
+
+
+def make_offline_file_infos(items):
+    return [f for f in (file_info_from_offline_attachment(item) for item in (items or [])) if f]
+
+
+def insert_daily_activity_report(conn, user, assigned_site_id, data, uploads=None, offline_submitted=0):
+    uploads = uploads or []
+    local_uuid = local_submission_uuid(data.get('local_uuid'))
+    existing = first_existing_by_local_uuid(conn, 'daily_activity_reports', user['company_id'], user['id'], local_uuid)
+    if existing:
+        return existing['id'], False
+    now = utc_now_str()
+    device_timestamp = (data.get('device_timestamp') or now).strip()
+    photo_path = None
+    if uploads:
+        _, photo_path = save_upload(uploads[0], 'dar_photos')
+    report_id = insert_and_get_id(conn, '''
+        INSERT INTO daily_activity_reports (company_id, site_id, officer_id, activity_type, summary, photo_path, status, created_at, local_uuid, device_timestamp, synced_at, offline_submitted)
+        VALUES (?, ?, ?, ?, ?, ?, 'submitted', ?, ?, ?, ?, ?)
+    ''', (user['company_id'], assigned_site_id, user['id'], data['activity_type'], data['summary'], photo_path, device_timestamp, local_uuid, device_timestamp, now, 1 if offline_submitted else 0))
+    for upload in uploads:
+        create_report_attachment(conn, user['company_id'], 'daily_activity', report_id, user['id'], upload, 'dar_photos')
+    return report_id, True
+
+
+def insert_incident_report(conn, user, assigned_site_id, data, uploads=None, offline_submitted=0):
+    uploads = uploads or []
+    local_uuid = local_submission_uuid(data.get('local_uuid'))
+    existing = first_existing_by_local_uuid(conn, 'incident_reports', user['company_id'], user['id'], local_uuid)
+    if existing:
+        return existing['id'], False
+    now = utc_now_str()
+    device_timestamp = (data.get('device_timestamp') or now).strip()
+    first_attachment_path = None
+    if uploads:
+        _, first_attachment_path = save_upload(uploads[0], 'incident_attachments')
+    report_id = insert_and_get_id(conn, '''
+        INSERT INTO incident_reports (company_id, site_id, officer_id, incident_type, priority, narrative, persons_involved, witnesses, police_notified, client_notified, attachment_path, status, created_at, local_uuid, device_timestamp, synced_at, offline_submitted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Open', ?, ?, ?, ?, ?)
+    ''', (user['company_id'], assigned_site_id, user['id'], data['incident_type'], data['priority'], data['narrative'], data.get('persons_involved', ''), data.get('witnesses', ''), 1 if data.get('police_notified') else 0, 1 if data.get('client_notified') else 0, first_attachment_path, device_timestamp, local_uuid, device_timestamp, now, 1 if offline_submitted else 0))
+    for upload in uploads:
+        create_report_attachment(conn, user['company_id'], 'incident', report_id, user['id'], upload, 'incident_attachments')
+    return report_id, True
+
 def patrol_token(prefix):
     return f"{prefix}-{secrets.token_urlsafe(10)}"
 
@@ -6214,8 +6417,77 @@ def application(environ, start_response):
         return json_response(start_response, {'status': 'ok', 'service': 'steeleops'})
     if path.startswith('/static/') or path.startswith('/uploads/'):
         return serve_static(environ, start_response, path.lstrip('/'))
+    if path == '/api/offline-sync' and method == 'POST':
+        if not user:
+            return json_response(start_response, {'error': 'Login required'}, status='401 Unauthorized')
+        if user['role'] != 'guard':
+            return json_response(start_response, {'error': 'Only guards can sync offline mobile guard records.'}, status='403 Forbidden')
+        try:
+            size = int(environ.get('CONTENT_LENGTH', '0') or 0)
+        except ValueError:
+            size = 0
+        try:
+            payload = json.loads(environ['wsgi.input'].read(size).decode('utf-8') or '{}')
+        except Exception:
+            return json_response(start_response, {'error': 'Invalid offline sync payload.'}, status='400 Bad Request')
+        records = payload.get('records') or []
+        results = []
+        conn = db()
+        guard_row_id = user['guard_id'] if 'guard_id' in user.keys() else None
+        assigned_site = conn.execute('SELECT site_id FROM guard_site_assignments WHERE company_id=? AND guard_id=? LIMIT 1', (user['company_id'], guard_row_id)).fetchone() if guard_row_id else None
+        for record in records:
+            kind = record.get('kind')
+            data = record.get('data') or {}
+            local_uuid = local_submission_uuid(record.get('local_uuid') or data.get('local_uuid'))
+            data['local_uuid'] = local_uuid
+            data['device_timestamp'] = data.get('device_timestamp') or record.get('device_timestamp') or utc_now_str()
+            try:
+                if kind == 'daily_activity':
+                    if not assigned_site:
+                        raise ValueError('No assigned site found for your account.')
+                    if not data.get('activity_type') or not data.get('summary'):
+                        raise ValueError('Activity type and summary are required.')
+                    report_id, created = insert_daily_activity_report(conn, user, assigned_site['site_id'], data, make_offline_file_infos(record.get('attachments')), offline_submitted=1)
+                    results.append({'local_uuid': local_uuid, 'kind': kind, 'server_id': report_id, 'status': 'synced' if created else 'duplicate'})
+                elif kind == 'incident':
+                    if not assigned_site:
+                        raise ValueError('No assigned site found for your account.')
+                    if not data.get('incident_type') or not data.get('priority') or not data.get('narrative'):
+                        raise ValueError('Incident type, priority, and narrative are required.')
+                    report_id, created = insert_incident_report(conn, user, assigned_site['site_id'], data, make_offline_file_infos(record.get('attachments')), offline_submitted=1)
+                    results.append({'local_uuid': local_uuid, 'kind': kind, 'server_id': report_id, 'status': 'synced' if created else 'duplicate'})
+                elif kind == 'patrol_scan':
+                    method_value = (data.get('scan_method') or '').strip().upper()
+                    if method_value not in {'QR', 'NFC', 'MANUAL'}:
+                        raise ValueError('Scan method must be QR, NFC, or MANUAL')
+                    if first_patrol_scan_by_local_uuid(conn, user['company_id'], user['id'], local_uuid):
+                        results.append({'local_uuid': local_uuid, 'kind': kind, 'status': 'duplicate'})
+                        continue
+                    run = conn.execute("SELECT * FROM patrol_tour_runs WHERE id=? AND company_id=? AND guard_id=? AND status='in_progress'", (data.get('run_id'), user['company_id'], user['id'])).fetchone()
+                    if not run:
+                        raise ValueError('Active patrol run not found')
+                    checkpoint = conn.execute('SELECT * FROM patrol_tour_checkpoints WHERE id=? AND company_id=? AND tour_id=? AND active=1', (data.get('checkpoint_id'), user['company_id'], run['tour_id'])).fetchone()
+                    if not checkpoint:
+                        raise ValueError('Checkpoint not found')
+                    expected = checkpoint['qr_code'] if method_value == 'QR' else checkpoint['nfc_tag_id']
+                    if method_value != 'MANUAL' and (data.get('scan_value') or '').strip() != expected:
+                        raise ValueError('Scanned QR/NFC value does not match this checkpoint.')
+                    existing = conn.execute('SELECT id FROM patrol_checkpoint_scans WHERE tour_run_id=? AND checkpoint_id=?', (run['id'], checkpoint['id'])).fetchone()
+                    if existing:
+                        results.append({'local_uuid': local_uuid, 'kind': kind, 'server_id': existing['id'], 'status': 'duplicate'})
+                        continue
+                    device_timestamp = (data.get('device_timestamp') or utc_now_str()).strip()
+                    conn.execute('''INSERT INTO patrol_checkpoint_scans (company_id, site_id, tour_id, tour_run_id, checkpoint_id, guard_id, scan_method, scanned_at, gps_latitude, gps_longitude, missed_checkpoint, local_uuid, device_timestamp, synced_at, offline_submitted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 1)''', (user['company_id'], run['site_id'], run['tour_id'], run['id'], checkpoint['id'], user['id'], method_value, device_timestamp, data.get('gps_latitude', ''), data.get('gps_longitude', ''), local_uuid, device_timestamp, utc_now_str()))
+                    results.append({'local_uuid': local_uuid, 'kind': kind, 'status': 'synced'})
+                else:
+                    raise ValueError('Unsupported offline record type.')
+            except Exception as exc:
+                results.append({'local_uuid': local_uuid, 'kind': kind, 'status': 'error', 'error': str(exc)})
+        conn.commit()
+        conn.close()
+        return json_response(start_response, {'results': results, 'synced_at': utc_now_str()})
     if method == 'POST':
-        if path not in {'/internal/run-missed-clock-check', '/internal/run-missed-clock-check/'}:
+        if path not in {'/internal/run-missed-clock-check', '/internal/run-missed-clock-check/', '/api/offline-sync'}:
             data, _files = parse_post(environ)
             if not validate_csrf(environ, data):
                 return forbidden(start_response, 'Invalid or missing CSRF token.')
@@ -6907,9 +7179,11 @@ def application(environ, start_response):
         expected = checkpoint['qr_code'] if method_value == 'QR' else checkpoint['nfc_tag_id']
         if method_value != 'MANUAL' and (data.get('scan_value') or '').strip() != expected:
             conn.close(); return redirect_with_feedback(start_response, f'/patrol/run?id={run["id"]}', error='Scanned QR/NFC value does not match this checkpoint.')
-        existing = conn.execute('SELECT id FROM patrol_checkpoint_scans WHERE tour_run_id=? AND checkpoint_id=?', (run['id'], checkpoint['id'])).fetchone()
+        local_uuid = local_submission_uuid(data.get('local_uuid'))
+        existing = first_patrol_scan_by_local_uuid(conn, user['company_id'], user['id'], local_uuid) or conn.execute('SELECT id FROM patrol_checkpoint_scans WHERE tour_run_id=? AND checkpoint_id=?', (run['id'], checkpoint['id'])).fetchone()
         if not existing:
-            conn.execute('''INSERT INTO patrol_checkpoint_scans (company_id, site_id, tour_id, tour_run_id, checkpoint_id, guard_id, scan_method, scanned_at, gps_latitude, gps_longitude, missed_checkpoint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)''', (user['company_id'], run['site_id'], run['tour_id'], run['id'], checkpoint['id'], user['id'], method_value, utc_now_str(), data.get('gps_latitude', ''), data.get('gps_longitude', '')))
+            device_timestamp = (data.get('device_timestamp') or utc_now_str()).strip()
+            conn.execute('''INSERT INTO patrol_checkpoint_scans (company_id, site_id, tour_id, tour_run_id, checkpoint_id, guard_id, scan_method, scanned_at, gps_latitude, gps_longitude, missed_checkpoint, local_uuid, device_timestamp, synced_at, offline_submitted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 0)''', (user['company_id'], run['site_id'], run['tour_id'], run['id'], checkpoint['id'], user['id'], method_value, device_timestamp, data.get('gps_latitude', ''), data.get('gps_longitude', ''), local_uuid, device_timestamp, utc_now_str()))
         conn.commit(); conn.close(); return redirect_with_feedback(start_response, f'/patrol/run?id={run["id"]}', message='Checkpoint scan logged.')
     if path == '/patrol/complete' and method == 'POST':
         user, response = require_login(environ, start_response)
@@ -7145,13 +7419,14 @@ def application(environ, start_response):
             return redirect_with_feedback(start_response, '/dashboard', error='Only guards can access Daily Activity Reports.')
         conn = db()
         assigned_site = None
-        if user.get('guard_id'):
+        guard_row_id = guard_assignment_id(user)
+        if guard_row_id:
             assigned_site = conn.execute('''
                 SELECT s.id, s.name FROM guard_site_assignments gsa
                 JOIN sites s ON s.id=gsa.site_id
                 WHERE gsa.company_id=? AND gsa.guard_id=?
                 LIMIT 1
-            ''', (user['company_id'], user['guard_id'])).fetchone()
+            ''', (user['company_id'], guard_row_id)).fetchone()
         dar_reports = conn.execute('''
             SELECT d.*, s.name as site_name FROM daily_activity_reports d
             JOIN sites s ON d.site_id=s.id
@@ -7169,20 +7444,13 @@ def application(environ, start_response):
         if not data.get('activity_type') or not data.get('summary'):
             return bad_request(start_response, 'Activity type and summary are required.')
         conn = db()
-        assigned_site = conn.execute('SELECT site_id FROM guard_site_assignments WHERE company_id=? AND guard_id=? LIMIT 1', (user['company_id'], user.get('guard_id'))).fetchone() if user.get('guard_id') else None
+        guard_row_id = guard_assignment_id(user)
+        assigned_site = conn.execute('SELECT site_id FROM guard_site_assignments WHERE company_id=? AND guard_id=? LIMIT 1', (user['company_id'], guard_row_id)).fetchone() if guard_row_id else None
         if not assigned_site:
             conn.close()
             return redirect_with_feedback(start_response, '/guard/daily-activity-reports', error='No assigned site found for your account.')
         dar_files = collect_attachments(files, 'photo')
-        photo_path = None
-        if dar_files:
-            _, photo_path = save_upload(dar_files[0], 'dar_photos')
-        report_id = insert_and_get_id(conn, '''
-            INSERT INTO daily_activity_reports (company_id, site_id, officer_id, activity_type, summary, photo_path, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'submitted', ?)
-        ''', (user['company_id'], assigned_site['site_id'], user['id'], data['activity_type'], data['summary'], photo_path, utc_now_str()))
-        for upload in dar_files:
-            create_report_attachment(conn, user['company_id'], 'daily_activity', report_id, user['id'], upload, 'dar_photos')
+        insert_daily_activity_report(conn, user, assigned_site['site_id'], data, dar_files, offline_submitted=0)
         conn.commit()
         conn.close()
         return redirect_with_feedback(start_response, '/guard/daily-activity-reports', message='Daily activity report submitted.')
@@ -7284,7 +7552,8 @@ def application(environ, start_response):
         if user['role'] != 'guard':
             return redirect(start_response, '/dashboard')
         conn = db()
-        assigned_site = conn.execute('SELECT s.id, s.name FROM guard_site_assignments gsa JOIN sites s ON s.id=gsa.site_id WHERE gsa.company_id=? AND gsa.guard_id=? LIMIT 1', (user['company_id'], user.get('guard_id'))).fetchone() if user.get('guard_id') else None
+        guard_row_id = guard_assignment_id(user)
+        assigned_site = conn.execute('SELECT s.id, s.name FROM guard_site_assignments gsa JOIN sites s ON s.id=gsa.site_id WHERE gsa.company_id=? AND gsa.guard_id=? LIMIT 1', (user['company_id'], guard_row_id)).fetchone() if guard_row_id else None
         incident_reports = conn.execute('SELECT i.*, s.name as site_name FROM incident_reports i JOIN sites s ON i.site_id=s.id WHERE i.company_id=? AND i.officer_id=? ORDER BY i.created_at DESC LIMIT 20', (user['company_id'], user['id'])).fetchall()
         conn.close()
         return app_page(environ, start_response, user, 'guard_incident_reports.html', active_path='/guard/incident-reports', view='week', title='Incident Reports', assigned_site=assigned_site, server_now=utc_now_str(), incident_reports=incident_reports)
@@ -7297,20 +7566,13 @@ def application(environ, start_response):
         if not data.get('incident_type') or not data.get('priority') or not data.get('narrative'):
             return bad_request(start_response, 'Incident type, priority, and narrative are required.')
         conn = db()
-        assigned_site = conn.execute('SELECT site_id FROM guard_site_assignments WHERE company_id=? AND guard_id=? LIMIT 1', (user['company_id'], user.get('guard_id'))).fetchone() if user.get('guard_id') else None
+        guard_row_id = guard_assignment_id(user)
+        assigned_site = conn.execute('SELECT site_id FROM guard_site_assignments WHERE company_id=? AND guard_id=? LIMIT 1', (user['company_id'], guard_row_id)).fetchone() if guard_row_id else None
         if not assigned_site:
             conn.close()
             return redirect_with_feedback(start_response, '/guard/incident-reports', error='No assigned site found for your account.')
         incident_files = collect_attachments(files, 'attachment')
-        first_attachment_path = None
-        if incident_files:
-            _, first_attachment_path = save_upload(incident_files[0], 'incident_attachments')
-        report_id = insert_and_get_id(conn, '''
-            INSERT INTO incident_reports (company_id, site_id, officer_id, incident_type, priority, narrative, persons_involved, witnesses, police_notified, client_notified, attachment_path, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Open', ?)
-        ''', (user['company_id'], assigned_site['site_id'], user['id'], data['incident_type'], data['priority'], data['narrative'], data.get('persons_involved', ''), data.get('witnesses', ''), 1 if data.get('police_notified') else 0, 1 if data.get('client_notified') else 0, first_attachment_path, utc_now_str()))
-        for f in incident_files:
-            create_report_attachment(conn, user['company_id'], 'incident', report_id, user['id'], f, 'incident_attachments')
+        insert_incident_report(conn, user, assigned_site['site_id'], data, incident_files, offline_submitted=0)
         conn.commit()
         conn.close()
         return redirect_with_feedback(start_response, '/guard/incident-reports', message='Incident report submitted.')
