@@ -1761,7 +1761,7 @@ def require_admin(environ, start_response):
     return user, None
 
 def supervisor_site_ids(conn, user):
-    if not user or user.get('role') != 'supervisor':
+    if not user or row_value(user, 'role') != 'supervisor':
         return None
     rows = conn.execute(
         'SELECT site_id FROM supervisor_site_assignments WHERE company_id=? AND supervisor_user_id=?',
@@ -1771,7 +1771,7 @@ def supervisor_site_ids(conn, user):
 
 
 def supervisor_can_access_site(conn, user, site_id):
-    if user.get('role') != 'supervisor':
+    if row_value(user, 'role') != 'supervisor':
         return True
     allowed_site_ids = supervisor_site_ids(conn, user)
     return bool(allowed_site_ids and int(site_id) in allowed_site_ids)
@@ -4226,7 +4226,12 @@ PATROL_RUN_HTML = r'''{% extends "app_shell.html" %}
 PATROL_TOUR_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
 <section class="card">
-  <div class="section-head"><h3>{{ tour.name }}</h3><span>{{ tour.site_name }} · {{ tour.checkpoint_count }} active checkpoints</span></div>
+  <div class="section-head"><div><h3>{{ tour.name }}</h3><span>{{ tour.site_name }} · {{ tour.checkpoint_count }} active checkpoints</span></div><a class="btn ghost" href="/patrols">Back to Patrols</a></div>
+  <div class="summary-list">
+    <div><span>Site</span><strong>{{ tour.site_name }}</strong></div>
+    <div><span>Status</span><strong>{% if tour.active %}Active{% else %}Inactive{% endif %}</strong></div>
+    <div><span>Checkpoints</span><strong>{{ tour.checkpoint_count }}</strong></div>
+  </div>
   <p>{{ tour.description or 'No description.' }}</p>
   {% if user.role in ['company_admin', 'superadmin', 'admin', 'supervisor'] %}
   <form method="post" action="/admin/patrol/checkpoint/new" class="stack compact">
@@ -5865,6 +5870,39 @@ def init_db():
     if table_exists(conn, 'incident_reports'):
         for col in offline_cols:
             ensure_column(conn, 'incident_reports', col)
+    if table_exists(conn, 'patrol_tours'):
+        ensure_column(conn, 'patrol_tours', 'description TEXT')
+        ensure_column(conn, 'patrol_tours', 'active INTEGER DEFAULT 1')
+        ensure_column(conn, 'patrol_tours', 'created_by INTEGER')
+        ensure_column(conn, 'patrol_tours', 'created_at TEXT')
+        ensure_column(conn, 'patrol_tours', 'updated_at TEXT')
+    if table_exists(conn, 'patrol_tour_checkpoints'):
+        ensure_column(conn, 'patrol_tour_checkpoints', 'company_id INTEGER')
+        ensure_column(conn, 'patrol_tour_checkpoints', 'site_id INTEGER')
+        ensure_column(conn, 'patrol_tour_checkpoints', 'sort_order INTEGER DEFAULT 0')
+        ensure_column(conn, 'patrol_tour_checkpoints', 'qr_code TEXT')
+        ensure_column(conn, 'patrol_tour_checkpoints', 'nfc_tag_id TEXT')
+        ensure_column(conn, 'patrol_tour_checkpoints', 'active INTEGER DEFAULT 1')
+        ensure_column(conn, 'patrol_tour_checkpoints', 'created_at TEXT')
+        conn.execute('''
+            UPDATE patrol_tour_checkpoints
+            SET company_id=(SELECT pt.company_id FROM patrol_tours pt WHERE pt.id=patrol_tour_checkpoints.tour_id)
+            WHERE company_id IS NULL
+        ''')
+        conn.execute('''
+            UPDATE patrol_tour_checkpoints
+            SET site_id=(SELECT pt.site_id FROM patrol_tours pt WHERE pt.id=patrol_tour_checkpoints.tour_id)
+            WHERE site_id IS NULL
+        ''')
+        conn.execute("UPDATE patrol_tour_checkpoints SET active=1 WHERE active IS NULL")
+        conn.execute("UPDATE patrol_tour_checkpoints SET sort_order=0 WHERE sort_order IS NULL")
+        conn.execute("UPDATE patrol_tour_checkpoints SET created_at=? WHERE created_at IS NULL OR created_at=''", (utc_now_str(),))
+        missing_identifiers = conn.execute("SELECT id FROM patrol_tour_checkpoints WHERE qr_code IS NULL OR qr_code='' OR nfc_tag_id IS NULL OR nfc_tag_id=''").fetchall()
+        for checkpoint in missing_identifiers:
+            conn.execute(
+                "UPDATE patrol_tour_checkpoints SET qr_code=COALESCE(NULLIF(qr_code,''), ?), nfc_tag_id=COALESCE(NULLIF(nfc_tag_id,''), ?) WHERE id=?",
+                (patrol_token('QR'), patrol_token('NFC'), checkpoint['id']),
+            )
     if table_exists(conn, 'patrol_checkpoint_scans'):
         for col in offline_cols:
             ensure_column(conn, 'patrol_checkpoint_scans', col)
@@ -6143,6 +6181,9 @@ STYLES_CSS += r'''
 .offline-sync-status.pending{border-color:rgba(250,204,21,.5);color:#fde68a}
 .offline-sync-status.offline{border-color:rgba(248,113,113,.55);color:#fecaca}
 .top-gap { margin-top: 12px; }
+.summary-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 12px 0; }
+.summary-list > div { border: 1px solid var(--line); border-radius: 14px; padding: 10px; background: rgba(255,255,255,.03); display: grid; gap: 4px; }
+.summary-list span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
 .subtle-card { background: rgba(255,255,255,.02); border: 1px solid var(--line); border-radius: 18px; }
 .admin-action-card .section-head { align-items: flex-start; }
 .result-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
@@ -6167,7 +6208,7 @@ STYLES_CSS += r'''
 .checkpoint-edit summary::-webkit-details-marker { display: none; }
 .qr-print-layout { display: grid; grid-template-columns: 280px 1fr; gap: 20px; align-items: center; margin: 18px 0; }
 .qr-print-image { width: 260px; height: 260px; padding: 12px; border-radius: 18px; background: #fff; }
-@media (max-width: 900px) { .row-4, .identifier-list, .scan-actions, .qr-print-layout { grid-template-columns: 1fr; } }
+@media (max-width: 900px) { .row-4, .summary-list, .identifier-list, .scan-actions, .qr-print-layout { grid-template-columns: 1fr; } }
 '''
 
 
@@ -6386,7 +6427,14 @@ def patrol_dashboard_data(conn, user):
         placeholders = ','.join(['?'] * len(allowed_site_ids))
         tour_filter = f' AND pt.site_id IN ({placeholders})'
         params.extend(sorted(allowed_site_ids))
-    tours = conn.execute(f'''SELECT pt.*, s.name AS site_name, COUNT(pc.id) AS checkpoint_count FROM patrol_tours pt JOIN sites s ON s.id=pt.site_id LEFT JOIN patrol_tour_checkpoints pc ON pc.tour_id=pt.id AND pc.active=1 WHERE pt.company_id=?{tour_filter} GROUP BY pt.id, s.name ORDER BY pt.created_at DESC''', tuple(params)).fetchall()
+    tours = conn.execute(f'''
+        SELECT pt.*, s.name AS site_name,
+               (SELECT COUNT(*) FROM patrol_tour_checkpoints pc WHERE pc.company_id=pt.company_id AND pc.tour_id=pt.id AND COALESCE(pc.active,1)=1) AS checkpoint_count
+        FROM patrol_tours pt
+        JOIN sites s ON s.id=pt.site_id AND s.company_id=pt.company_id
+        WHERE pt.company_id=?{tour_filter}
+        ORDER BY pt.created_at DESC, pt.id DESC
+    ''', tuple(params)).fetchall()
     run_filter = ''
     run_params = [company_id]
     if user['role'] == 'guard':
@@ -6396,16 +6444,51 @@ def patrol_dashboard_data(conn, user):
         placeholders = ','.join(['?'] * len(allowed_site_ids))
         run_filter = f' AND ptr.site_id IN ({placeholders})'
         run_params.extend(sorted(allowed_site_ids))
-    runs = conn.execute(f'''SELECT ptr.*, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name, COUNT(pc.id) AS total_checkpoints, COUNT(DISTINCT CASE WHEN COALESCE(pcs.missed_checkpoint,0)=0 THEN pcs.checkpoint_id END) AS scanned_checkpoints FROM patrol_tour_runs ptr JOIN patrol_tours pt ON pt.id=ptr.tour_id JOIN sites s ON s.id=ptr.site_id JOIN users u ON u.id=ptr.guard_id LEFT JOIN patrol_tour_checkpoints pc ON pc.tour_id=ptr.tour_id AND pc.active=1 LEFT JOIN patrol_checkpoint_scans pcs ON pcs.tour_run_id=ptr.id WHERE ptr.company_id=?{run_filter} GROUP BY ptr.id, pt.name, s.name, u.full_name ORDER BY ptr.started_at DESC LIMIT 20''', tuple(run_params)).fetchall()
+    runs = conn.execute(f'''
+        SELECT ptr.*, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name,
+               (SELECT COUNT(*) FROM patrol_tour_checkpoints pc WHERE pc.company_id=ptr.company_id AND pc.tour_id=ptr.tour_id AND COALESCE(pc.active,1)=1) AS total_checkpoints,
+               (SELECT COUNT(DISTINCT pcs.checkpoint_id) FROM patrol_checkpoint_scans pcs WHERE pcs.tour_run_id=ptr.id AND COALESCE(pcs.missed_checkpoint,0)=0) AS scanned_checkpoints
+        FROM patrol_tour_runs ptr
+        JOIN patrol_tours pt ON pt.id=ptr.tour_id AND pt.company_id=ptr.company_id
+        JOIN sites s ON s.id=ptr.site_id AND s.company_id=ptr.company_id
+        JOIN users u ON u.id=ptr.guard_id
+        WHERE ptr.company_id=?{run_filter}
+        ORDER BY ptr.started_at DESC
+        LIMIT 20
+    ''', tuple(run_params)).fetchall()
     return {'patrol_tours': tours, 'active_patrol_tours': [t for t in tours if t['active']], 'patrol_runs': runs, 'completed_tours': [r for r in runs if r['status'] == 'completed'], 'client_patrol_history': [r for r in runs if r['status'] == 'completed']}
 
 
 def patrol_run_detail(conn, company_id, run_id):
-    run = conn.execute('''SELECT ptr.*, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name FROM patrol_tour_runs ptr JOIN patrol_tours pt ON pt.id=ptr.tour_id JOIN sites s ON s.id=ptr.site_id JOIN users u ON u.id=ptr.guard_id WHERE ptr.company_id=? AND ptr.id=?''', (company_id, run_id)).fetchone()
+    run = conn.execute('''SELECT ptr.*, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name FROM patrol_tour_runs ptr JOIN patrol_tours pt ON pt.id=ptr.tour_id AND pt.company_id=ptr.company_id JOIN sites s ON s.id=ptr.site_id AND s.company_id=ptr.company_id JOIN users u ON u.id=ptr.guard_id WHERE ptr.company_id=? AND ptr.id=?''', (company_id, run_id)).fetchone()
     if not run:
         return None, []
-    checkpoints = conn.execute('''SELECT pc.*, pcs.scan_method, pcs.scanned_at, pcs.gps_latitude, pcs.gps_longitude, COALESCE(pcs.missed_checkpoint,0) AS missed_checkpoint FROM patrol_tour_checkpoints pc LEFT JOIN patrol_checkpoint_scans pcs ON pcs.checkpoint_id=pc.id AND pcs.tour_run_id=? WHERE pc.company_id=? AND pc.tour_id=? AND pc.active=1 ORDER BY pc.sort_order, pc.id''', (run_id, company_id, run['tour_id'])).fetchall()
+    checkpoints = conn.execute('''SELECT pc.*, pcs.scan_method, pcs.scanned_at, pcs.gps_latitude, pcs.gps_longitude, COALESCE(pcs.missed_checkpoint,0) AS missed_checkpoint FROM patrol_tour_checkpoints pc LEFT JOIN patrol_checkpoint_scans pcs ON pcs.checkpoint_id=pc.id AND pcs.tour_run_id=? WHERE pc.company_id=? AND pc.tour_id=? AND COALESCE(pc.active,1)=1 ORDER BY pc.sort_order, pc.id''', (run_id, company_id, run['tour_id'])).fetchall()
     return run, checkpoints
+
+
+def patrol_tour_detail(conn, company_id, tour_id):
+    tour = conn.execute('''
+        SELECT pt.*, s.name AS site_name,
+               (SELECT COUNT(*) FROM patrol_tour_checkpoints pc WHERE pc.company_id=pt.company_id AND pc.tour_id=pt.id AND COALESCE(pc.active,1)=1) AS checkpoint_count
+        FROM patrol_tours pt
+        JOIN sites s ON s.id=pt.site_id AND s.company_id=pt.company_id
+        WHERE pt.company_id=? AND pt.id=?
+    ''', (company_id, tour_id)).fetchone()
+    if not tour:
+        return None, []
+    checkpoints = conn.execute('''
+        SELECT id, company_id, tour_id, site_id, checkpoint_name,
+               COALESCE(sort_order,0) AS sort_order,
+               COALESCE(qr_code,'') AS qr_code,
+               COALESCE(nfc_tag_id,'') AS nfc_tag_id,
+               COALESCE(active,1) AS active,
+               created_at
+        FROM patrol_tour_checkpoints
+        WHERE company_id=? AND tour_id=?
+        ORDER BY COALESCE(sort_order,0), id
+    ''', (company_id, tour['id'])).fetchall()
+    return tour, checkpoints
 
 
 def application(environ, start_response):
@@ -7205,17 +7288,21 @@ def application(environ, start_response):
         allowed = user['role'] in {'superadmin', 'company_admin', 'admin', 'client'} or (user['role'] == 'guard' and run['guard_id'] == user['id']) or supervisor_can_access_site(conn, user, run['site_id'])
         conn.close()
         if not allowed: return redirect_with_feedback(start_response, '/dashboard', error='You do not have permission to view that patrol run.')
-        return html_response(start_response, render_page(environ, 'patrol_run.html', title='Patrol Run', user=user, run=run, checkpoints=checkpoints, nav_items=sidebar_nav_items(user, '/patrol/run'), active_path='/patrol/run', page_title='Patrol Run', **get_dashboard_context(user)), extra_headers=csrf_headers(environ))
+        context = get_dashboard_context(user)
+        context.update({'run': run, 'checkpoints': checkpoints, 'nav_items': sidebar_nav_items(user, '/patrol/run'), 'active_path': '/patrol/run', 'page_title': 'Patrol Run'})
+        return html_response(start_response, render_page(environ, 'patrol_run.html', title='Patrol Run', user=user, **context), extra_headers=csrf_headers(environ))
     if path == '/patrol/tour' and method == 'GET':
         user, response = require_login(environ, start_response)
         if response: return response
         conn = db(); company_id = get_company_scope_id(user)
-        tour = conn.execute('''SELECT pt.*, s.name AS site_name, COUNT(pc.id) AS checkpoint_count FROM patrol_tours pt JOIN sites s ON s.id=pt.site_id LEFT JOIN patrol_tour_checkpoints pc ON pc.tour_id=pt.id AND pc.active=1 WHERE pt.company_id=? AND pt.id=? GROUP BY pt.id, s.name''', (company_id, query.get('id'))).fetchone()
+        tour, checkpoints = patrol_tour_detail(conn, company_id, query.get('id'))
         if not tour: conn.close(); return not_found(start_response)
         allowed = user['role'] in {'superadmin', 'company_admin', 'admin'} or supervisor_can_access_site(conn, user, tour['site_id'])
-        checkpoints = conn.execute('SELECT * FROM patrol_tour_checkpoints WHERE company_id=? AND tour_id=? ORDER BY sort_order, id', (company_id, tour['id'])).fetchall(); conn.close()
+        conn.close()
         if not allowed: return redirect_with_feedback(start_response, '/dashboard', error='You do not have permission to view that patrol tour.')
-        return html_response(start_response, render_page(environ, 'patrol_tour.html', title='Patrol Tour', user=user, tour=tour, checkpoints=checkpoints, nav_items=sidebar_nav_items(user, '/patrol/tour'), active_path='/patrol/tour', page_title='Patrol Tour', **get_dashboard_context(user)), extra_headers=csrf_headers(environ))
+        context = get_dashboard_context(user)
+        context.update({'tour': tour, 'checkpoints': checkpoints, 'nav_items': sidebar_nav_items(user, '/patrol/tour'), 'active_path': '/patrol/tour', 'page_title': 'Patrol Tour'})
+        return html_response(start_response, render_page(environ, 'patrol_tour.html', title='Patrol Tour', user=user, **context), extra_headers=csrf_headers(environ))
     if path == '/admin/shift/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
