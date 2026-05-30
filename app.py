@@ -703,10 +703,18 @@ def response_headers(extra=None, content_type='text/html; charset=utf-8'):
     return headers
 
 
-def create_session(user_id):
+def create_session(user_id, company_id=None, site_id=None, role=None):
     sid = secrets.token_urlsafe(32)
     conn = db()
-    conn.execute('INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)', (sid, user_id, now_utc().strftime('%Y-%m-%d %H:%M:%S'), expires_at()))
+    cols = ['id', 'user_id', 'created_at', 'expires_at']
+    vals = [sid, user_id, now_utc().strftime('%Y-%m-%d %H:%M:%S'), expires_at()]
+    session_cols = column_names(conn, 'sessions') if table_exists(conn, 'sessions') else set()
+    for col, value in [('company_id', company_id), ('site_id', site_id), ('role', role)]:
+        if col in session_cols:
+            cols.append(col)
+            vals.append(value)
+    placeholders = ', '.join(['?'] * len(cols))
+    conn.execute(f"INSERT INTO sessions ({', '.join(cols)}) VALUES ({placeholders})", tuple(vals))
     conn.commit(); conn.close()
     return sid
 
@@ -1294,7 +1302,7 @@ def init_db():
     # gentle migration support for older single-company databases
     if table_exists(conn, 'users'):
         for col in [
-            'company_id INTEGER', 'guard_id INTEGER', 'phone TEXT', 'email TEXT', 'license_number TEXT', 'hourly_rate REAL DEFAULT 18',
+            'company_id INTEGER', 'guard_id INTEGER', 'phone TEXT', 'email TEXT', 'license_number TEXT', 'employee_id TEXT', 'badge_id TEXT', 'hourly_rate REAL DEFAULT 18',
             'active INTEGER DEFAULT 1', 'created_at TEXT', 'pin_hash TEXT'
         ]:
             ensure_column(conn, 'users', col)
@@ -1305,7 +1313,7 @@ def init_db():
         for col in ['company_id INTEGER', 'client_id INTEGER', 'client_company_name TEXT', 'active INTEGER DEFAULT 1']:
             ensure_column(conn, 'sites', col)
     if table_exists(conn, 'guards'):
-        for col in ['company_id INTEGER', 'name TEXT', 'first_name TEXT', 'last_name TEXT', 'phone TEXT', 'email TEXT', 'license_number TEXT', "status TEXT DEFAULT 'active'", 'rating REAL DEFAULT 5', 'training_status TEXT', 'created_at TEXT']:
+        for col in ['company_id INTEGER', 'name TEXT', 'first_name TEXT', 'last_name TEXT', 'phone TEXT', 'email TEXT', 'license_number TEXT', 'employee_id TEXT', 'badge_id TEXT', "status TEXT DEFAULT 'active'", 'rating REAL DEFAULT 5', 'training_status TEXT', 'created_at TEXT']:
             ensure_column(conn, 'guards', col)
         if 'name' in column_names(conn, 'guards'):
             conn.execute("UPDATE guards SET name=COALESCE(NULLIF(TRIM(name), ''), NULLIF(TRIM(first_name || ' ' || last_name), ''), NULLIF(TRIM(first_name), ''), 'Guard') WHERE name IS NULL OR TRIM(name)=''")
@@ -1594,6 +1602,43 @@ def init_db():
         conn.execute('UPDATE sites SET company_id=? WHERE company_id IS NULL', (demo_company,))
         conn.execute("UPDATE sites SET client_company_name = COALESCE(client_company_name, '')")
     if demo_company is not None:
+        demo_guard_logins = [
+            ('guard1', 'Marcus Hill', 'EMP-2201', 'BADGE-2201', '1111', 'Steele Plaza'),
+            ('guard2', 'Ava Carter', 'EMP-2202', 'BADGE-2202', '2222', 'Riverfront Logistics'),
+        ]
+        for username, full_name, employee_id, badge_id, demo_pin, site_name in demo_guard_logins:
+            guard_user = conn.execute(
+                "SELECT id, guard_id FROM users WHERE company_id=? AND username=? AND role='guard' ORDER BY id LIMIT 1",
+                (demo_company, username),
+            ).fetchone()
+            if not guard_user:
+                continue
+            conn.execute(
+                "UPDATE users SET full_name=?, employee_id=?, badge_id=?, pin_hash=? WHERE id=?",
+                (full_name, employee_id, badge_id, hash_password(demo_pin), guard_user['id']),
+            )
+            guard_row_id = guard_user['guard_id']
+            if guard_row_id:
+                conn.execute(
+                    "UPDATE guards SET employee_id=?, badge_id=? WHERE company_id=? AND id=?",
+                    (employee_id, badge_id, demo_company, guard_row_id),
+                )
+                assigned_site = conn.execute(
+                    "SELECT id FROM sites WHERE company_id=? AND name=? AND COALESCE(active,1)=1 ORDER BY id LIMIT 1",
+                    (demo_company, site_name),
+                ).fetchone()
+                if assigned_site:
+                    existing_assignment = conn.execute(
+                        'SELECT id FROM guard_site_assignments WHERE company_id=? AND guard_id=? AND site_id=?',
+                        (demo_company, guard_row_id, assigned_site['id']),
+                    ).fetchone()
+                    if not existing_assignment:
+                        conn.execute(
+                            'INSERT INTO guard_site_assignments (company_id, guard_id, site_id, assigned_at) VALUES (?, ?, ?, ?)',
+                            (demo_company, guard_row_id, assigned_site['id'], now),
+                        )
+
+    if demo_company is not None:
         supervisor_row = conn.execute("SELECT id FROM users WHERE company_id=? AND username='supervisor1' ORDER BY id LIMIT 1", (demo_company,)).fetchone()
         riverfront_site = conn.execute("SELECT id FROM sites WHERE company_id=? AND name='Riverfront Logistics' ORDER BY id LIMIT 1", (demo_company,)).fetchone()
         if supervisor_row and riverfront_site:
@@ -1629,6 +1674,10 @@ def init_db():
                 hrs = calculate_shift_hours_from_strings(row['start_time'], row['end_time'])
                 conn.execute('UPDATE shifts SET scheduled_hours=? WHERE id=?', (hrs, row['id']))
         sync_shift_assignment_schema(conn)
+
+    if table_exists(conn, 'sessions'):
+        for col in ['company_id INTEGER', 'site_id INTEGER', 'role TEXT']:
+            ensure_column(conn, 'sessions', col)
 
     # seed availability for guards
     guards = conn.execute("SELECT id, company_id FROM users WHERE role='guard'").fetchall()
@@ -5221,7 +5270,14 @@ def guard_login_identity_candidates(identity):
         return []
     lowered = cleaned.lower()
     conn = db()
-    rows = conn.execute("""
+    user_cols = column_names(conn, 'users') if table_exists(conn, 'users') else set()
+    guard_cols = column_names(conn, 'guards') if table_exists(conn, 'guards') else set()
+    user_employee = "COALESCE(u.employee_id, '')" if 'employee_id' in user_cols else "''"
+    user_badge = "COALESCE(u.badge_id, '')" if 'badge_id' in user_cols else "''"
+    guard_employee = "COALESCE(g.employee_id, '')" if 'employee_id' in guard_cols else "''"
+    guard_badge = "COALESCE(g.badge_id, '')" if 'badge_id' in guard_cols else "''"
+    guard_full_name = "COALESCE(NULLIF(TRIM(g.name), ''), NULLIF(TRIM(g.first_name || ' ' || g.last_name), ''), '')" if 'name' in guard_cols else "COALESCE(NULLIF(TRIM(g.first_name || ' ' || g.last_name), ''), '')"
+    rows = conn.execute(f"""
         SELECT g.*, u.id AS user_id, u.username, u.password, u.pin_hash, u.active AS user_active,
                u.email AS login_email, u.license_number AS login_license_number, c.name AS company_name,
                c.tagline AS company_tagline, c.logo_path AS company_logo
@@ -5230,16 +5286,16 @@ def guard_login_identity_candidates(identity):
         JOIN companies c ON c.id=u.company_id
         WHERE u.role='guard' AND u.active=1 AND g.status='active'
           AND (
-            LOWER(u.username)=? OR LOWER(COALESCE(u.email, ''))=? OR LOWER(COALESCE(g.email, ''))=?
-            OR COALESCE(u.license_number, '')=? OR COALESCE(g.license_number, '')=?
-            OR CAST(g.id AS TEXT)=? OR CAST(u.guard_id AS TEXT)=?
+            LOWER(u.username)=? OR LOWER(COALESCE(u.full_name, ''))=? OR LOWER({guard_full_name})=?
+            OR {user_employee}=? OR {guard_employee}=?
+            OR {user_badge}=? OR {guard_badge}=?
+            OR CAST(u.id AS TEXT)=? OR CAST(g.id AS TEXT)=? OR CAST(u.guard_id AS TEXT)=?
           )
         ORDER BY u.id
         LIMIT 20
-    """, (lowered, lowered, lowered, cleaned, cleaned, cleaned, cleaned)).fetchall()
+    """, (lowered, lowered, lowered, cleaned, cleaned, cleaned, cleaned, cleaned, cleaned, cleaned)).fetchall()
     conn.close()
     return rows
-
 
 def guard_login_identity_record(identity, pin):
     matches = []
@@ -5931,6 +5987,15 @@ def init_db():
         ensure_column(conn, 'companies', 'qb_expires_at TEXT')
         ensure_column(conn, 'companies', 'qb_connected_at TEXT')
         ensure_column(conn, 'companies', 'qb_realm_id TEXT')
+    if table_exists(conn, 'sessions'):
+        for col in ['company_id INTEGER', 'site_id INTEGER', 'role TEXT']:
+            ensure_column(conn, 'sessions', col)
+    if table_exists(conn, 'users'):
+        for col in ['employee_id TEXT', 'badge_id TEXT']:
+            ensure_column(conn, 'users', col)
+    if table_exists(conn, 'guards'):
+        for col in ['employee_id TEXT', 'badge_id TEXT']:
+            ensure_column(conn, 'guards', col)
     if APP_ENV == 'production':
         # conn.execute("DELETE FROM users WHERE username IN ('superadmin','admin','guard1','guard2','demoadmin') AND email LIKE '%%.local'")
         conn.execute("DELETE FROM companies WHERE name IN ('SteeleOps Demo','BlueLine Protective') AND id NOT IN (SELECT DISTINCT company_id FROM users WHERE company_id IS NOT NULL)")
@@ -6046,7 +6111,7 @@ GUARD_LOGIN_LIST_HTML = r'''{% extends "layout.html" %}
     <div>
       <div class="eyebrow">SteeleOps</div>
       <h1>Guard Quick Login</h1>
-      <p class="small-muted">Enter your Guard ID, employee ID, or username and your 4-digit PIN.</p>
+      <p class="small-muted">Enter your username, guard name, employee ID, badge ID, or Guard ID and your 4-digit PIN.</p>
     </div>
     {% if current_user %}<a href="/dashboard" class="btn ghost">← Dashboard</a>{% endif %}
   </div>
@@ -6056,12 +6121,17 @@ GUARD_LOGIN_LIST_HTML = r'''{% extends "layout.html" %}
     {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
     {% if message %}<div class="alert success">{{ message }}</div>{% endif %}
     <form method="post" action="/guard-login" class="stack guard-pin-form">{{ csrf_input|safe }}
-      <label>Guard ID / Employee ID / Username<input type="text" name="identity" value="{{ remembered_identity or '' }}" autocomplete="username" placeholder="e.g. badge123" required autofocus></label>
+      <label>Username / Name / Employee ID / Badge ID<input type="text" name="identity" value="{{ remembered_identity or '' }}" autocomplete="username" placeholder="e.g. badge123" required autofocus></label>
       <label>4-digit PIN<input class="pin-input" type="password" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="current-password" placeholder="••••" required></label>
       <label class="check-row"><input type="checkbox" name="remember_device" value="1" {% if remembered_identity %}checked{% endif %}> Remember this device</label>
       <button class="btn primary" type="submit">Sign In</button>
     </form>
     <div class="helper-links"><a href="/login">Use standard username/password login</a></div>
+    {% if show_demo_accounts %}<div class="demo-box">
+      <strong>Guard Quick Login Demo</strong><br>
+      Ava Carter / 2222<br>
+      guard2 / 2222
+    </div>{% endif %}
   </div>
 </div>
 {% endblock %}'''
@@ -6094,7 +6164,7 @@ GUARD_LOGIN_ASSIGNED_SITES_HTML = r'''{% extends "layout.html" %}
       {% endfor %}
     </div>
     {% else %}
-    <div class="empty">No active assigned sites were found for your account. Contact your supervisor.</div>
+    <div class="empty">No site assigned. Please contact your supervisor.</div>
     {% endif %}
   </div>
 </div>
@@ -6578,9 +6648,10 @@ def application(environ, start_response):
         assigned_sites = guard_login_assigned_sites(guard['company_id'], guard['id'])
         if not assigned_sites:
             record_login_attempt(rate_limit_key, False, environ=environ, user_id=guard['user_id'], company_id=guard['company_id'])
-            return guard_login_list_page(environ, start_response, current_user=user, identity=identity, error='No active assigned site was found for your guard profile. Contact your supervisor.')
+            return guard_login_list_page(environ, start_response, current_user=user, identity=identity, error='No site assigned. Please contact your supervisor.')
         record_login_attempt(rate_limit_key, True, environ=environ, user_id=guard['user_id'], company_id=guard['company_id'])
-        session_id = create_session(guard['user_id'])
+        selected_site_id = assigned_sites[0]['id'] if len(assigned_sites) == 1 else None
+        session_id = create_session(guard['user_id'], company_id=guard['company_id'], site_id=selected_site_id, role='guard')
         headers = [('Set-Cookie', cookie_header(session_id))]
         remember_cookie = guard_login_identity_cookie(identity, data.get('remember_device') == '1')
         headers.append(('Set-Cookie', remember_cookie or delete_guard_login_identity_cookie()))
