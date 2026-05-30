@@ -15,7 +15,7 @@ import urllib.request
 import uuid
 from base64 import b64encode
 from datetime import date, datetime, timedelta, timezone
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import parse_qs, quote_plus, unquote_plus, urlencode
 from wsgiref.simple_server import make_server
 
 try:
@@ -819,7 +819,6 @@ def init_db():
         guard_id INTEGER NOT NULL,
         site_id INTEGER NOT NULL,
         assigned_at TEXT NOT NULL,
-        UNIQUE(guard_id),
         FOREIGN KEY(company_id) REFERENCES companies(id),
         FOREIGN KEY(guard_id) REFERENCES guards(id),
         FOREIGN KEY(site_id) REFERENCES sites(id)
@@ -1119,7 +1118,6 @@ def init_db():
         guard_id INTEGER NOT NULL,
         site_id INTEGER NOT NULL,
         assigned_at TEXT NOT NULL,
-        UNIQUE(guard_id),
         FOREIGN KEY(company_id) REFERENCES companies(id),
         FOREIGN KEY(guard_id) REFERENCES guards(id),
         FOREIGN KEY(site_id) REFERENCES sites(id)
@@ -1760,8 +1758,29 @@ def require_admin(environ, start_response):
             return None, redirect_with_feedback(start_response, '/dashboard', error='Supervisor role cannot access that admin area.')
     return user, None
 
+def guard_site_ids(conn, user):
+    guard_row_id = row_value(user, 'guard_id')
+    if not user or row_value(user, 'role') != 'guard' or not guard_row_id:
+        return None
+    rows = conn.execute(
+        '''
+        SELECT gsa.site_id
+        FROM guard_site_assignments gsa
+        JOIN sites s ON s.id=gsa.site_id AND s.company_id=gsa.company_id
+        WHERE gsa.company_id=? AND gsa.guard_id=? AND COALESCE(s.active,1)=1
+        ORDER BY s.name, gsa.assigned_at DESC, gsa.id DESC
+        ''',
+        (user['company_id'], guard_row_id),
+    ).fetchall()
+    return {row['site_id'] for row in rows}
+
+
 def supervisor_site_ids(conn, user):
-    if not user or row_value(user, 'role') != 'supervisor':
+    if not user:
+        return None
+    if row_value(user, 'role') == 'guard':
+        return guard_site_ids(conn, user) or set()
+    if row_value(user, 'role') != 'supervisor':
         return None
     rows = conn.execute(
         'SELECT site_id FROM supervisor_site_assignments WHERE company_id=? AND supervisor_user_id=?',
@@ -1771,7 +1790,7 @@ def supervisor_site_ids(conn, user):
 
 
 def supervisor_can_access_site(conn, user, site_id):
-    if row_value(user, 'role') != 'supervisor':
+    if row_value(user, 'role') not in {'supervisor', 'guard'}:
         return True
     allowed_site_ids = supervisor_site_ids(conn, user)
     return bool(allowed_site_ids and int(site_id) in allowed_site_ids)
@@ -1812,6 +1831,13 @@ def sidebar_nav_items(user, active_path):
 
 def app_page(environ, start_response, user, template_name, active_path='/dashboard', view='week', title='SteeleOps Control Center', **extra_context):
     query = parse_query(environ)
+    selected_site_id = (query.get('site_id') or '').strip()
+    if row_value(user, 'role') == 'guard' and selected_site_id:
+        conn = db()
+        can_access_site = selected_site_id.isdigit() and supervisor_can_access_site(conn, user, int(selected_site_id))
+        conn.close()
+        if not can_access_site:
+            return redirect_with_feedback(start_response, '/dashboard', error='You can only access sites assigned to your guard profile.')
     shift_form_values = {k: query.get(k, '') for k in ('site_id', 'user_id', 'shift_date', 'start_time', 'end_time', 'notes', 'exclude_shift_id')}
     context = get_dashboard_context(user, view, shift_form_values=shift_form_values)
     context.update(extra_context)
@@ -2412,6 +2438,7 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         ''', (company_id,)).fetchall()
         if allowed_site_ids is not None:
             shifts = [row for row in shifts if row['site_id'] in allowed_site_ids]
+            available_shifts = [row for row in available_shifts if row['site_id'] in allowed_site_ids]
             sites = [row for row in sites if row['id'] in allowed_site_ids]
             reports = [row for row in reports if row['site_id'] in allowed_site_ids]
             recent_reports = reports[:8]
@@ -5158,15 +5185,6 @@ def company_selector_rows():
     return rows
 
 
-def get_guard_login_company(environ, current_user=None):
-    if current_user and current_user['company_id']:
-        return current_user['company_id']
-    query = parse_query(environ)
-    company_id = (query.get('company_id') or '').strip()
-    if not company_id.isdigit():
-        return None
-    return int(company_id)
-
 
 def current_guard_assignment_join(guard_alias='g'):
     return f"""
@@ -5197,75 +5215,71 @@ def save_guard_site_assignment(conn, company_id, guard_id, site_id):
     )
     return int(normalized_site_id)
 
-
-def guard_login_list_rows(company_id):
+def guard_login_identity_candidates(identity):
+    cleaned = (identity or '').strip()
+    if not cleaned:
+        return []
+    lowered = cleaned.lower()
     conn = db()
-    rows = conn.execute(f"""
-        SELECT g.*, s.name AS site_name
-        FROM guards g
-        JOIN users u ON u.guard_id=g.id AND u.company_id=g.company_id AND u.role='guard' AND u.active=1
-        {current_guard_assignment_join('g')}
-        WHERE g.company_id=? AND g.status='active'
-        ORDER BY g.first_name, g.last_name, g.id
-    """, (company_id,)).fetchall()
-    company = conn.execute('SELECT * FROM companies WHERE id=?', (company_id,)).fetchone()
-    conn.close()
-    return company, rows
-
-
-def guard_login_site_rows(company_id):
-    conn = db()
-    company = conn.execute('SELECT * FROM companies WHERE id=?', (company_id,)).fetchone()
     rows = conn.execute("""
-        SELECT s.id, s.name, COALESCE(NULLIF(c.name, ''), NULLIF(s.client_company_name, ''), '') AS client_name
-        FROM sites s
-        LEFT JOIN clients c ON c.id=s.client_id AND c.company_id=s.company_id
-        WHERE s.company_id=? AND s.active=1
-        ORDER BY s.name, s.id
-    """, (company_id,)).fetchall()
-    conn.close()
-    return company, rows
-
-
-def guard_login_site_guard_rows(company_id, site_id):
-    conn = db()
-    company = conn.execute('SELECT * FROM companies WHERE id=?', (company_id,)).fetchone()
-    site = conn.execute("""
-        SELECT s.id, s.name, COALESCE(NULLIF(c.name, ''), NULLIF(s.client_company_name, ''), '') AS client_name
-        FROM sites s
-        LEFT JOIN clients c ON c.id=s.client_id AND c.company_id=s.company_id
-        WHERE s.company_id=? AND s.id=? AND s.active=1
-        LIMIT 1
-    """, (company_id, site_id)).fetchone()
-    guards = []
-    if site:
-        guards = conn.execute(f"""
-            SELECT g.*
-            FROM guards g
-            JOIN users u ON u.guard_id=g.id AND u.company_id=g.company_id AND u.role='guard' AND u.active=1
-            {current_guard_assignment_join('g')}
-            WHERE g.company_id=? AND g.status='active' AND gsa.site_id=?
-            ORDER BY g.first_name, g.last_name, g.id
-        """, (company_id, site_id)).fetchall()
-    conn.close()
-    return company, site, guards
-
-
-def guard_login_record(company_id, guard_id):
-    conn = db()
-    row = conn.execute(f"""
-        SELECT g.*, s.name AS site_name, u.id AS user_id, u.username, u.password, u.pin_hash, u.active AS user_active
-        FROM guards g
-        JOIN users u ON u.guard_id=g.id AND u.company_id=g.company_id AND u.role='guard'
-        {current_guard_assignment_join('g')}
-        WHERE g.company_id=? AND g.id=? AND g.status='active'
+        SELECT g.*, u.id AS user_id, u.username, u.password, u.pin_hash, u.active AS user_active,
+               u.email AS login_email, u.license_number AS login_license_number, c.name AS company_name,
+               c.tagline AS company_tagline, c.logo_path AS company_logo
+        FROM users u
+        JOIN guards g ON g.id=u.guard_id AND g.company_id=u.company_id
+        JOIN companies c ON c.id=u.company_id
+        WHERE u.role='guard' AND u.active=1 AND g.status='active'
+          AND (
+            LOWER(u.username)=? OR LOWER(COALESCE(u.email, ''))=? OR LOWER(COALESCE(g.email, ''))=?
+            OR COALESCE(u.license_number, '')=? OR COALESCE(g.license_number, '')=?
+            OR CAST(g.id AS TEXT)=? OR CAST(u.guard_id AS TEXT)=?
+          )
         ORDER BY u.id
-        LIMIT 1
-    """, (company_id, guard_id)).fetchone()
-    company = conn.execute('SELECT * FROM companies WHERE id=?', (company_id,)).fetchone()
+        LIMIT 20
+    """, (lowered, lowered, lowered, cleaned, cleaned, cleaned, cleaned)).fetchall()
     conn.close()
-    return company, row
+    return rows
 
+
+def guard_login_identity_record(identity, pin):
+    matches = []
+    for guard in guard_login_identity_candidates(identity):
+        if guard['pin_hash'] and is_valid_pin(pin) and verify_password(pin, guard['pin_hash']):
+            matches.append(guard)
+    return matches[0] if len(matches) == 1 else None
+
+def guard_login_assigned_sites(company_id, guard_id):
+    conn = db()
+    rows = conn.execute("""
+        SELECT s.id, s.name, s.address, COALESCE(NULLIF(c.name, ''), NULLIF(s.client_company_name, ''), '') AS client_name
+        FROM guard_site_assignments gsa
+        JOIN sites s ON s.id=gsa.site_id AND s.company_id=gsa.company_id
+        LEFT JOIN clients c ON c.id=s.client_id AND c.company_id=s.company_id
+        WHERE gsa.company_id=? AND gsa.guard_id=? AND COALESCE(s.active,1)=1
+        ORDER BY s.name, gsa.assigned_at DESC, gsa.id DESC
+    """, (company_id, guard_id)).fetchall()
+    conn.close()
+    return rows
+
+
+def guard_login_remembered_identity(environ):
+    cookies = parse_request_cookies(environ)
+    return unquote_plus(cookies.get('guard_quick_identity', '')).strip()
+
+
+def guard_login_identity_cookie(identity, remember):
+    if not remember or not identity:
+        return None
+    expires = now_utc() + timedelta(days=30)
+    value = quote_plus(identity.strip())
+    parts = [f'guard_quick_identity={value}', 'Path=/guard-login', 'SameSite=Lax', 'Expires=' + cookie_expires_gmt(expires)]
+    if SESSION_COOKIE_SECURE:
+        parts.append('Secure')
+    return '; '.join(parts)
+
+
+def delete_guard_login_identity_cookie():
+    return 'guard_quick_identity=deleted; Path=/guard-login; SameSite=Lax; Expires=' + cookie_expires_gmt(datetime(1970, 1, 1, tzinfo=timezone.utc))
 
 def guard_site_debug_payload(company_id, guard_id, selected_site_id=None):
     conn = db()
@@ -6032,132 +6046,63 @@ GUARD_LOGIN_LIST_HTML = r'''{% extends "layout.html" %}
     <div>
       <div class="eyebrow">SteeleOps</div>
       <h1>Guard Quick Login</h1>
-      <p class="small-muted">Select your company to continue.</p>
+      <p class="small-muted">Enter your Guard ID, employee ID, or username and your 4-digit PIN.</p>
     </div>
     {% if current_user %}<a href="/dashboard" class="btn ghost">← Dashboard</a>{% endif %}
   </div>
-  {% if error %}<div class="card"><div class="alert error">{{ error }}</div></div>{% endif %}
   <div class="card narrow-shell">
-    <h3>Select Company</h3>
-    <p class="small-muted">Choose your company, then pick your site and name.</p>
-    <div class="guard-login-list">
-      {% for item in companies %}
-      <a class="list-item detailed guard-login-item" href="/guard-login/{{ item.id }}/sites">
-        <div>
-          <strong>{{ item.name }}</strong>
-          <div class="small-muted">{{ item.tagline or 'Security Operations Simplified' }}</div>
-        </div>
-        <span class="badge open">{{ item.active_guard_count }} guards</span>
-      </a>
-      {% endfor %}
-    </div>
+    <h3>Quick PIN Sign In</h3>
+    <p class="small-muted">We will identify your company, assigned site, and guard profile automatically. Companies, sites, and guard lists are not browsable from quick login.</p>
+    {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+    {% if message %}<div class="alert success">{{ message }}</div>{% endif %}
+    <form method="post" action="/guard-login" class="stack guard-pin-form">{{ csrf_input|safe }}
+      <label>Guard ID / Employee ID / Username<input type="text" name="identity" value="{{ remembered_identity or '' }}" autocomplete="username" placeholder="e.g. badge123" required autofocus></label>
+      <label>4-digit PIN<input class="pin-input" type="password" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="current-password" placeholder="••••" required></label>
+      <label class="check-row"><input type="checkbox" name="remember_device" value="1" {% if remembered_identity %}checked{% endif %}> Remember this device</label>
+      <button class="btn primary" type="submit">Sign In</button>
+    </form>
+    <div class="helper-links"><a href="/login">Use standard username/password login</a></div>
   </div>
-  <div class="helper-links"><a href="/login">Back to standard login</a></div>
 </div>
 {% endblock %}'''
 
-GUARD_LOGIN_SITE_LIST_HTML = r'''{% extends "layout.html" %}
+GUARD_LOGIN_ASSIGNED_SITES_HTML = r'''{% extends "layout.html" %}
 {% block body %}
 <div class="simple-shell guard-login-shell">
   <div class="simple-header">
-    <a href="/guard-login" class="btn ghost">← Companies</a>
     <div>
       <div class="eyebrow">SteeleOps</div>
-      <h1>{{ company.name }}</h1>
-      <p class="small-muted">Step 2 of 3 · Select your site.</p>
+      <h1>Select Assigned Site</h1>
+      <p class="small-muted">{{ user.full_name }} · {{ user.company_name }}</p>
     </div>
+    <a href="/logout" class="btn ghost">Logout</a>
   </div>
-  {% if error %}<div class="card"><div class="alert error">{{ error }}</div></div>{% endif %}
   <div class="card">
-    <div class="section-head"><h3>Active Sites</h3><span>{{ sites|length }} sites</span></div>
+    <div class="section-head"><h3>Your assigned sites</h3><span>{{ sites|length }} sites</span></div>
+    <p class="small-muted">Only sites assigned to your guard profile are available.</p>
+    {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
     {% if sites %}
     <div class="guard-login-list">
       {% for site in sites %}
-      <a class="list-item detailed guard-login-item" href="/guard-login/{{ company.id }}/sites/{{ site.id }}">
+      <a class="list-item detailed guard-login-item" href="/dashboard?site_id={{ site.id }}">
         <div>
           <strong>{{ site.name }}</strong>
-          <div class="small-muted">{% if site.client_name %}{{ site.client_name }}{% else %}No client listed{% endif %}</div>
+          <div class="small-muted">{% if site.client_name %}{{ site.client_name }}{% elif site.address %}{{ site.address }}{% else %}Assigned site{% endif %}</div>
         </div>
-        <span class="btn ghost">View guards</span>
+        <span class="btn ghost">Open dashboard</span>
       </a>
       {% endfor %}
     </div>
     {% else %}
-    <div class="empty">No active sites are available for this company.</div>
+    <div class="empty">No active assigned sites were found for your account. Contact your supervisor.</div>
     {% endif %}
   </div>
-  <div class="helper-links"><a href="/login">Back to standard login</a></div>
 </div>
 {% endblock %}'''
 
-GUARD_LOGIN_GUARD_LIST_HTML = r'''{% extends "layout.html" %}
-{% block body %}
-<div class="simple-shell guard-login-shell">
-  <div class="simple-header">
-    <a href="/guard-login/{{ company.id }}/sites" class="btn ghost">← Sites</a>
-    <div>
-      <div class="eyebrow">SteeleOps</div>
-      <h1>{{ site.name }}</h1>
-      <p class="small-muted">Step 3 of 3 · Select your name to continue.</p>
-    </div>
-  </div>
-  {% if error %}<div class="card"><div class="alert error">{{ error }}</div></div>{% endif %}
-  <div class="card">
-    <div class="section-head"><h3>{{ company.name }}</h3><span>{{ guards|length }} active guards</span></div>
-    {% if site.client_name %}<p class="small-muted guard-login-meta">Client: {{ site.client_name }}</p>{% endif %}
-    {% if guards %}
-    <div class="guard-login-list">
-      {% for guard in guards %}
-      <a class="list-item detailed guard-login-item" href="/guard-login/{{ guard.id }}?company_id={{ company.id }}">
-        <div>
-          <strong>{{ guard.first_name }} {{ guard.last_name }}</strong>
-          <div class="small-muted">Assigned to {{ site.name }}</div>
-        </div>
-        <span class="btn ghost">Continue</span>
-      </a>
-      {% endfor %}
-    </div>
-    {% else %}
-    <div class="empty">No active guards with linked login accounts are assigned to this site.</div>
-    {% endif %}
-  </div>
-  <div class="helper-links"><a href="/login">Back to standard login</a></div>
-</div>
-{% endblock %}'''
-
-GUARD_LOGIN_PASSWORD_HTML = r'''{% extends "layout.html" %}
-{% block body %}
-<div class="simple-shell guard-login-shell">
-  <div class="simple-header">
-    <a href="/guard-login?company_id={{ company.id }}" class="btn ghost">← Back</a>
-    <div>
-      <div class="eyebrow">SteeleOps</div>
-      <h1>{{ guard.first_name }} {{ guard.last_name }}</h1>
-      <p class="small-muted">{% if guard.site_name %}{{ guard.site_name }}{% else %}No site assigned{% endif %}</p>
-    </div>
-  </div>
-  <div class="card narrow-shell">
-    <h3>Enter PIN</h3>
-    <p class="small-muted">Use your 4-digit quick login PIN. Password login is still available below if needed.</p>
-    {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
-    {% if message %}<div class="alert success">{{ message }}</div>{% endif %}
-    <form method="post" action="/guard-login/{{ guard.id }}?company_id={{ company.id }}" class="stack guard-pin-form">{{ csrf_input|safe }}
-      <input type="hidden" name="login_method" value="pin">
-      <label>PIN<input class="pin-input" type="password" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="••••" required autofocus></label>
-      <button class="btn primary" type="submit">Sign In with PIN</button>
-    </form>
-    <details class="card subtle-card fallback-card">
-      <summary>Use password instead</summary>
-      <form method="post" action="/guard-login/{{ guard.id }}?company_id={{ company.id }}" class="stack top-gap">{{ csrf_input|safe }}
-        <input type="hidden" name="login_method" value="password">
-        <label>Password<input type="password" name="password" required></label>
-        <button class="btn ghost" type="submit">Sign In with Password</button>
-      </form>
-    </details>
-    <div class="helper-links"><a href="/login">Use username login instead</a></div>
-  </div>
-</div>
-{% endblock %}'''
+GUARD_LOGIN_SITE_LIST_HTML = GUARD_LOGIN_ASSIGNED_SITES_HTML
+GUARD_LOGIN_GUARD_LIST_HTML = GUARD_LOGIN_ASSIGNED_SITES_HTML
+GUARD_LOGIN_PASSWORD_HTML = GUARD_LOGIN_LIST_HTML
 
 STYLES_CSS += r'''
 .helper-links { margin-top: 14px; display: flex; gap: 12px; flex-wrap: wrap; }
@@ -6242,7 +6187,7 @@ def ensure_assets():
     templates = {'layout.html': LAYOUT_HTML, 'app_shell.html': APP_SHELL_HTML, 'login.html': LOGIN_HTML, 'dashboard.html': DASHBOARD_HTML, 'patrols.html': PATROLS_HTML, 'schedule.html': SCHEDULE_HTML, 'guards.html': GUARDS_HTML, 'patrol_run.html': PATROL_RUN_HTML, 'patrol_tour.html': PATROL_TOUR_HTML, 'reports.html': REPORTS_HTML, 'payroll.html': PAYROLL_HTML, 'profile.html': PROFILE_HTML, 'admin_paystub_upload.html': ADMIN_PAYSTUB_UPLOAD_HTML, 'guard_paystubs.html': GUARD_PAYSTUBS_HTML,
         'guard_daily_activity_reports.html': GUARD_DAILY_ACTIVITY_REPORTS_HTML,
         'guard_incident_reports.html': GUARD_INCIDENT_REPORTS_HTML,
-        'guard_my_reports.html': GUARD_MY_REPORTS_HTML, 'guard_my_report_detail.html': GUARD_MY_REPORT_DETAIL_HTML, 'password_reset_request.html': PASSWORD_RESET_REQUEST_HTML, 'password_reset_form.html': PASSWORD_RESET_FORM_HTML, 'guard_login_list.html': GUARD_LOGIN_LIST_HTML, 'guard_login_site_list.html': GUARD_LOGIN_SITE_LIST_HTML, 'guard_login_guard_list.html': GUARD_LOGIN_GUARD_LIST_HTML, 'guard_login_password.html': GUARD_LOGIN_PASSWORD_HTML}
+        'guard_my_reports.html': GUARD_MY_REPORTS_HTML, 'guard_my_report_detail.html': GUARD_MY_REPORT_DETAIL_HTML, 'password_reset_request.html': PASSWORD_RESET_REQUEST_HTML, 'password_reset_form.html': PASSWORD_RESET_FORM_HTML, 'guard_login_list.html': GUARD_LOGIN_LIST_HTML, 'guard_login_assigned_sites.html': GUARD_LOGIN_ASSIGNED_SITES_HTML, 'guard_login_site_list.html': GUARD_LOGIN_SITE_LIST_HTML, 'guard_login_guard_list.html': GUARD_LOGIN_GUARD_LIST_HTML, 'guard_login_password.html': GUARD_LOGIN_PASSWORD_HTML}
     for name, content in templates.items():
         with open(os.path.join(TEMPLATE_DIR, name), 'w', encoding='utf-8') as f:
             f.write(content)
@@ -6255,24 +6200,33 @@ def login_page(environ, start_response, error=None, message=None, reset_link=Non
 
 
 
-def guard_login_list_page(environ, start_response, current_user=None, error=None):
-    company_id = get_guard_login_company(environ, current_user=current_user)
-    if company_id:
-        return redirect(start_response, f'/guard-login/{company_id}/sites')
-    companies = company_selector_rows()
-    return html_response(start_response, render_page(environ, 'guard_login_list.html', title='Guard Quick Login', current_user=current_user, companies=companies, error=error), extra_headers=csrf_headers(environ))
+def guard_login_list_page(environ, start_response, current_user=None, error=None, message=None, identity=None):
+    remembered_identity = identity if identity is not None else guard_login_remembered_identity(environ)
+    return html_response(
+        start_response,
+        render_page(environ, 'guard_login_list.html', title='Guard Quick Login', current_user=current_user, remembered_identity=remembered_identity, error=error, message=message),
+        extra_headers=csrf_headers(environ),
+    )
+
+
+def guard_login_assigned_sites_page(environ, start_response, user, sites, error=None):
+    return html_response(
+        start_response,
+        render_page(environ, 'guard_login_assigned_sites.html', title='Guard Quick Login', user=user, sites=sites, error=error),
+        extra_headers=csrf_headers(environ),
+    )
 
 
 def guard_login_site_list_page(environ, start_response, company, sites, error=None):
-    return html_response(start_response, render_page(environ, 'guard_login_site_list.html', title='Guard Quick Login', company=company, sites=sites, error=error), extra_headers=csrf_headers(environ))
+    return not_found(start_response)
 
 
 def guard_login_guard_list_page(environ, start_response, company, site, guards, error=None):
-    return html_response(start_response, render_page(environ, 'guard_login_guard_list.html', title='Guard Quick Login', company=company, site=site, guards=guards, error=error), extra_headers=csrf_headers(environ))
+    return not_found(start_response)
 
 
 def guard_login_password_page(environ, start_response, company, guard, error=None, message=None):
-    return html_response(start_response, render_page(environ, 'guard_login_password.html', title='Guard Quick Login', company=company, guard=guard, error=error, message=message), extra_headers=csrf_headers(environ))
+    return guard_login_list_page(environ, start_response, error=error, message=message)
 
 def password_reset_request_page(environ, start_response, error=None, message=None, reset_link=None):
     return html_response(start_response, render_page(environ, 'password_reset_request.html', title='Password Reset', error=error, message=message, reset_link=reset_link), extra_headers=csrf_headers(environ))
@@ -6610,21 +6564,47 @@ def application(environ, start_response):
 
     if path == '/guard-login' and method == 'GET':
         return guard_login_list_page(environ, start_response, current_user=user)
-    site_list_match = re.match(r'^/guard-login/(\d+)/sites$', path)
+    if path == '/guard-login' and method == 'POST':
+        data, _ = parse_post(environ)
+        identity = (data.get('identity') or '').strip()
+        pin = normalize_pin(data.get('pin', ''))
+        rate_limit_key = f'guard:{identity.lower()}' if identity else 'guard:blank'
+        if not login_allowed(rate_limit_key):
+            return guard_login_list_page(environ, start_response, current_user=user, identity=identity, error='Too many failed attempts. Please wait 15 minutes and try again.')
+        guard = guard_login_identity_record(identity, pin)
+        if not guard:
+            record_login_attempt(rate_limit_key, False, environ=environ, user_id=guard['user_id'] if guard else None, company_id=guard['company_id'] if guard else None)
+            return guard_login_list_page(environ, start_response, current_user=user, identity=identity, error='Invalid Guard ID or PIN.')
+        assigned_sites = guard_login_assigned_sites(guard['company_id'], guard['id'])
+        if not assigned_sites:
+            record_login_attempt(rate_limit_key, False, environ=environ, user_id=guard['user_id'], company_id=guard['company_id'])
+            return guard_login_list_page(environ, start_response, current_user=user, identity=identity, error='No active assigned site was found for your guard profile. Contact your supervisor.')
+        record_login_attempt(rate_limit_key, True, environ=environ, user_id=guard['user_id'], company_id=guard['company_id'])
+        session_id = create_session(guard['user_id'])
+        headers = [('Set-Cookie', cookie_header(session_id))]
+        remember_cookie = guard_login_identity_cookie(identity, data.get('remember_device') == '1')
+        headers.append(('Set-Cookie', remember_cookie or delete_guard_login_identity_cookie()))
+        if len(assigned_sites) == 1:
+            return redirect(start_response, f'/dashboard?site_id={assigned_sites[0]["id"]}', headers)
+        return redirect(start_response, '/guard-login/sites', headers)
+    if path == '/guard-login/sites' and method == 'GET':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        if user['role'] != 'guard':
+            return redirect(start_response, '/dashboard')
+        sites = guard_login_assigned_sites(user['company_id'], guard_assignment_id(user))
+        if len(sites) == 1:
+            return redirect(start_response, f'/dashboard?site_id={sites[0]["id"]}')
+        return guard_login_assigned_sites_page(environ, start_response, user, sites)
+    site_list_match = re.match(r'^/guard-login/\d+/sites$', path)
     if site_list_match and method == 'GET':
-        company_id = int(site_list_match.group(1))
-        company, sites = guard_login_site_rows(company_id)
-        if not company:
-            return not_found(start_response)
-        return guard_login_site_list_page(environ, start_response, company, sites)
-    site_guard_match = re.match(r'^/guard-login/(\d+)/sites/(\d+)$', path)
+        return not_found(start_response)
+    site_guard_match = re.match(r'^/guard-login/\d+/sites/\d+$', path)
     if site_guard_match and method == 'GET':
-        company_id = int(site_guard_match.group(1))
-        site_id = int(site_guard_match.group(2))
-        company, site, guards = guard_login_site_guard_rows(company_id, site_id)
-        if not company or not site:
-            return not_found(start_response)
-        return guard_login_guard_list_page(environ, start_response, company, site, guards)
+        return not_found(start_response)
+    guard_match = re.match(r'^/guard-login/\d+$', path)
+    if guard_match and method in {'GET', 'POST'}:
+        return not_found(start_response)
     debug_guard_match = re.match(r'^/debug/guard-site-check/(\d+)$', path)
     if debug_guard_match and method == 'GET':
         user, response = require_admin(environ, start_response)
@@ -6637,42 +6617,6 @@ def application(environ, start_response):
             int(selected_site_id) if selected_site_id.isdigit() else None,
         )
         return json_response(start_response, payload)
-    guard_match = re.match(r'^/guard-login/(\d+)$', path)
-    if guard_match and method == 'GET':
-        company_id = get_guard_login_company(environ, current_user=user)
-        if not company_id:
-            return guard_login_list_page(environ, start_response, current_user=user, error='Select a company first.')
-        company, guard = guard_login_record(company_id, int(guard_match.group(1)))
-        if not company or not guard or not guard['user_id'] or not guard['user_active']:
-            return not_found(start_response)
-        return guard_login_password_page(environ, start_response, company, guard)
-    if guard_match and method == 'POST':
-        company_id = get_guard_login_company(environ, current_user=user)
-        if not company_id:
-            return guard_login_list_page(environ, start_response, current_user=user, error='Select a company first.')
-        company, guard = guard_login_record(company_id, int(guard_match.group(1)))
-        if not company or not guard or not guard['user_id'] or not guard['user_active']:
-            return not_found(start_response)
-        data, _ = parse_post(environ)
-        pin = normalize_pin(data.get('pin', ''))
-        password = data.get('password', '')
-        use_password = data.get('login_method') == 'password'
-        username = guard['username'] or f'guard:{guard["id"]}'
-        if not login_allowed(username):
-            return guard_login_password_page(environ, start_response, company, guard, error='Too many failed attempts. Please wait 15 minutes and try again.')
-        if use_password:
-            if not verify_password(password, guard['password']):
-                record_login_attempt(username, False, environ=environ, user_id=guard['user_id'], company_id=company_id)
-                return guard_login_password_page(environ, start_response, company, guard, error='Invalid password.')
-        else:
-            if not guard['pin_hash']:
-                return guard_login_password_page(environ, start_response, company, guard, error='No PIN is set for this guard yet. Use password login instead.')
-            if not is_valid_pin(pin) or not verify_password(pin, guard['pin_hash']):
-                record_login_attempt(username, False, environ=environ, user_id=guard['user_id'], company_id=company_id)
-                return guard_login_password_page(environ, start_response, company, guard, error='Invalid PIN.')
-        record_login_attempt(username, True, environ=environ, user_id=guard['user_id'], company_id=company_id)
-        session_id = create_session(guard['user_id'])
-        return redirect(start_response, '/dashboard', [('Set-Cookie', cookie_header(session_id))])
 
     if path == '/password-reset' and method == 'GET':
         return password_reset_request_page(environ, start_response)
