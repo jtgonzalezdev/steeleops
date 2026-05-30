@@ -280,7 +280,7 @@ def ensure_assets():
         'dashboard.html': DASHBOARD_HTML,
         'schedule.html': SCHEDULE_HTML,
         'guards.html': GUARDS_HTML,
-        'reports.html': REPORTS_HTML,
+        'patrol_run.html': PATROL_RUN_HTML, 'patrol_tour.html': PATROL_TOUR_HTML, 'reports.html': REPORTS_HTML,
         'payroll.html': PAYROLL_HTML,
         'profile.html': PROFILE_HTML,
         'admin_paystub_upload.html': ADMIN_PAYSTUB_UPLOAD_HTML,
@@ -1417,6 +1417,13 @@ def init_db():
             )
         ''')
 
+
+    patrol_pk = 'SERIAL PRIMARY KEY' if conn.backend == 'postgres' else 'INTEGER PRIMARY KEY AUTOINCREMENT'
+    conn.execute(f'''CREATE TABLE IF NOT EXISTS patrol_tours (id {patrol_pk}, company_id INTEGER NOT NULL, site_id INTEGER NOT NULL, name TEXT NOT NULL, description TEXT, active INTEGER DEFAULT 1, created_by INTEGER, created_at TEXT NOT NULL, updated_at TEXT)''')
+    conn.execute(f'''CREATE TABLE IF NOT EXISTS patrol_tour_checkpoints (id {patrol_pk}, company_id INTEGER NOT NULL, tour_id INTEGER NOT NULL, site_id INTEGER NOT NULL, checkpoint_name TEXT NOT NULL, sort_order INTEGER DEFAULT 0, qr_code TEXT NOT NULL UNIQUE, nfc_tag_id TEXT NOT NULL UNIQUE, active INTEGER DEFAULT 1, created_at TEXT NOT NULL)''')
+    conn.execute(f'''CREATE TABLE IF NOT EXISTS patrol_tour_runs (id {patrol_pk}, company_id INTEGER NOT NULL, site_id INTEGER NOT NULL, tour_id INTEGER NOT NULL, guard_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'in_progress', started_at TEXT NOT NULL, completed_at TEXT, missed_checkpoint_count INTEGER DEFAULT 0, notes TEXT)''')
+    conn.execute(f'''CREATE TABLE IF NOT EXISTS patrol_checkpoint_scans (id {patrol_pk}, company_id INTEGER NOT NULL, site_id INTEGER NOT NULL, tour_id INTEGER NOT NULL, tour_run_id INTEGER NOT NULL, checkpoint_id INTEGER NOT NULL, guard_id INTEGER NOT NULL, scan_method TEXT NOT NULL, scanned_at TEXT NOT NULL, gps_latitude TEXT, gps_longitude TEXT, missed_checkpoint INTEGER DEFAULT 0)''')
+
     now = utc_now_str()
     bootstrap_created = bootstrap_initial_admin(conn, now)
     if not bootstrap_created and fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM companies') == 0:
@@ -1770,10 +1777,13 @@ def supervisor_can_access_site(conn, user, site_id):
 def sidebar_nav_items(user, active_path):
     items = [
         {'label': 'Dashboard', 'href': '/dashboard', 'active': active_path == '/dashboard'},
-        {'label': 'Weekly Schedule', 'href': '/weekly-schedule', 'active': active_path == '/weekly-schedule'},
-        {'label': 'Monthly Schedule', 'href': '/monthly-schedule', 'active': active_path == '/monthly-schedule'},
-        {'label': 'My Profile', 'href': '/profile', 'active': active_path == '/profile'},
     ]
+    if user['role'] != 'client':
+        items.extend([
+            {'label': 'Weekly Schedule', 'href': '/weekly-schedule', 'active': active_path == '/weekly-schedule'},
+            {'label': 'Monthly Schedule', 'href': '/monthly-schedule', 'active': active_path == '/monthly-schedule'},
+            {'label': 'My Profile', 'href': '/profile', 'active': active_path == '/profile'},
+        ])
     if user['role'] in {'company_admin', 'superadmin', 'supervisor'}:
         items.extend([
             {'label': 'Guards', 'href': '/guards', 'active': active_path == '/guards'},
@@ -2631,6 +2641,8 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         'recent_reports': fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM reports WHERE company_id=? AND date(created_at)>=date(?)', (company_id, (today - timedelta(days=7)).isoformat())),
         'checkpoint_logs_today': fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM patrol_checkpoints WHERE company_id=? AND date(check_time)=date(?)', (company_id, today.isoformat())),
         'weekly_hours': fetch_scalar(conn, 'SELECT COALESCE(SUM(worked_hours),0) AS cnt FROM shifts WHERE company_id=? AND shift_date BETWEEN ? AND ?', (company_id, (today - timedelta(days=today.weekday())).isoformat(), (today - timedelta(days=today.weekday()) + timedelta(days=6)).isoformat())),
+        'completed_tours': fetch_scalar(conn, "SELECT COUNT(*) AS cnt FROM patrol_tour_runs WHERE company_id=? AND status='completed' AND date(completed_at)=date(?)", (company_id, today.isoformat())),
+        'missed_checkpoints': fetch_scalar(conn, "SELECT COALESCE(SUM(missed_checkpoint_count),0) AS cnt FROM patrol_tour_runs WHERE company_id=? AND status='completed' AND date(completed_at)=date(?)", (company_id, today.isoformat())),
     }
     if allowed_site_ids is not None:
         site_params = tuple(sorted(allowed_site_ids))
@@ -2649,9 +2661,13 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
                 f"SELECT COUNT(*) AS cnt FROM incident_reports WHERE company_id=? AND LOWER(COALESCE(status, 'open'))!='closed' AND site_id IN ({placeholders})",
                 (company_id, *site_params),
             )
+            stats['completed_tours'] = fetch_scalar(conn, f"SELECT COUNT(*) AS cnt FROM patrol_tour_runs WHERE company_id=? AND status='completed' AND date(completed_at)=date(?) AND site_id IN ({placeholders})", (company_id, today.isoformat(), *site_params))
+            stats['missed_checkpoints'] = fetch_scalar(conn, f"SELECT COALESCE(SUM(missed_checkpoint_count),0) AS cnt FROM patrol_tour_runs WHERE company_id=? AND status='completed' AND date(completed_at)=date(?) AND site_id IN ({placeholders})", (company_id, today.isoformat(), *site_params))
         else:
             stats['guards_on_duty'] = 0
             stats['open_incidents'] = 0
+            stats['completed_tours'] = 0
+            stats['missed_checkpoints'] = 0
     guard_dashboard_summary = {
         'current_shift': None,
         'assigned_site': None,
@@ -2734,9 +2750,11 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
     for row in staff_users:
         row['supervisor_sites'] = supervisor_sites_by_user.get(row['id'], [])
 
+    patrol_data = patrol_dashboard_data(conn, user)
     conn.close()
     return {
         'stats': stats,
+        **patrol_data,
         'shifts': shifts,
         'my_shifts': my_shifts if user['role'] == 'guard' else [],
         'available_shifts': available_shifts if user['role'] == 'guard' else [],
@@ -3545,6 +3563,7 @@ APP_SHELL_HTML = r'''{% extends "layout.html" %}
 
 DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
+    {% if user.role != 'client' %}
     <section class="grid stats-grid">
       {% if user.role == 'guard' %}
       <div class="stat card guard-stat-highlight">
@@ -3568,6 +3587,8 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
       <div class="stat card"><div class="stat-label">Company-wide Open Incidents</div><div class="stat-number">{{ stats.open_incidents }}</div></div>
       <div class="stat card"><div class="stat-label">Sites Active Today</div><div class="stat-number">{{ stats.sites_active_today }}</div></div>
       <div class="stat card"><div class="stat-label">Checkpoint Logs Today</div><div class="stat-number">{{ stats.checkpoint_logs_today }}</div></div>
+      <div class="stat card"><div class="stat-label">Completed Tours</div><div class="stat-number">{{ stats.completed_tours }}</div></div>
+      <div class="stat card"><div class="stat-label">Missed Checkpoints</div><div class="stat-number">{{ stats.missed_checkpoints }}</div></div>
       {% endif %}
     </section>
 
@@ -3809,6 +3830,25 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
       {% endif %}
     </section>
 
+
+    {% endif %}
+
+    <section class="grid two-col">
+      {% if user.role == 'guard' %}
+      <div class="card"><div class="section-head"><h3>Mobile Patrol Tours</h3><span>Start a route and scan each checkpoint</span></div><form method="post" action="/patrol/start" class="stack compact"><label>Tour<select name="tour_id" required>{% for tour in active_patrol_tours %}<option value="{{ tour.id }}">{{ tour.site_name }} · {{ tour.name }} ({{ tour.checkpoint_count }} checkpoints)</option>{% endfor %}</select></label><button class="btn primary" type="submit" {% if not active_patrol_tours %}disabled{% endif %}>Start Patrol Tour</button></form>{% if not active_patrol_tours %}<div class="empty">No active patrol tours are configured yet.</div>{% endif %}</div>
+      <div class="card"><div class="section-head"><h3>My Patrol Runs</h3><span>Continue or review recent tours</span></div>{% for run in patrol_runs[:6] %}<div class="list-item detailed"><div><strong>{{ run.tour_name }}</strong><div class="small-muted">{{ run.site_name }} · {{ run.started_at }} · {{ run.status.replace('_', ' ').title() }}</div><div class="small-muted">Progress: {{ run.scanned_checkpoints }}/{{ run.total_checkpoints }} · Missed: {{ run.missed_checkpoint_count or 0 }}</div></div><div class="actions"><a class="btn ghost" href="/patrol/run?id={{ run.id }}">Open</a></div></div>{% else %}<div class="empty">No patrol runs yet.</div>{% endfor %}</div>
+      {% elif user.role in ['company_admin', 'superadmin', 'admin', 'supervisor'] %}
+      <div class="card"><div class="section-head"><h3>Patrol Tours</h3><span>QR/NFC perimeter routes by site</span></div>{% if user.role in ['company_admin', 'superadmin', 'admin'] %}<form method="post" action="/admin/patrol/tour/new" class="stack compact"><h4>Create Patrol Route</h4><div class="row-2"><label>Site<select name="site_id" required>{% for site in sites %}<option value="{{ site.id }}">{{ site.name }}</option>{% endfor %}</select></label><label>Tour Name<input type="text" name="name" placeholder="Perimeter Tour" required></label></div><label>Description<input type="text" name="description"></label><label>Checkpoints<textarea name="checkpoints" rows="5" required>Front Gate
+Loading Dock
+Fence Line North
+Parking Lot
+Back Entrance</textarea></label><button class="btn primary" type="submit">Create Tour + Checkpoints</button></form><hr>{% endif %}{% for tour in patrol_tours %}<div class="list-item detailed"><div><strong>{{ tour.name }}</strong><div class="small-muted">{{ tour.site_name }} · {{ tour.checkpoint_count }} checkpoints · {% if tour.active %}Active{% else %}Inactive{% endif %}</div></div><div class="actions"><a class="btn ghost" href="/patrol/tour?id={{ tour.id }}">View</a></div></div>{% else %}<div class="empty">No patrol tours configured.</div>{% endfor %}</div>
+      <div class="card"><div class="section-head"><h3>Completed Tours</h3><span>Recent completed patrol history</span></div>{% for run in completed_tours[:8] %}<div class="list-item detailed"><div><strong>{{ run.tour_name }}</strong><div class="small-muted">{{ run.site_name }} · {{ run.guard_name }} · {{ run.completed_at }}</div><div class="small-muted">Scanned {{ run.scanned_checkpoints }}/{{ run.total_checkpoints }} · Missed {{ run.missed_checkpoint_count or 0 }}</div></div><div class="actions"><a class="btn ghost" href="/patrol/run?id={{ run.id }}">Details</a></div></div>{% else %}<div class="empty">No completed patrol tours yet.</div>{% endfor %}</div>
+      {% elif user.role == 'client' %}
+      <div class="card"><div class="section-head"><h3>Patrol History</h3><span>Read-only completed tours</span></div>{% for run in client_patrol_history %}<div class="list-item detailed"><div><strong>{{ run.tour_name }}</strong><div class="small-muted">{{ run.site_name }} · {{ run.completed_at }}</div><div class="small-muted">Scanned {{ run.scanned_checkpoints }}/{{ run.total_checkpoints }} · Missed {{ run.missed_checkpoint_count or 0 }}</div></div><div class="actions"><a class="btn ghost" href="/patrol/run?id={{ run.id }}">View</a></div></div>{% else %}<div class="empty">No completed patrol history yet.</div>{% endfor %}</div>
+      {% endif %}
+    </section>
+
     {% if user.role in ['company_admin', 'superadmin', 'supervisor', 'admin'] %}
     <section class="grid two-col">
       <div class="card">
@@ -4029,6 +4069,26 @@ GUARDS_HTML = r'''{% extends "app_shell.html" %}
       </div>
       {% else %}<div class="empty">No staff users found.</div>{% endfor %}
     </section>
+{% endblock %}'''
+
+PATROL_RUN_HTML = r'''{% extends "app_shell.html" %}
+{% block page_content %}
+<section class="card">
+  <div class="section-head"><h3>{{ run.tour_name }}</h3><span>{{ run.site_name }} · {{ run.status.replace('_', ' ').title() }}</span></div>
+  <div class="row-4"><div><strong>Guard ID</strong><div class="small-muted">{{ run.guard_id }} · {{ run.guard_name }}</div></div><div><strong>Site ID</strong><div class="small-muted">{{ run.site_id }}</div></div><div><strong>Tour ID</strong><div class="small-muted">{{ run.tour_id }}</div></div><div><strong>Missed Checkpoints</strong><div class="small-muted">{{ run.missed_checkpoint_count or 0 }}</div></div></div>
+  <div class="small-muted">Started {{ run.started_at }}{% if run.completed_at %} · Completed {{ run.completed_at }}{% endif %}</div>
+</section>
+<section class="card">
+  <div class="section-head"><h3>Checkpoint Scans</h3><span>QR/NFC scan log with GPS if available</span></div>
+  <div class="table-wrap"><table><thead><tr><th>Checkpoint</th><th>QR Code</th><th>NFC Tag</th><th>Status</th><th>Scan</th><th>GPS</th><th>Guard Action</th></tr></thead><tbody>{% for checkpoint in checkpoints %}<tr><td>{{ checkpoint.checkpoint_name }}<div class="small-muted">Checkpoint ID {{ checkpoint.id }}</div></td><td><code>{{ checkpoint.qr_code }}</code></td><td><code>{{ checkpoint.nfc_tag_id }}</code></td><td>{% if checkpoint.missed_checkpoint %}<span class="badge declined">Missed</span>{% elif checkpoint.scanned_at %}<span class="badge completed">Completed</span>{% else %}<span class="badge pending">Pending</span>{% endif %}</td><td>{{ checkpoint.scan_method or '—' }}{% if checkpoint.scanned_at %}<div class="small-muted">{{ checkpoint.scanned_at }}</div>{% endif %}</td><td>{% if checkpoint.gps_latitude or checkpoint.gps_longitude %}{{ checkpoint.gps_latitude }}, {{ checkpoint.gps_longitude }}{% else %}—{% endif %}</td><td>{% if user.role == 'guard' and run.status == 'in_progress' and not checkpoint.scanned_at %}<form method="post" action="/patrol/scan" class="stack compact"><input type="hidden" name="run_id" value="{{ run.id }}"><input type="hidden" name="checkpoint_id" value="{{ checkpoint.id }}"><div class="row-2"><label>Method<select name="scan_method"><option value="QR">QR</option><option value="NFC">NFC</option></select></label><label>Scanned Code<input type="text" name="scan_value" required></label></div><div class="row-2"><label>GPS Lat<input type="text" name="gps_latitude"></label><label>GPS Lng<input type="text" name="gps_longitude"></label></div><button class="btn primary" type="submit">Log Scan</button></form>{% else %}—{% endif %}</td></tr>{% else %}<tr><td colspan="7">No checkpoints configured.</td></tr>{% endfor %}</tbody></table></div>
+  {% if user.role == 'guard' and run.status == 'in_progress' %}<form method="post" action="/patrol/complete" class="stack compact"><input type="hidden" name="run_id" value="{{ run.id }}"><button class="btn primary" type="submit">Complete Tour / Flag Missed Checkpoints</button></form>{% endif %}
+</section>
+{% endblock %}'''
+
+PATROL_TOUR_HTML = r'''{% extends "app_shell.html" %}
+{% block page_content %}
+<section class="card"><div class="section-head"><h3>{{ tour.name }}</h3><span>{{ tour.site_name }} · {{ tour.checkpoint_count }} checkpoints</span></div><p>{{ tour.description or 'No description.' }}</p>{% if user.role in ['company_admin', 'superadmin', 'admin'] %}<form method="post" action="/admin/patrol/checkpoint/new" class="stack compact"><input type="hidden" name="tour_id" value="{{ tour.id }}"><div class="row-2"><label>Checkpoint Name<input type="text" name="checkpoint_name" required></label><label>Sort Order<input type="number" name="sort_order" value="{{ checkpoints|length + 1 }}"></label></div><button class="btn" type="submit">Add Checkpoint</button></form>{% endif %}</section>
+<section class="card"><div class="section-head"><h3>QR / NFC Checkpoints</h3><span>Unique checkpoint identifiers</span></div><div class="table-wrap"><table><thead><tr><th>Order</th><th>Checkpoint</th><th>QR Code</th><th>NFC Tag ID</th></tr></thead><tbody>{% for checkpoint in checkpoints %}<tr><td>{{ checkpoint.sort_order }}</td><td>{{ checkpoint.checkpoint_name }}<div class="small-muted">Checkpoint ID {{ checkpoint.id }}</div></td><td><code>{{ checkpoint.qr_code }}</code></td><td><code>{{ checkpoint.nfc_tag_id }}</code></td></tr>{% else %}<tr><td colspan="4">No checkpoints yet.</td></tr>{% endfor %}</tbody></table></div></section>
 {% endblock %}'''
 
 REPORTS_HTML = r'''{% extends "app_shell.html" %}
@@ -5665,6 +5725,8 @@ LOGIN_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>\n        {{ 
 DASHBOARD_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', DASHBOARD_HTML)
 SCHEDULE_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', SCHEDULE_HTML)
 GUARDS_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', GUARDS_HTML)
+PATROL_RUN_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', PATROL_RUN_HTML)
+PATROL_TOUR_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', PATROL_TOUR_HTML)
 REPORTS_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', REPORTS_HTML)
 PAYROLL_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', PAYROLL_HTML)
 PROFILE_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>\n        {{ csrf_input|safe }}', PROFILE_HTML)
@@ -5964,6 +6026,47 @@ def insert_and_get_id(conn, insert_sql, params=()):
     conn.execute(sql, params)
     row = conn.execute('SELECT last_insert_rowid() AS id').fetchone()
     return row['id'] if row else None
+
+
+def patrol_token(prefix):
+    return f"{prefix}-{secrets.token_urlsafe(10)}"
+
+
+def create_patrol_checkpoint(conn, company_id, tour_id, site_id, checkpoint_name, sort_order):
+    return insert_and_get_id(conn, '''INSERT INTO patrol_tour_checkpoints (company_id, tour_id, site_id, checkpoint_name, sort_order, qr_code, nfc_tag_id, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)''', (company_id, tour_id, site_id, checkpoint_name.strip(), sort_order, patrol_token('QR'), patrol_token('NFC'), utc_now_str()))
+
+
+def patrol_dashboard_data(conn, user):
+    company_id = get_company_scope_id(user)
+    allowed_site_ids = supervisor_site_ids(conn, user)
+    tour_filter = ''
+    params = [company_id]
+    if allowed_site_ids is not None:
+        if not allowed_site_ids:
+            return {'patrol_tours': [], 'active_patrol_tours': [], 'patrol_runs': [], 'completed_tours': [], 'client_patrol_history': []}
+        placeholders = ','.join(['?'] * len(allowed_site_ids))
+        tour_filter = f' AND pt.site_id IN ({placeholders})'
+        params.extend(sorted(allowed_site_ids))
+    tours = conn.execute(f'''SELECT pt.*, s.name AS site_name, COUNT(pc.id) AS checkpoint_count FROM patrol_tours pt JOIN sites s ON s.id=pt.site_id LEFT JOIN patrol_tour_checkpoints pc ON pc.tour_id=pt.id AND pc.active=1 WHERE pt.company_id=?{tour_filter} GROUP BY pt.id, s.name ORDER BY pt.created_at DESC''', tuple(params)).fetchall()
+    run_filter = ''
+    run_params = [company_id]
+    if user['role'] == 'guard':
+        run_filter = ' AND ptr.guard_id=?'
+        run_params.append(user['id'])
+    elif allowed_site_ids is not None:
+        placeholders = ','.join(['?'] * len(allowed_site_ids))
+        run_filter = f' AND ptr.site_id IN ({placeholders})'
+        run_params.extend(sorted(allowed_site_ids))
+    runs = conn.execute(f'''SELECT ptr.*, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name, COUNT(pc.id) AS total_checkpoints, COUNT(DISTINCT CASE WHEN COALESCE(pcs.missed_checkpoint,0)=0 THEN pcs.checkpoint_id END) AS scanned_checkpoints FROM patrol_tour_runs ptr JOIN patrol_tours pt ON pt.id=ptr.tour_id JOIN sites s ON s.id=ptr.site_id JOIN users u ON u.id=ptr.guard_id LEFT JOIN patrol_tour_checkpoints pc ON pc.tour_id=ptr.tour_id AND pc.active=1 LEFT JOIN patrol_checkpoint_scans pcs ON pcs.tour_run_id=ptr.id WHERE ptr.company_id=?{run_filter} GROUP BY ptr.id, pt.name, s.name, u.full_name ORDER BY ptr.started_at DESC LIMIT 20''', tuple(run_params)).fetchall()
+    return {'patrol_tours': tours, 'active_patrol_tours': [t for t in tours if t['active']], 'patrol_runs': runs, 'completed_tours': [r for r in runs if r['status'] == 'completed'], 'client_patrol_history': [r for r in runs if r['status'] == 'completed']}
+
+
+def patrol_run_detail(conn, company_id, run_id):
+    run = conn.execute('''SELECT ptr.*, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name FROM patrol_tour_runs ptr JOIN patrol_tours pt ON pt.id=ptr.tour_id JOIN sites s ON s.id=ptr.site_id JOIN users u ON u.id=ptr.guard_id WHERE ptr.company_id=? AND ptr.id=?''', (company_id, run_id)).fetchone()
+    if not run:
+        return None, []
+    checkpoints = conn.execute('''SELECT pc.*, pcs.scan_method, pcs.scanned_at, pcs.gps_latitude, pcs.gps_longitude, COALESCE(pcs.missed_checkpoint,0) AS missed_checkpoint FROM patrol_tour_checkpoints pc LEFT JOIN patrol_checkpoint_scans pcs ON pcs.checkpoint_id=pc.id AND pcs.tour_run_id=? WHERE pc.company_id=? AND pc.tour_id=? AND pc.active=1 ORDER BY pc.sort_order, pc.id''', (run_id, company_id, run['tour_id'])).fetchall()
+    return run, checkpoints
 
 
 def application(environ, start_response):
@@ -6547,6 +6650,88 @@ def application(environ, start_response):
             else:
                 client_id = None
         conn.execute('INSERT INTO sites (company_id, client_id, name, client_company_name, address, notes, active) VALUES (?, ?, ?, ?, ?, ?, 1)', (user['company_id'], client_id, data.get('name'), client_name, data.get('address'), data.get('notes'))); conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='site', target_id=data.get('name'), message='site created', environ=environ); return redirect(start_response, '/dashboard')
+    if path == '/admin/patrol/tour/new' and method == 'POST':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        if user['role'] not in {'superadmin', 'company_admin', 'admin'}:
+            return redirect_with_feedback(start_response, '/dashboard', error='Only admins can create patrol tours.')
+        data, _ = parse_post(environ); conn = db()
+        site = conn.execute('SELECT * FROM sites WHERE id=? AND company_id=?', (data.get('site_id'), user['company_id'])).fetchone()
+        if not site: conn.close(); return bad_request(start_response, 'Site not found')
+        now = utc_now_str()
+        tour_id = insert_and_get_id(conn, '''INSERT INTO patrol_tours (company_id, site_id, name, description, active, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?)''', (user['company_id'], site['id'], data.get('name'), data.get('description', ''), user['id'], now, now))
+        for index, name in enumerate([x.strip() for x in (data.get('checkpoints') or '').splitlines() if x.strip()], start=1):
+            create_patrol_checkpoint(conn, user['company_id'], tour_id, site['id'], name, index)
+        conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='patrol_tour', target_id=tour_id, message='patrol tour created', environ=environ)
+        return redirect_with_feedback(start_response, f'/patrol/tour?id={tour_id}', message='Patrol tour created with QR and NFC checkpoints.')
+    if path == '/admin/patrol/checkpoint/new' and method == 'POST':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        if user['role'] not in {'superadmin', 'company_admin', 'admin'}:
+            return redirect_with_feedback(start_response, '/dashboard', error='Only admins can edit patrol tours.')
+        data, _ = parse_post(environ); conn = db()
+        tour = conn.execute('SELECT * FROM patrol_tours WHERE id=? AND company_id=?', (data.get('tour_id'), user['company_id'])).fetchone()
+        if not tour: conn.close(); return bad_request(start_response, 'Tour not found')
+        create_patrol_checkpoint(conn, user['company_id'], tour['id'], tour['site_id'], data.get('checkpoint_name') or 'Checkpoint', int(data.get('sort_order') or 0))
+        conn.execute('UPDATE patrol_tours SET updated_at=? WHERE id=?', (utc_now_str(), tour['id'])); conn.commit(); conn.close()
+        return redirect_with_feedback(start_response, f'/patrol/tour?id={tour["id"]}', message='Checkpoint added.')
+    if path == '/patrol/start' and method == 'POST':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        if user['role'] != 'guard': return redirect_with_feedback(start_response, '/dashboard', error='Only guards can start patrol tours.')
+        data, _ = parse_post(environ); conn = db()
+        tour = conn.execute('SELECT * FROM patrol_tours WHERE id=? AND company_id=? AND active=1', (data.get('tour_id'), user['company_id'])).fetchone()
+        if not tour: conn.close(); return bad_request(start_response, 'Tour not found')
+        run_id = insert_and_get_id(conn, '''INSERT INTO patrol_tour_runs (company_id, site_id, tour_id, guard_id, status, started_at, missed_checkpoint_count) VALUES (?, ?, ?, ?, 'in_progress', ?, 0)''', (user['company_id'], tour['site_id'], tour['id'], user['id'], utc_now_str()))
+        conn.commit(); conn.close(); return redirect(start_response, f'/patrol/run?id={run_id}')
+    if path == '/patrol/scan' and method == 'POST':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        if user['role'] != 'guard': return redirect_with_feedback(start_response, '/dashboard', error='Only guards can scan patrol checkpoints.')
+        data, _ = parse_post(environ); method_value = (data.get('scan_method') or '').strip().upper()
+        if method_value not in {'QR', 'NFC'}: return bad_request(start_response, 'Scan method must be QR or NFC')
+        conn = db(); run = conn.execute("SELECT * FROM patrol_tour_runs WHERE id=? AND company_id=? AND guard_id=? AND status='in_progress'", (data.get('run_id'), user['company_id'], user['id'])).fetchone()
+        if not run: conn.close(); return bad_request(start_response, 'Active patrol run not found')
+        checkpoint = conn.execute('SELECT * FROM patrol_tour_checkpoints WHERE id=? AND company_id=? AND tour_id=? AND active=1', (data.get('checkpoint_id'), user['company_id'], run['tour_id'])).fetchone()
+        if not checkpoint: conn.close(); return bad_request(start_response, 'Checkpoint not found')
+        expected = checkpoint['qr_code'] if method_value == 'QR' else checkpoint['nfc_tag_id']
+        if (data.get('scan_value') or '').strip() != expected:
+            conn.close(); return redirect_with_feedback(start_response, f'/patrol/run?id={run["id"]}', error='Scanned QR/NFC value does not match this checkpoint.')
+        existing = conn.execute('SELECT id FROM patrol_checkpoint_scans WHERE tour_run_id=? AND checkpoint_id=?', (run['id'], checkpoint['id'])).fetchone()
+        if not existing:
+            conn.execute('''INSERT INTO patrol_checkpoint_scans (company_id, site_id, tour_id, tour_run_id, checkpoint_id, guard_id, scan_method, scanned_at, gps_latitude, gps_longitude, missed_checkpoint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)''', (user['company_id'], run['site_id'], run['tour_id'], run['id'], checkpoint['id'], user['id'], method_value, utc_now_str(), data.get('gps_latitude', ''), data.get('gps_longitude', '')))
+        conn.commit(); conn.close(); return redirect_with_feedback(start_response, f'/patrol/run?id={run["id"]}', message='Checkpoint scan logged.')
+    if path == '/patrol/complete' and method == 'POST':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        if user['role'] != 'guard': return redirect_with_feedback(start_response, '/dashboard', error='Only guards can complete patrol tours.')
+        data, _ = parse_post(environ); conn = db(); run = conn.execute("SELECT * FROM patrol_tour_runs WHERE id=? AND company_id=? AND guard_id=? AND status='in_progress'", (data.get('run_id'), user['company_id'], user['id'])).fetchone()
+        if not run: conn.close(); return bad_request(start_response, 'Active patrol run not found')
+        missed = 0
+        for checkpoint in conn.execute('SELECT * FROM patrol_tour_checkpoints WHERE company_id=? AND tour_id=? AND active=1', (user['company_id'], run['tour_id'])).fetchall():
+            if not conn.execute('SELECT id FROM patrol_checkpoint_scans WHERE tour_run_id=? AND checkpoint_id=?', (run['id'], checkpoint['id'])).fetchone():
+                missed += 1; conn.execute('''INSERT INTO patrol_checkpoint_scans (company_id, site_id, tour_id, tour_run_id, checkpoint_id, guard_id, scan_method, scanned_at, gps_latitude, gps_longitude, missed_checkpoint) VALUES (?, ?, ?, ?, ?, ?, 'MISSED', ?, '', '', 1)''', (user['company_id'], run['site_id'], run['tour_id'], run['id'], checkpoint['id'], user['id'], utc_now_str()))
+        conn.execute("UPDATE patrol_tour_runs SET status='completed', completed_at=?, missed_checkpoint_count=? WHERE id=?", (utc_now_str(), missed, run['id'])); conn.commit(); conn.close()
+        return redirect_with_feedback(start_response, f'/patrol/run?id={run["id"]}', message='Patrol tour completed.')
+    if path == '/patrol/run' and method == 'GET':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        conn = db(); company_id = get_company_scope_id(user); run, checkpoints = patrol_run_detail(conn, company_id, query.get('id'))
+        if not run: conn.close(); return not_found(start_response)
+        allowed = user['role'] in {'superadmin', 'company_admin', 'admin', 'client'} or (user['role'] == 'guard' and run['guard_id'] == user['id']) or supervisor_can_access_site(conn, user, run['site_id'])
+        conn.close()
+        if not allowed: return redirect_with_feedback(start_response, '/dashboard', error='You do not have permission to view that patrol run.')
+        return html_response(start_response, render_page(environ, 'patrol_run.html', title='Patrol Run', user=user, run=run, checkpoints=checkpoints, **get_dashboard_context(user)), extra_headers=csrf_headers(environ))
+    if path == '/patrol/tour' and method == 'GET':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        conn = db(); company_id = get_company_scope_id(user)
+        tour = conn.execute('''SELECT pt.*, s.name AS site_name, COUNT(pc.id) AS checkpoint_count FROM patrol_tours pt JOIN sites s ON s.id=pt.site_id LEFT JOIN patrol_tour_checkpoints pc ON pc.tour_id=pt.id AND pc.active=1 WHERE pt.company_id=? AND pt.id=? GROUP BY pt.id, s.name''', (company_id, query.get('id'))).fetchone()
+        if not tour: conn.close(); return not_found(start_response)
+        allowed = user['role'] in {'superadmin', 'company_admin', 'admin'} or supervisor_can_access_site(conn, user, tour['site_id'])
+        checkpoints = conn.execute('SELECT * FROM patrol_tour_checkpoints WHERE company_id=? AND tour_id=? AND active=1 ORDER BY sort_order, id', (company_id, tour['id'])).fetchall(); conn.close()
+        if not allowed: return redirect_with_feedback(start_response, '/dashboard', error='You do not have permission to view that patrol tour.')
+        return html_response(start_response, render_page(environ, 'patrol_tour.html', title='Patrol Tour', user=user, tour=tour, checkpoints=checkpoints, **get_dashboard_context(user)), extra_headers=csrf_headers(environ))
     if path == '/admin/shift/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
