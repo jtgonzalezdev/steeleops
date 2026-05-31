@@ -745,6 +745,18 @@ def guard_primary_assigned_site_id(conn, user, preferred_site_id=None):
     return site['id'] if site else None
 
 
+def set_session_site(session_id, site_id):
+    if not session_id:
+        return
+    conn = db()
+    try:
+        if table_exists(conn, 'sessions') and 'site_id' in column_names(conn, 'sessions'):
+            conn.execute('UPDATE sessions SET site_id=? WHERE id=?', (site_id, session_id))
+            conn.commit()
+    finally:
+        conn.close()
+
+
 def create_session(user_id, company_id=None, site_id=None, role=None):
     sid = secrets.token_urlsafe(32)
     conn = db()
@@ -1526,13 +1538,20 @@ def init_db():
             conn.execute(
                 """
                 UPDATE users
-                SET company_id=?, username=?, password=?, full_name=?, role='supervisor', phone=?, email=?, license_number=?, hourly_rate=?, active=1
+                SET company_id=COALESCE(company_id, ?),
+                    username=COALESCE(NULLIF(username, ''), ?),
+                    full_name=COALESCE(NULLIF(full_name, ''), ?),
+                    role='supervisor',
+                    phone=COALESCE(NULLIF(phone, ''), ?),
+                    email=COALESCE(NULLIF(email, ''), ?),
+                    license_number=COALESCE(NULLIF(license_number, ''), ?),
+                    hourly_rate=COALESCE(hourly_rate, ?),
+                    active=1
                 WHERE id=?
                 """,
                 (
                     demo_company,
                     'supervisor1',
-                    hash_password('password123'),
                     'Sam Supervisor',
                     '210-555-0177',
                     'supervisor@demo.local',
@@ -1573,13 +1592,17 @@ def init_db():
             conn.execute(
                 """
                 UPDATE users
-                SET company_id=?, username=?, password=?, full_name=?, role='supervisor', email=?, active=1
+                SET company_id=COALESCE(company_id, ?),
+                    username=COALESCE(NULLIF(username, ''), ?),
+                    full_name=COALESCE(NULLIF(full_name, ''), ?),
+                    role='supervisor',
+                    email=COALESCE(NULLIF(email, ''), ?),
+                    active=1
                 WHERE id=?
                 """,
                 (
                     supervisor_company_id,
                     'supervisor1',
-                    hash_password('password123'),
                     'Sam Supervisor',
                     'supervisor@demo.local',
                     supervisor_account['id'],
@@ -1663,7 +1686,7 @@ def init_db():
             if not guard_user:
                 continue
             conn.execute(
-                "UPDATE users SET full_name=?, employee_id=?, badge_id=? WHERE id=?",
+                "UPDATE users SET full_name=COALESCE(NULLIF(full_name, ''), ?), employee_id=COALESCE(NULLIF(employee_id, ''), ?), badge_id=COALESCE(NULLIF(badge_id, ''), ?) WHERE id=?",
                 (full_name, employee_id, badge_id, guard_user['id']),
             )
             existing_pin = conn.execute('SELECT pin_hash FROM users WHERE id=?', (guard_user['id'],)).fetchone()
@@ -1672,7 +1695,7 @@ def init_db():
             guard_row_id = guard_user['guard_id']
             if guard_row_id:
                 conn.execute(
-                    "UPDATE guards SET employee_id=?, badge_id=? WHERE company_id=? AND id=?",
+                    "UPDATE guards SET employee_id=COALESCE(NULLIF(employee_id, ''), ?), badge_id=COALESCE(NULLIF(badge_id, ''), ?) WHERE company_id=? AND id=?",
                     (employee_id, badge_id, demo_company, guard_row_id),
                 )
                 assigned_site = conn.execute(
@@ -1875,17 +1898,23 @@ def guard_site_ids(conn, user):
     guard_row_id = row_value(user, 'guard_id')
     if not user or row_value(user, 'role') != 'guard' or not guard_row_id:
         return None
-    rows = conn.execute(
-        '''
-        SELECT gsa.site_id
-        FROM guard_site_assignments gsa
-        JOIN sites s ON s.id=gsa.site_id AND s.company_id=gsa.company_id
-        WHERE gsa.company_id=? AND gsa.guard_id=? AND COALESCE(s.active,1)=1
-        ORDER BY gsa.assigned_at DESC, gsa.id DESC, s.name
-        ''',
-        (user['company_id'], guard_row_id),
-    ).fetchall()
-    return {row['site_id'] for row in rows}
+    preferred_site_id = str(row_value(user, 'session_site_id') or '').strip()
+    if preferred_site_id.isdigit():
+        preferred = conn.execute(
+            '''
+            SELECT gsa.site_id
+            FROM guard_site_assignments gsa
+            JOIN sites s ON s.id=gsa.site_id AND s.company_id=gsa.company_id
+            WHERE gsa.company_id=? AND gsa.guard_id=? AND gsa.site_id=? AND COALESCE(s.active,1)=1
+            ORDER BY gsa.assigned_at DESC, gsa.id DESC
+            LIMIT 1
+            ''',
+            (user['company_id'], guard_row_id, int(preferred_site_id)),
+        ).fetchone()
+        if preferred:
+            return {preferred['site_id']}
+    primary_site = guard_primary_assigned_site(conn, user)
+    return {primary_site['id']} if primary_site else set()
 
 
 def supervisor_site_ids(conn, user):
@@ -1951,6 +1980,11 @@ def app_page(environ, start_response, user, template_name, active_path='/dashboa
         conn.close()
         if not can_access_site:
             return redirect_with_feedback(start_response, '/dashboard', error='You can only access sites assigned to your guard profile.')
+        session, session_id = get_session(environ)
+        selected_site_int = int(selected_site_id)
+        if session_id and row_value(user, 'session_site_id') != selected_site_int:
+            set_session_site(session_id, selected_site_int)
+            user['session_site_id'] = selected_site_int
     shift_form_values = {k: query.get(k, '') for k in ('site_id', 'user_id', 'shift_date', 'start_time', 'end_time', 'notes', 'exclude_shift_id')}
     context = get_dashboard_context(user, view, shift_form_values=shift_form_values)
     context.update(extra_context)
@@ -2294,6 +2328,8 @@ def process_shift_clock_action(user, shift_id, action):
             return False, 'Shift not accessible'
         if user['role'] != 'guard' or shift_assignment_value(shift) != user['id']:
             return False, 'Only the assigned guard can clock this shift'
+        if not supervisor_can_access_site(conn, user, shift['site_id']):
+            return False, 'Shift is not at your assigned site'
 
         timestamp = utc_now_str()
         if action == 'in':
@@ -2476,18 +2512,24 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
 
     shift_form_values = shift_form_values or {}
     if user['role'] == 'guard':
-        my_shifts = conn.execute('''
-            SELECT shifts.*, COALESCE(shifts.user_id, shifts.guard_id) as user_id, COALESCE(shifts.guard_id, shifts.user_id) as guard_id, sites.name as site_name, sites.address, sites.client_company_name
-            FROM shifts JOIN sites ON shifts.site_id = sites.id
-            WHERE COALESCE(shifts.user_id, shifts.guard_id)=? AND shifts.company_id=?
-            ORDER BY shift_date, start_time
-        ''', (user['id'], company_id)).fetchall()
-        available_shifts = conn.execute('''
-            SELECT shifts.*, COALESCE(shifts.user_id, shifts.guard_id) as user_id, COALESCE(shifts.guard_id, shifts.user_id) as guard_id, sites.name as site_name, sites.address, sites.client_company_name
-            FROM shifts JOIN sites ON shifts.site_id = sites.id
-            WHERE shifts.company_id=? AND COALESCE(shifts.user_id, shifts.guard_id) IS NULL AND shifts.status='open' AND shifts.shift_date>=?
-            ORDER BY shift_date, start_time
-        ''', (company_id, today.isoformat())).fetchall()
+        guard_site_filter = tuple(sorted(allowed_site_ids or set()))
+        if guard_site_filter:
+            guard_site_placeholders = ','.join(['?'] * len(guard_site_filter))
+            my_shifts = conn.execute(f'''
+                SELECT shifts.*, COALESCE(shifts.user_id, shifts.guard_id) as user_id, COALESCE(shifts.guard_id, shifts.user_id) as guard_id, sites.name as site_name, sites.address, sites.client_company_name
+                FROM shifts JOIN sites ON shifts.site_id = sites.id
+                WHERE COALESCE(shifts.user_id, shifts.guard_id)=? AND shifts.company_id=? AND shifts.site_id IN ({guard_site_placeholders})
+                ORDER BY shift_date, start_time
+            ''', (user['id'], company_id, *guard_site_filter)).fetchall()
+            available_shifts = conn.execute(f'''
+                SELECT shifts.*, COALESCE(shifts.user_id, shifts.guard_id) as user_id, COALESCE(shifts.guard_id, shifts.user_id) as guard_id, sites.name as site_name, sites.address, sites.client_company_name
+                FROM shifts JOIN sites ON shifts.site_id = sites.id
+                WHERE shifts.company_id=? AND COALESCE(shifts.user_id, shifts.guard_id) IS NULL AND shifts.status='open' AND shifts.shift_date>=? AND shifts.site_id IN ({guard_site_placeholders})
+                ORDER BY shift_date, start_time
+            ''', (company_id, today.isoformat(), *guard_site_filter)).fetchall()
+        else:
+            my_shifts = []
+            available_shifts = []
         shifts = my_shifts
         sites = conn.execute('SELECT * FROM sites WHERE company_id=? ORDER BY name', (company_id,)).fetchall()
         clients = conn.execute('SELECT * FROM clients WHERE company_id=? ORDER BY name', (company_id,)).fetchall()
@@ -2564,6 +2606,13 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
                 ORDER BY u.full_name
             '''.format(','.join(['?'] * max(1, len(allowed_site_ids)))), tuple([company_id] + sorted(allowed_site_ids))).fetchall() if allowed_site_ids else []
             guards = guard_rows
+    if user['role'] == 'guard' and allowed_site_ids is not None:
+        sites = [row for row in sites if row['id'] in allowed_site_ids]
+        reports = [row for row in reports if row['site_id'] in allowed_site_ids]
+        recent_reports = reports
+        dar_recent = [row for row in dar_recent if row['site_id'] in allowed_site_ids]
+        incident_recent = [row for row in incident_recent if row['site_id'] in allowed_site_ids]
+
     shift_form = {
         'site_id': (shift_form_values.get('site_id') or '').strip(),
         'user_id': (shift_form_values.get('user_id') or '').strip(),
@@ -5337,7 +5386,7 @@ def guard_login_identity_candidates(identity):
     guard_badge = "COALESCE(g.badge_id, '')" if 'badge_id' in guard_cols else "''"
     guard_full_name = "COALESCE(NULLIF(TRIM(g.name), ''), NULLIF(TRIM(g.first_name || ' ' || g.last_name), ''), '')" if 'name' in guard_cols else "COALESCE(NULLIF(TRIM(g.first_name || ' ' || g.last_name), ''), '')"
     rows = conn.execute(f"""
-        SELECT g.*, u.id AS user_id, u.username, u.password, u.pin_hash, u.active AS user_active,
+        SELECT g.*, g.id AS guard_profile_id, u.id AS user_id, u.username, u.password, u.pin_hash, u.active AS user_active,
                u.email AS login_email, u.license_number AS login_license_number, c.name AS company_name,
                c.tagline AS company_tagline, c.logo_path AS company_logo
         FROM users u
@@ -6213,13 +6262,14 @@ GUARD_LOGIN_ASSIGNED_SITES_HTML = r'''{% extends "layout.html" %}
     {% if sites %}
     <div class="guard-login-list">
       {% for site in sites %}
-      <a class="list-item detailed guard-login-item" href="/dashboard?site_id={{ site.id }}">
+      <form method="post" action="/guard-login/sites/select" class="list-item detailed guard-login-item">{{ csrf_input|safe }}
+        <input type="hidden" name="site_id" value="{{ site.id }}">
         <div>
           <strong>{{ site.name }}</strong>
           <div class="small-muted">{% if site.client_name %}{{ site.client_name }}{% elif site.address %}{{ site.address }}{% else %}Assigned site{% endif %}</div>
         </div>
-        <span class="btn ghost">Open dashboard</span>
-      </a>
+        <button class="btn ghost" type="submit">Open dashboard</button>
+      </form>
       {% endfor %}
     </div>
     {% else %}
@@ -6703,12 +6753,12 @@ def application(environ, start_response):
         if not guard:
             record_login_attempt(rate_limit_key, False, environ=environ, user_id=guard['user_id'] if guard else None, company_id=guard['company_id'] if guard else None)
             return guard_login_list_page(environ, start_response, current_user=user, identity=identity, error='Invalid Guard ID or PIN.')
-        assigned_sites = guard_login_assigned_sites(guard['company_id'], guard['id'])
+        assigned_sites = guard_login_assigned_sites(guard['company_id'], guard['guard_profile_id'])
         if not assigned_sites:
             record_login_attempt(rate_limit_key, False, environ=environ, user_id=guard['user_id'], company_id=guard['company_id'])
             return guard_login_list_page(environ, start_response, current_user=user, identity=identity, error='No site assigned. Please contact your supervisor.')
         record_login_attempt(rate_limit_key, True, environ=environ, user_id=guard['user_id'], company_id=guard['company_id'])
-        selected_site_id = assigned_sites[0]['id'] if len(assigned_sites) == 1 else None
+        selected_site_id = assigned_sites[0]['id']
         session_id = create_session(guard['user_id'], company_id=guard['company_id'], site_id=selected_site_id, role='guard')
         headers = [('Set-Cookie', cookie_header(session_id))]
         remember_cookie = guard_login_identity_cookie(identity, data.get('remember_device') == '1')
@@ -6725,6 +6775,21 @@ def application(environ, start_response):
         if len(sites) == 1:
             return redirect(start_response, f'/dashboard?site_id={sites[0]["id"]}')
         return guard_login_assigned_sites_page(environ, start_response, user, sites)
+    if path == '/guard-login/sites/select' and method == 'POST':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        if user['role'] != 'guard':
+            return redirect(start_response, '/dashboard')
+        data, _ = parse_post(environ)
+        site_id = (data.get('site_id') or '').strip()
+        conn = db()
+        can_access_site = site_id.isdigit() and supervisor_can_access_site(conn, user, int(site_id))
+        conn.close()
+        if not can_access_site:
+            return guard_login_assigned_sites_page(environ, start_response, user, guard_login_assigned_sites(user['company_id'], guard_assignment_id(user)), error='You can only select sites assigned to your guard profile.')
+        _session, session_id = get_session(environ)
+        set_session_site(session_id, int(site_id))
+        return redirect(start_response, f'/dashboard?site_id={site_id}')
     site_list_match = re.match(r'^/guard-login/\d+/sites$', path)
     if site_list_match and method == 'GET':
         return not_found(start_response)
@@ -6848,6 +6913,8 @@ def application(environ, start_response):
             conn.close(); return bad_request(start_response, 'Shift not found')
         if shift_assignment_value(shift) is not None or shift['status'] != 'open':
             conn.close(); return bad_request(start_response, 'Shift is no longer open')
+        if not supervisor_can_access_site(conn, user, shift['site_id']):
+            conn.close(); return bad_request(start_response, 'Open shift is not at your assigned site')
         conflict = approved_time_off_request_for_date(conn, user['company_id'], user['id'], shift['shift_date'])
         if conflict:
             conn.close()
@@ -7224,7 +7291,7 @@ def application(environ, start_response):
         conn = db(); company_id = get_company_scope_id(user)
         checkpoint = conn.execute('''SELECT pc.*, pt.name AS tour_name, s.name AS site_name FROM patrol_tour_checkpoints pc JOIN patrol_tours pt ON pt.id=pc.tour_id JOIN sites s ON s.id=pc.site_id WHERE pc.id=? AND pc.company_id=?''', (query.get('id'), company_id)).fetchone()
         if not checkpoint: conn.close(); return not_found(start_response)
-        allowed = user['role'] in {'superadmin', 'company_admin', 'admin', 'client'} or (user['role'] == 'guard' and user['company_id'] == checkpoint['company_id']) or supervisor_can_access_site(conn, user, checkpoint['site_id'])
+        allowed = user['role'] in {'superadmin', 'company_admin', 'admin', 'client'} or supervisor_can_access_site(conn, user, checkpoint['site_id'])
         conn.close()
         if not allowed: return redirect_with_feedback(start_response, '/dashboard', error='You do not have permission to view that checkpoint QR code.')
         qr_value = urllib.parse.quote(checkpoint['qr_code'])
@@ -7320,6 +7387,7 @@ def application(environ, start_response):
         data, _ = parse_post(environ); conn = db()
         tour = conn.execute('SELECT * FROM patrol_tours WHERE id=? AND company_id=? AND active=1', (data.get('tour_id'), user['company_id'])).fetchone()
         if not tour: conn.close(); return bad_request(start_response, 'Tour not found')
+        if not supervisor_can_access_site(conn, user, tour['site_id']): conn.close(); return bad_request(start_response, 'Tour is not at your assigned site')
         run_id = insert_and_get_id(conn, '''INSERT INTO patrol_tour_runs (company_id, site_id, tour_id, guard_id, status, started_at, missed_checkpoint_count) VALUES (?, ?, ?, ?, 'in_progress', ?, 0)''', (user['company_id'], tour['site_id'], tour['id'], user['id'], utc_now_str()))
         conn.commit(); conn.close(); return redirect(start_response, f'/patrol/run?id={run_id}')
     if path == '/patrol/scan' and method == 'POST':
@@ -7358,7 +7426,7 @@ def application(environ, start_response):
         if response: return response
         conn = db(); company_id = get_company_scope_id(user); run, checkpoints = patrol_run_detail(conn, company_id, query.get('id'))
         if not run: conn.close(); return not_found(start_response)
-        allowed = user['role'] in {'superadmin', 'company_admin', 'admin', 'client'} or (user['role'] == 'guard' and run['guard_id'] == user['id']) or supervisor_can_access_site(conn, user, run['site_id'])
+        allowed = user['role'] in {'superadmin', 'company_admin', 'admin', 'client'} or (user['role'] == 'guard' and run['guard_id'] == user['id'] and supervisor_can_access_site(conn, user, run['site_id'])) or supervisor_can_access_site(conn, user, run['site_id'])
         conn.close()
         if not allowed: return redirect_with_feedback(start_response, '/dashboard', error='You do not have permission to view that patrol run.')
         context = get_dashboard_context(user)
