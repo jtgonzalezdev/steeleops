@@ -703,9 +703,58 @@ def response_headers(extra=None, content_type='text/html; charset=utf-8'):
     return headers
 
 
+def guard_primary_assigned_site(conn, user, preferred_site_id=None):
+    if not user or row_value(user, 'role') != 'guard':
+        return None
+    guard_row_id = row_value(user, 'guard_id')
+    company_id = row_value(user, 'company_id')
+    if not guard_row_id or not company_id:
+        return None
+    preferred_site_id = str(preferred_site_id or '').strip()
+    if preferred_site_id.isdigit():
+        preferred = conn.execute(
+            '''
+            SELECT s.id, s.name, s.address, COALESCE(NULLIF(c.name, ''), NULLIF(s.client_company_name, ''), '') AS client_name
+            FROM guard_site_assignments gsa
+            JOIN sites s ON s.id=gsa.site_id AND s.company_id=gsa.company_id
+            LEFT JOIN clients c ON c.id=s.client_id AND c.company_id=s.company_id
+            WHERE gsa.company_id=? AND gsa.guard_id=? AND gsa.site_id=? AND COALESCE(s.active,1)=1
+            ORDER BY gsa.assigned_at DESC, gsa.id DESC
+            LIMIT 1
+            ''',
+            (company_id, guard_row_id, int(preferred_site_id)),
+        ).fetchone()
+        if preferred:
+            return preferred
+    return conn.execute(
+        '''
+        SELECT s.id, s.name, s.address, COALESCE(NULLIF(c.name, ''), NULLIF(s.client_company_name, ''), '') AS client_name
+        FROM guard_site_assignments gsa
+        JOIN sites s ON s.id=gsa.site_id AND s.company_id=gsa.company_id
+        LEFT JOIN clients c ON c.id=s.client_id AND c.company_id=s.company_id
+        WHERE gsa.company_id=? AND gsa.guard_id=? AND COALESCE(s.active,1)=1
+        ORDER BY gsa.assigned_at DESC, gsa.id DESC
+        LIMIT 1
+        ''',
+        (company_id, guard_row_id),
+    ).fetchone()
+
+
+def guard_primary_assigned_site_id(conn, user, preferred_site_id=None):
+    site = guard_primary_assigned_site(conn, user, preferred_site_id=preferred_site_id)
+    return site['id'] if site else None
+
+
 def create_session(user_id, company_id=None, site_id=None, role=None):
     sid = secrets.token_urlsafe(32)
     conn = db()
+    if site_id is None or company_id is None or role is None:
+        user = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+        if user:
+            company_id = company_id if company_id is not None else row_value(user, 'company_id')
+            role = role if role is not None else row_value(user, 'role')
+            if site_id is None and row_value(user, 'role') == 'guard':
+                site_id = guard_primary_assigned_site_id(conn, user)
     cols = ['id', 'user_id', 'created_at', 'expires_at']
     vals = [sid, user_id, now_utc().strftime('%Y-%m-%d %H:%M:%S'), expires_at()]
     session_cols = column_names(conn, 'sessions') if table_exists(conn, 'sessions') else set()
@@ -1614,9 +1663,12 @@ def init_db():
             if not guard_user:
                 continue
             conn.execute(
-                "UPDATE users SET full_name=?, employee_id=?, badge_id=?, pin_hash=? WHERE id=?",
-                (full_name, employee_id, badge_id, hash_password(demo_pin), guard_user['id']),
+                "UPDATE users SET full_name=?, employee_id=?, badge_id=? WHERE id=?",
+                (full_name, employee_id, badge_id, guard_user['id']),
             )
+            existing_pin = conn.execute('SELECT pin_hash FROM users WHERE id=?', (guard_user['id'],)).fetchone()
+            if existing_pin and not existing_pin['pin_hash']:
+                conn.execute('UPDATE users SET pin_hash=? WHERE id=?', (hash_password(demo_pin), guard_user['id']))
             guard_row_id = guard_user['guard_id']
             if guard_row_id:
                 conn.execute(
@@ -1766,7 +1818,13 @@ def get_session(environ):
     conn.close()
     if not row:
         return None, session_id
-    return {'user_id': row['user_id']}, session_id
+    session = {'user_id': row['user_id']}
+    for key in ('company_id', 'site_id', 'role'):
+        try:
+            session[key] = row[key]
+        except Exception:
+            pass
+    return session, session_id
 
 
 def get_current_user(environ):
@@ -1779,7 +1837,13 @@ def get_current_user(environ):
         FROM users LEFT JOIN companies ON users.company_id = companies.id WHERE users.id=?
     ''', (session['user_id'],)).fetchone()
     conn.close()
-    return user
+    if not user:
+        return None
+    user_data = dict(user)
+    for key in ('company_id', 'site_id', 'role'):
+        if key in session:
+            user_data[f'session_{key}'] = session.get(key)
+    return user_data
 
 
 def require_login(environ, start_response):
@@ -1817,7 +1881,7 @@ def guard_site_ids(conn, user):
         FROM guard_site_assignments gsa
         JOIN sites s ON s.id=gsa.site_id AND s.company_id=gsa.company_id
         WHERE gsa.company_id=? AND gsa.guard_id=? AND COALESCE(s.active,1)=1
-        ORDER BY s.name, gsa.assigned_at DESC, gsa.id DESC
+        ORDER BY gsa.assigned_at DESC, gsa.id DESC, s.name
         ''',
         (user['company_id'], guard_row_id),
     ).fetchall()
@@ -2773,14 +2837,9 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
             None,
         )
         guard_dashboard_summary['current_shift'] = active_shift or today_shift
-        assigned_site_name = None
-        if guard_dashboard_summary['current_shift']:
-            assigned_site_name = guard_dashboard_summary['current_shift'].get('site_name')
-        elif my_shifts:
-            upcoming = [shift for shift in my_shifts if shift['shift_date'] >= today.isoformat()]
-            if upcoming:
-                assigned_site_name = upcoming[0].get('site_name')
-        guard_dashboard_summary['assigned_site'] = assigned_site_name or 'Unassigned'
+        assigned_site = guard_primary_assigned_site(conn, user, preferred_site_id=row_value(user, 'session_site_id'))
+        guard_dashboard_summary['assigned_site'] = assigned_site['name'] if assigned_site else 'No site assigned.'
+        guard_dashboard_summary['assigned_site_id'] = assigned_site['id'] if assigned_site else None
         guard_dashboard_summary['hours_worked_week'] = fetch_scalar(
             conn,
             'SELECT COALESCE(SUM(worked_hours),0) AS cnt FROM shifts WHERE company_id=? AND COALESCE(user_id, guard_id)=? AND shift_date BETWEEN ? AND ?',
@@ -5312,7 +5371,7 @@ def guard_login_assigned_sites(company_id, guard_id):
         JOIN sites s ON s.id=gsa.site_id AND s.company_id=gsa.company_id
         LEFT JOIN clients c ON c.id=s.client_id AND c.company_id=s.company_id
         WHERE gsa.company_id=? AND gsa.guard_id=? AND COALESCE(s.active,1)=1
-        ORDER BY s.name, gsa.assigned_at DESC, gsa.id DESC
+        ORDER BY gsa.assigned_at DESC, gsa.id DESC, s.name
     """, (company_id, guard_id)).fetchall()
     conn.close()
     return rows
@@ -6540,8 +6599,7 @@ def application(environ, start_response):
         records = payload.get('records') or []
         results = []
         conn = db()
-        guard_row_id = user['guard_id'] if 'guard_id' in user.keys() else None
-        assigned_site = conn.execute('SELECT site_id FROM guard_site_assignments WHERE company_id=? AND guard_id=? LIMIT 1', (user['company_id'], guard_row_id)).fetchone() if guard_row_id else None
+        assigned_site = guard_primary_assigned_site(conn, user, preferred_site_id=row_value(user, 'session_site_id'))
         for record in records:
             kind = record.get('kind')
             data = record.get('data') or {}
@@ -7520,15 +7578,7 @@ def application(environ, start_response):
         if user['role'] != 'guard':
             return redirect_with_feedback(start_response, '/dashboard', error='Only guards can access Daily Activity Reports.')
         conn = db()
-        assigned_site = None
-        guard_row_id = guard_assignment_id(user)
-        if guard_row_id:
-            assigned_site = conn.execute('''
-                SELECT s.id, s.name FROM guard_site_assignments gsa
-                JOIN sites s ON s.id=gsa.site_id
-                WHERE gsa.company_id=? AND gsa.guard_id=?
-                LIMIT 1
-            ''', (user['company_id'], guard_row_id)).fetchone()
+        assigned_site = guard_primary_assigned_site(conn, user, preferred_site_id=row_value(user, 'session_site_id'))
         dar_reports = conn.execute('''
             SELECT d.*, s.name as site_name FROM daily_activity_reports d
             JOIN sites s ON d.site_id=s.id
@@ -7546,8 +7596,7 @@ def application(environ, start_response):
         if not data.get('activity_type') or not data.get('summary'):
             return bad_request(start_response, 'Activity type and summary are required.')
         conn = db()
-        guard_row_id = guard_assignment_id(user)
-        assigned_site = conn.execute('SELECT site_id FROM guard_site_assignments WHERE company_id=? AND guard_id=? LIMIT 1', (user['company_id'], guard_row_id)).fetchone() if guard_row_id else None
+        assigned_site = guard_primary_assigned_site(conn, user, preferred_site_id=row_value(user, 'session_site_id'))
         if not assigned_site:
             conn.close()
             return redirect_with_feedback(start_response, '/guard/daily-activity-reports', error='No assigned site found for your account.')
@@ -7654,8 +7703,7 @@ def application(environ, start_response):
         if user['role'] != 'guard':
             return redirect(start_response, '/dashboard')
         conn = db()
-        guard_row_id = guard_assignment_id(user)
-        assigned_site = conn.execute('SELECT s.id, s.name FROM guard_site_assignments gsa JOIN sites s ON s.id=gsa.site_id WHERE gsa.company_id=? AND gsa.guard_id=? LIMIT 1', (user['company_id'], guard_row_id)).fetchone() if guard_row_id else None
+        assigned_site = guard_primary_assigned_site(conn, user, preferred_site_id=row_value(user, 'session_site_id'))
         incident_reports = conn.execute('SELECT i.*, s.name as site_name FROM incident_reports i JOIN sites s ON i.site_id=s.id WHERE i.company_id=? AND i.officer_id=? ORDER BY i.created_at DESC LIMIT 20', (user['company_id'], user['id'])).fetchall()
         conn.close()
         return app_page(environ, start_response, user, 'guard_incident_reports.html', active_path='/guard/incident-reports', view='week', title='Incident Reports', assigned_site=assigned_site, server_now=utc_now_str(), incident_reports=incident_reports)
@@ -7668,8 +7716,7 @@ def application(environ, start_response):
         if not data.get('incident_type') or not data.get('priority') or not data.get('narrative'):
             return bad_request(start_response, 'Incident type, priority, and narrative are required.')
         conn = db()
-        guard_row_id = guard_assignment_id(user)
-        assigned_site = conn.execute('SELECT site_id FROM guard_site_assignments WHERE company_id=? AND guard_id=? LIMIT 1', (user['company_id'], guard_row_id)).fetchone() if guard_row_id else None
+        assigned_site = guard_primary_assigned_site(conn, user, preferred_site_id=row_value(user, 'session_site_id'))
         if not assigned_site:
             conn.close()
             return redirect_with_feedback(start_response, '/guard/incident-reports', error='No assigned site found for your account.')
