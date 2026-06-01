@@ -3635,6 +3635,26 @@ def application(environ, start_response):
             conn = db(); conn.execute('UPDATE companies SET logo_path=? WHERE id=?', (logo_path, user['company_id'])); conn.commit(); conn.close()
         return redirect(start_response, '/dashboard')
 
+    if path == '/admin/patrol/export/history.csv':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        conn = db()
+        try:
+            csv_data = patrol_history_csv(conn, user)
+        finally:
+            conn.close()
+        start_response('200 OK', response_headers([('Content-Disposition', 'attachment; filename="steeleops_patrol_history.csv"')], 'text/csv; charset=utf-8'))
+        return [csv_data]
+    if path == '/admin/patrol/export/missed-checkpoints.csv':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        conn = db()
+        try:
+            csv_data = missed_checkpoints_csv(conn, user)
+        finally:
+            conn.close()
+        start_response('200 OK', response_headers([('Content-Disposition', 'attachment; filename="steeleops_missed_checkpoints.csv"')], 'text/csv; charset=utf-8'))
+        return [csv_data]
     if path == '/admin/reports/export':
         user, response = require_admin(environ, start_response)
         if response:
@@ -3884,6 +3904,64 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
     </section>
 
     {% if user.role in ['company_admin', 'superadmin', 'supervisor', 'admin'] %}
+    <section class="card">
+      <div class="section-head">
+        <div><h3>Patrol Analytics Dashboard</h3><span>Completion rates, missed checkpoints, guard and site performance</span></div>
+        <div class="actions">
+          <a class="btn ghost" href="/admin/patrol/export/history.csv">Export Patrol History CSV</a>
+          <a class="btn ghost" href="/admin/patrol/export/missed-checkpoints.csv">Export Missed Checkpoints CSV</a>
+        </div>
+      </div>
+      <div class="grid stats-grid">
+        <div class="stat card"><div class="stat-label">Total Tours Assigned</div><div class="stat-number">{{ patrol_completion_summary.total_assigned }}</div></div>
+        <div class="stat card"><div class="stat-label">Total Tours Completed</div><div class="stat-number">{{ patrol_completion_summary.total_completed }}</div></div>
+        <div class="stat card"><div class="stat-label">Patrol Completion Rate</div><div class="stat-number">{{ '%.1f'|format(patrol_completion_summary.completion_percentage|float) }}%</div></div>
+        <div class="stat card"><div class="stat-label">Patrols Today</div><div class="stat-number">{{ patrol_dashboard_widgets.patrols_today }}</div></div>
+        <div class="stat card"><div class="stat-label">Completed Tours Today</div><div class="stat-number">{{ patrol_dashboard_widgets.completed_today }}</div></div>
+        <div class="stat card"><div class="stat-label">Missed Checkpoints Today</div><div class="stat-number">{{ patrol_dashboard_widgets.missed_today }}</div></div>
+      </div>
+      <div class="grid two-col">
+        <div class="card compact-card">
+          <div class="section-head"><h4>Top Performing Guards</h4><span>Ranked by completion rate</span></div>
+          {% for guard in top_performing_guards %}
+          <div class="list-item"><strong>{{ guard.guard_name }}</strong><span>{{ '%.1f'|format(guard.completion_percentage|float) }}% · {{ guard.month_completed }} this month · {{ guard.missed_count }} missed</span></div>
+          {% else %}<div class="empty">No patrol performance yet.</div>{% endfor %}
+        </div>
+        <div class="card compact-card">
+          <div class="section-head"><h4>Missed Checkpoints by Guard</h4><span>Recent missed checkpoint totals</span></div>
+          {% for item in missed_checkpoints_by_guard %}
+          <div class="list-item"><strong>{{ item.name }}</strong><span>{{ item.missed_count }} missed</span></div>
+          {% else %}<div class="empty">No missed checkpoints recorded.</div>{% endfor %}
+        </div>
+      </div>
+      <div class="table-wrap">
+        <h4>Guard Performance</h4>
+        <table><thead><tr><th>Guard</th><th>This Week</th><th>This Month</th><th>Avg Completion</th><th>Missed</th></tr></thead><tbody>
+          {% for guard in guard_performance %}<tr><td>{{ guard.guard_name }}</td><td>{{ guard.week_completed }}</td><td>{{ guard.month_completed }}</td><td>{{ '%.1f'|format(guard.average_completion_minutes|float) }} min</td><td>{{ guard.missed_count }}</td></tr>
+          {% else %}<tr><td colspan="5">No guard patrol history.</td></tr>{% endfor %}
+        </tbody></table>
+      </div>
+      <div class="table-wrap">
+        <h4>Site Performance</h4>
+        <table><thead><tr><th>Site</th><th>Completion %</th><th>Last Completed Patrol</th><th>Active Routes</th><th>Assigned / Completed</th></tr></thead><tbody>
+          {% for site in site_performance %}<tr><td>{{ site.site_name }}</td><td>{{ '%.1f'|format(site.completion_percentage|float) }}%</td><td>{{ site.last_completed_patrol or '—' }}</td><td>{{ site.active_routes }}</td><td>{{ site.total_assigned }} / {{ site.total_completed }}</td></tr>
+          {% else %}<tr><td colspan="5">No site patrol history.</td></tr>{% endfor %}
+        </tbody></table>
+      </div>
+      <div class="grid two-col">
+        <div class="card compact-card">
+          <div class="section-head"><h4>Missed Checkpoints by Site</h4><span>Recent missed checkpoint totals</span></div>
+          {% for item in missed_checkpoints_by_site %}<div class="list-item"><strong>{{ item.name }}</strong><span>{{ item.missed_count }} missed</span></div>{% else %}<div class="empty">No missed checkpoints by site.</div>{% endfor %}
+        </div>
+        <div class="card compact-card">
+          <div class="section-head"><h4>Missed Checkpoint History</h4><span>Date/time audit trail</span></div>
+          {% for miss in missed_checkpoint_history %}
+          <div class="list-item detailed"><div><strong>{{ miss.checkpoint_name }}</strong><div class="small-muted">{{ miss.scanned_at }} · {{ miss.guard_name }} · {{ miss.site_name }} · {{ miss.tour_name }}</div></div></div>
+          {% else %}<div class="empty">No missed checkpoint history.</div>{% endfor %}
+        </div>
+      </div>
+    </section>
+
     <section class="card admin-action-card">
       <div class="section-head">
         <div>
@@ -6549,14 +6627,72 @@ def create_patrol_checkpoint(conn, company_id, tour_id, site_id, checkpoint_name
     )
 
 
+def patrol_scope_clause(conn, user, alias='ptr'):
+    company_id = get_company_scope_id(user)
+    allowed_site_ids = supervisor_site_ids(conn, user)
+    clauses = [f'{alias}.company_id=?']
+    params = [company_id]
+    if row_value(user, 'role') == 'guard' and alias == 'ptr':
+        clauses.append(f'{alias}.guard_id=?')
+        params.append(row_value(user, 'id'))
+    elif allowed_site_ids is not None:
+        if not allowed_site_ids:
+            clauses.append('1=0')
+        else:
+            placeholders = ','.join(['?'] * len(allowed_site_ids))
+            clauses.append(f'{alias}.site_id IN ({placeholders})')
+            params.extend(sorted(allowed_site_ids))
+    return ' AND '.join(clauses), params
+
+
+def parse_patrol_datetime(value):
+    if not value:
+        return None
+    cleaned = str(value).strip().replace('T', ' ')
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+        try:
+            return datetime.strptime(cleaned[:19 if fmt.endswith('%S') else 16], fmt)
+        except Exception:
+            continue
+    try:
+        return datetime.fromisoformat(str(value).strip())
+    except Exception:
+        return None
+
+
+def patrol_duration_minutes(row):
+    started = parse_patrol_datetime(row_value(row, 'started_at'))
+    completed = parse_patrol_datetime(row_value(row, 'completed_at'))
+    if not started or not completed or completed < started:
+        return None
+    return round((completed - started).total_seconds() / 60, 1)
+
+
+def patrol_completion_percentage(total, completed):
+    return round((completed / total) * 100, 1) if total else 0
+
+
 def patrol_dashboard_data(conn, user):
     company_id = get_company_scope_id(user)
     allowed_site_ids = supervisor_site_ids(conn, user)
+    today = date.today()
+    week_start = today - timedelta(days=today.weekday())
+    month_start = today.replace(day=1)
     tour_filter = ''
     params = [company_id]
     if allowed_site_ids is not None:
         if not allowed_site_ids:
-            return {'patrol_tours': [], 'active_patrol_tours': [], 'patrol_runs': [], 'completed_tours': [], 'client_patrol_history': []}
+            empty_analytics = {
+                'patrol_completion_summary': {'total_assigned': 0, 'total_completed': 0, 'completion_percentage': 0},
+                'patrol_dashboard_widgets': {'patrols_today': 0, 'completed_today': 0, 'missed_today': 0},
+                'missed_checkpoints_by_guard': [],
+                'missed_checkpoints_by_site': [],
+                'missed_checkpoint_history': [],
+                'guard_performance': [],
+                'site_performance': [],
+                'top_performing_guards': [],
+            }
+            return {'patrol_tours': [], 'active_patrol_tours': [], 'patrol_runs': [], 'completed_tours': [], 'client_patrol_history': [], **empty_analytics}
         placeholders = ','.join(['?'] * len(allowed_site_ids))
         tour_filter = f' AND pt.site_id IN ({placeholders})'
         params.extend(sorted(allowed_site_ids))
@@ -6568,15 +6704,7 @@ def patrol_dashboard_data(conn, user):
         WHERE pt.company_id=?{tour_filter}
         ORDER BY pt.created_at DESC, pt.id DESC
     ''', tuple(params)).fetchall()
-    run_filter = ''
-    run_params = [company_id]
-    if user['role'] == 'guard':
-        run_filter = ' AND ptr.guard_id=?'
-        run_params.append(user['id'])
-    elif allowed_site_ids is not None:
-        placeholders = ','.join(['?'] * len(allowed_site_ids))
-        run_filter = f' AND ptr.site_id IN ({placeholders})'
-        run_params.extend(sorted(allowed_site_ids))
+    run_where, run_params = patrol_scope_clause(conn, user, 'ptr')
     runs = conn.execute(f'''
         SELECT ptr.*, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name,
                (SELECT COUNT(*) FROM patrol_tour_checkpoints pc WHERE pc.company_id=ptr.company_id AND pc.tour_id=ptr.tour_id AND COALESCE(pc.active,1)=1) AS total_checkpoints,
@@ -6585,11 +6713,150 @@ def patrol_dashboard_data(conn, user):
         JOIN patrol_tours pt ON pt.id=ptr.tour_id AND pt.company_id=ptr.company_id
         JOIN sites s ON s.id=ptr.site_id AND s.company_id=ptr.company_id
         JOIN users u ON u.id=ptr.guard_id
-        WHERE ptr.company_id=?{run_filter}
+        WHERE {run_where}
         ORDER BY ptr.started_at DESC
         LIMIT 20
     ''', tuple(run_params)).fetchall()
-    return {'patrol_tours': tours, 'active_patrol_tours': [t for t in tours if t['active']], 'patrol_runs': runs, 'completed_tours': [r for r in runs if r['status'] == 'completed'], 'client_patrol_history': [r for r in runs if r['status'] == 'completed']}
+    all_runs = conn.execute(f'''
+        SELECT ptr.*, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name
+        FROM patrol_tour_runs ptr
+        JOIN patrol_tours pt ON pt.id=ptr.tour_id AND pt.company_id=ptr.company_id
+        JOIN sites s ON s.id=ptr.site_id AND s.company_id=ptr.company_id
+        JOIN users u ON u.id=ptr.guard_id
+        WHERE {run_where}
+        ORDER BY ptr.started_at DESC
+    ''', tuple(run_params)).fetchall()
+    total_assigned = len(all_runs)
+    total_completed = len([r for r in all_runs if row_value(r, 'status') == 'completed'])
+    patrol_completion_summary = {
+        'total_assigned': total_assigned,
+        'total_completed': total_completed,
+        'completion_percentage': patrol_completion_percentage(total_assigned, total_completed),
+    }
+    patrols_today = len([r for r in all_runs if str(row_value(r, 'started_at') or '')[:10] == today.isoformat()])
+    completed_today = len([r for r in all_runs if row_value(r, 'status') == 'completed' and str(row_value(r, 'completed_at') or '')[:10] == today.isoformat()])
+    missed_today = sum(int(row_value(r, 'missed_checkpoint_count', 0) or 0) for r in all_runs if row_value(r, 'status') == 'completed' and str(row_value(r, 'completed_at') or '')[:10] == today.isoformat())
+
+    missed_where, missed_params = patrol_scope_clause(conn, user, 'pcs')
+    missed_history = conn.execute(f'''
+        SELECT pcs.*, pc.checkpoint_name, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name
+        FROM patrol_checkpoint_scans pcs
+        JOIN patrol_tour_checkpoints pc ON pc.id=pcs.checkpoint_id AND pc.company_id=pcs.company_id
+        JOIN patrol_tours pt ON pt.id=pcs.tour_id AND pt.company_id=pcs.company_id
+        JOIN sites s ON s.id=pcs.site_id AND s.company_id=pcs.company_id
+        JOIN users u ON u.id=pcs.guard_id
+        WHERE {missed_where} AND COALESCE(pcs.missed_checkpoint,0)=1
+        ORDER BY pcs.scanned_at DESC
+        LIMIT 25
+    ''', tuple(missed_params)).fetchall()
+
+    missed_by_guard = {}
+    missed_by_site = {}
+    for row in missed_history:
+        guard_name = row_value(row, 'guard_name') or 'Unknown guard'
+        site_name = row_value(row, 'site_name') or 'Unknown site'
+        missed_by_guard[guard_name] = missed_by_guard.get(guard_name, 0) + 1
+        missed_by_site[site_name] = missed_by_site.get(site_name, 0) + 1
+
+    guard_stats = {}
+    site_stats = {}
+    for run in all_runs:
+        guard_id = row_value(run, 'guard_id')
+        site_id = row_value(run, 'site_id')
+        guard = guard_stats.setdefault(guard_id, {'guard_id': guard_id, 'guard_name': row_value(run, 'guard_name') or 'Unknown guard', 'week_completed': 0, 'month_completed': 0, 'completed_total': 0, 'duration_total': 0, 'duration_count': 0, 'missed_count': 0, 'assigned_total': 0})
+        site = site_stats.setdefault(site_id, {'site_id': site_id, 'site_name': row_value(run, 'site_name') or 'Unknown site', 'total_assigned': 0, 'total_completed': 0, 'last_completed_patrol': None, 'active_routes': 0})
+        guard['assigned_total'] += 1
+        site['total_assigned'] += 1
+        if row_value(run, 'status') == 'completed':
+            completed_at = str(row_value(run, 'completed_at') or '')
+            guard['completed_total'] += 1
+            site['total_completed'] += 1
+            if completed_at[:10] >= week_start.isoformat():
+                guard['week_completed'] += 1
+            if completed_at[:10] >= month_start.isoformat():
+                guard['month_completed'] += 1
+            duration = patrol_duration_minutes(run)
+            if duration is not None:
+                guard['duration_total'] += duration
+                guard['duration_count'] += 1
+            if completed_at and (site['last_completed_patrol'] is None or completed_at > site['last_completed_patrol']):
+                site['last_completed_patrol'] = completed_at
+        guard['missed_count'] += int(row_value(run, 'missed_checkpoint_count', 0) or 0)
+    for tour in tours:
+        site_id = row_value(tour, 'site_id')
+        site = site_stats.setdefault(site_id, {'site_id': site_id, 'site_name': row_value(tour, 'site_name') or 'Unknown site', 'total_assigned': 0, 'total_completed': 0, 'last_completed_patrol': None, 'active_routes': 0})
+        if row_value(tour, 'active'):
+            site['active_routes'] += 1
+    guard_performance = []
+    for stat in guard_stats.values():
+        stat['average_completion_minutes'] = round(stat['duration_total'] / stat['duration_count'], 1) if stat['duration_count'] else 0
+        stat['completion_percentage'] = patrol_completion_percentage(stat['assigned_total'], stat['completed_total'])
+        guard_performance.append(stat)
+    guard_performance.sort(key=lambda item: (item['month_completed'], item['week_completed'], -item['missed_count']), reverse=True)
+    site_performance = []
+    for stat in site_stats.values():
+        stat['completion_percentage'] = patrol_completion_percentage(stat['total_assigned'], stat['total_completed'])
+        site_performance.append(stat)
+    site_performance.sort(key=lambda item: item['site_name'])
+    top_performing_guards = sorted(guard_performance, key=lambda item: (item['completion_percentage'], item['month_completed'], -item['missed_count']), reverse=True)[:5]
+
+    patrol_dashboard_widgets = {'patrols_today': patrols_today, 'completed_today': completed_today, 'missed_today': missed_today}
+    return {
+        'patrol_tours': tours,
+        'active_patrol_tours': [t for t in tours if row_value(t, 'active')],
+        'patrol_runs': runs,
+        'completed_tours': [r for r in runs if row_value(r, 'status') == 'completed'],
+        'client_patrol_history': [r for r in runs if row_value(r, 'status') == 'completed'],
+        'patrol_completion_summary': patrol_completion_summary,
+        'patrol_dashboard_widgets': patrol_dashboard_widgets,
+        'missed_checkpoints_by_guard': [{'name': name, 'missed_count': count} for name, count in sorted(missed_by_guard.items(), key=lambda item: item[1], reverse=True)],
+        'missed_checkpoints_by_site': [{'name': name, 'missed_count': count} for name, count in sorted(missed_by_site.items(), key=lambda item: item[1], reverse=True)],
+        'missed_checkpoint_history': missed_history,
+        'guard_performance': guard_performance,
+        'site_performance': site_performance,
+        'top_performing_guards': top_performing_guards,
+    }
+
+
+def patrol_history_csv(conn, user):
+    run_where, run_params = patrol_scope_clause(conn, user, 'ptr')
+    rows = conn.execute(f'''
+        SELECT ptr.id, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name, ptr.status, ptr.started_at, ptr.completed_at, ptr.missed_checkpoint_count,
+               (SELECT COUNT(*) FROM patrol_tour_checkpoints pc WHERE pc.company_id=ptr.company_id AND pc.tour_id=ptr.tour_id AND COALESCE(pc.active,1)=1) AS total_checkpoints,
+               (SELECT COUNT(DISTINCT pcs.checkpoint_id) FROM patrol_checkpoint_scans pcs WHERE pcs.tour_run_id=ptr.id AND COALESCE(pcs.missed_checkpoint,0)=0) AS scanned_checkpoints
+        FROM patrol_tour_runs ptr
+        JOIN patrol_tours pt ON pt.id=ptr.tour_id AND pt.company_id=ptr.company_id
+        JOIN sites s ON s.id=ptr.site_id AND s.company_id=ptr.company_id
+        JOIN users u ON u.id=ptr.guard_id
+        WHERE {run_where}
+        ORDER BY ptr.started_at DESC
+    ''', tuple(run_params)).fetchall()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Run ID', 'Tour', 'Site', 'Guard', 'Status', 'Started At', 'Completed At', 'Duration Minutes', 'Total Checkpoints', 'Scanned Checkpoints', 'Missed Checkpoints'])
+    for row in rows:
+        writer.writerow([row_value(row, 'id'), row_value(row, 'tour_name'), row_value(row, 'site_name'), row_value(row, 'guard_name'), row_value(row, 'status'), row_value(row, 'started_at'), row_value(row, 'completed_at') or '', patrol_duration_minutes(row) or '', row_value(row, 'total_checkpoints'), row_value(row, 'scanned_checkpoints'), row_value(row, 'missed_checkpoint_count') or 0])
+    return output.getvalue().encode('utf-8')
+
+
+def missed_checkpoints_csv(conn, user):
+    missed_where, missed_params = patrol_scope_clause(conn, user, 'pcs')
+    rows = conn.execute(f'''
+        SELECT pcs.id, pcs.scanned_at, pc.checkpoint_name, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name, pcs.tour_run_id, pcs.scan_method
+        FROM patrol_checkpoint_scans pcs
+        JOIN patrol_tour_checkpoints pc ON pc.id=pcs.checkpoint_id AND pc.company_id=pcs.company_id
+        JOIN patrol_tours pt ON pt.id=pcs.tour_id AND pt.company_id=pcs.company_id
+        JOIN sites s ON s.id=pcs.site_id AND s.company_id=pcs.company_id
+        JOIN users u ON u.id=pcs.guard_id
+        WHERE {missed_where} AND COALESCE(pcs.missed_checkpoint,0)=1
+        ORDER BY pcs.scanned_at DESC
+    ''', tuple(missed_params)).fetchall()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Missed Scan ID', 'Date/Time', 'Checkpoint', 'Tour', 'Site', 'Guard', 'Run ID', 'Scan Method'])
+    for row in rows:
+        writer.writerow([row_value(row, 'id'), row_value(row, 'scanned_at'), row_value(row, 'checkpoint_name'), row_value(row, 'tour_name'), row_value(row, 'site_name'), row_value(row, 'guard_name'), row_value(row, 'tour_run_id'), row_value(row, 'scan_method')])
+    return output.getvalue().encode('utf-8')
 
 
 def patrol_run_detail(conn, company_id, run_id):
@@ -7497,6 +7764,26 @@ def application(environ, start_response):
         if logo_path:
             conn = db(); conn.execute('UPDATE companies SET logo_path=? WHERE id=?', (logo_path, user['company_id'])); conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='company', target_id=user['company_id'], message='company logo updated', environ=environ)
         return redirect(start_response, '/dashboard')
+    if path == '/admin/patrol/export/history.csv':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        conn = db()
+        try:
+            csv_data = patrol_history_csv(conn, user)
+        finally:
+            conn.close()
+        start_response('200 OK', response_headers([('Content-Disposition', 'attachment; filename="steeleops_patrol_history.csv"')], 'text/csv; charset=utf-8'))
+        return [csv_data]
+    if path == '/admin/patrol/export/missed-checkpoints.csv':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        conn = db()
+        try:
+            csv_data = missed_checkpoints_csv(conn, user)
+        finally:
+            conn.close()
+        start_response('200 OK', response_headers([('Content-Disposition', 'attachment; filename="steeleops_missed_checkpoints.csv"')], 'text/csv; charset=utf-8'))
+        return [csv_data]
     if path == '/admin/reports/export':
         user, response = require_admin(environ, start_response)
         if response: return response
