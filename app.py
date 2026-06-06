@@ -3998,6 +3998,17 @@ ADMIN_COMPANY_LOGO_HTML = r'''{% extends "app_shell.html" %}
 
 DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
+    {% if patrol_issue_alert %}
+    <section class="patrol-alert patrol-alert-{{ patrol_issue_alert.severity }}" role="alert" aria-live="polite">
+      <div>
+        <div class="eyebrow">SteeleOps Patrol Monitoring</div>
+        <strong>{{ patrol_issue_alert.message }}</strong>
+        <div class="small-muted">{{ patrol_issue_alert.incomplete_count }} incomplete · {{ patrol_issue_alert.missed_count }} missed · {{ '%.1f'|format(patrol_issue_alert.completion_percentage|float) }}% completion</div>
+      </div>
+      <a class="btn primary" href="{{ patrol_issue_alert.href }}">View Patrol Issues</a>
+    </section>
+    {% endif %}
+
     {% if user.role != 'client' %}
     <section class="grid stats-grid">
       {% if user.role == 'guard' %}
@@ -4017,16 +4028,16 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
         <div class="stat-label">My Open Reports</div>
         <div class="stat-number">{{ guard_dashboard_summary.open_reports }}</div>
       </div>
-      <div class="stat card"><div class="stat-label">Active Patrols</div><div class="stat-number">{{ stats.active_patrols }}</div></div>
+      <div class="stat card"><div class="stat-label">Active Patrols{% if patrol_issue_alert and patrol_issue_alert.active_count %}<span class="issue-badge warning">{{ patrol_issue_alert.active_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.active_patrols }}</div></div>
       <div class="stat card"><div class="stat-label">Completed Tours</div><div class="stat-number">{{ stats.completed_tours }}</div></div>
-      <div class="stat card"><div class="stat-label">Missed Checkpoints</div><div class="stat-number">{{ stats.missed_checkpoints }}</div></div>
+      <div class="stat card"><div class="stat-label">Missed Checkpoints{% if patrol_issue_alert and patrol_issue_alert.missed_count %}<span class="issue-badge danger">{{ patrol_issue_alert.missed_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.missed_checkpoints }}</div></div>
       {% else %}
       <div class="stat card"><div class="stat-label">Guards On Duty</div><div class="stat-number">{{ stats.guards_on_duty }}</div></div>
       <div class="stat card"><div class="stat-label">Company-wide Open Incidents</div><div class="stat-number">{{ stats.open_incidents }}</div></div>
       <div class="stat card"><div class="stat-label">Sites Active Today</div><div class="stat-number">{{ stats.sites_active_today }}</div></div>
-      <div class="stat card"><div class="stat-label">Active Patrols</div><div class="stat-number">{{ stats.active_patrols }}</div></div>
+      <div class="stat card"><div class="stat-label">Active Patrols{% if patrol_issue_alert and patrol_issue_alert.active_count %}<span class="issue-badge warning">{{ patrol_issue_alert.active_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.active_patrols }}</div></div>
       <div class="stat card"><div class="stat-label">Completed Tours</div><div class="stat-number">{{ stats.completed_tours }}</div></div>
-      <div class="stat card"><div class="stat-label">Missed Checkpoints</div><div class="stat-number">{{ stats.missed_checkpoints }}</div></div>
+      <div class="stat card"><div class="stat-label">Missed Checkpoints{% if patrol_issue_alert and patrol_issue_alert.missed_count %}<span class="issue-badge danger">{{ patrol_issue_alert.missed_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.missed_checkpoints }}</div></div>
       {% endif %}
     </section>
 
@@ -4045,7 +4056,7 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
         <div class="stat card"><div class="stat-label">Patrol Completion Rate</div><div class="stat-number">{{ '%.1f'|format(patrol_completion_summary.completion_percentage|float) }}%</div></div>
         <div class="stat card"><div class="stat-label">Patrols Today</div><div class="stat-number">{{ patrol_dashboard_widgets.patrols_today }}</div></div>
         <div class="stat card"><div class="stat-label">Completed Tours Today</div><div class="stat-number">{{ patrol_dashboard_widgets.completed_today }}</div></div>
-        <div class="stat card"><div class="stat-label">Missed Checkpoints Today</div><div class="stat-number">{{ patrol_dashboard_widgets.missed_today }}</div></div>
+        <div class="stat card"><div class="stat-label">Missed Checkpoints Today{% if patrol_issue_alert and patrol_issue_alert.missed_count %}<span class="issue-badge danger">{{ patrol_issue_alert.missed_count }}</span>{% endif %}</div><div class="stat-number">{{ patrol_dashboard_widgets.missed_today }}</div></div>
       </div>
       <div class="grid two-col">
         <div class="card compact-card">
@@ -4553,10 +4564,10 @@ GUARDS_HTML = r'''{% extends "app_shell.html" %}
 
 PATROLS_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
-    <section class="grid stats-grid">
-      <div class="stat card"><div class="stat-label">Active Patrols</div><div class="stat-number">{{ stats.active_patrols }}</div></div>
+    <section id="patrol-issues" class="grid stats-grid">
+      <div class="stat card"><div class="stat-label">Active Patrols{% if patrol_issue_alert and patrol_issue_alert.active_count %}<span class="issue-badge warning">{{ patrol_issue_alert.active_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.active_patrols }}</div></div>
       <div class="stat card"><div class="stat-label">Completed Tours</div><div class="stat-number">{{ stats.completed_tours }}</div></div>
-      <div class="stat card"><div class="stat-label">Missed Checkpoints</div><div class="stat-number">{{ stats.missed_checkpoints }}</div></div>
+      <div class="stat card"><div class="stat-label">Missed Checkpoints{% if patrol_issue_alert and patrol_issue_alert.missed_count %}<span class="issue-badge danger">{{ patrol_issue_alert.missed_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.missed_checkpoints }}</div></div>
     </section>
 
     {% if user.role in ['company_admin', 'superadmin', 'admin', 'supervisor'] %}
@@ -5164,6 +5175,12 @@ img { max-width: 100%; }
 .demo-box { background: rgba(255,255,255,.04); border: 1px solid var(--line); color: #f5f5f5; }
 .alert.error { background: rgba(239,68,68,.15); border: 1px solid rgba(239,68,68,.35); }
 .alert.success { background: rgba(34,197,94,.14); border: 1px solid rgba(34,197,94,.28); }
+.patrol-alert { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 16px 18px; border-radius: 20px; box-shadow: var(--shadow); border: 1px solid var(--line); }
+.patrol-alert-danger { background: linear-gradient(135deg, rgba(127,29,29,.86), rgba(24,24,27,.96)); border-color: rgba(248,113,113,.58); }
+.patrol-alert-warning { background: linear-gradient(135deg, rgba(120,53,15,.84), rgba(24,24,27,.96)); border-color: rgba(251,191,36,.56); }
+.issue-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 24px; margin-left: 8px; padding: 0 8px; border-radius: 999px; font-size: 12px; font-weight: 800; color: #fff; }
+.issue-badge.danger { background: var(--danger); box-shadow: 0 0 0 3px rgba(239,68,68,.16); }
+.issue-badge.warning { background: var(--warn); color: #111; box-shadow: 0 0 0 3px rgba(245,158,11,.16); }
 .stack { display: grid; gap: 14px; }
 .stack.compact { gap: 10px; }
 label { display: grid; gap: 7px; font-size: 14px; color: #f5f5f5; }
@@ -5244,7 +5261,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
 @media (max-width: 1040px) {
   .login-card, .app-shell, .stats-grid, .two-col, .row-2, .row-3 { grid-template-columns: 1fr; }
   .sidebar { position: static; height: auto; }
-  .topbar, .section-head, .list-item, .simple-header { flex-direction: column; align-items: flex-start; }
+  .topbar, .section-head, .list-item, .simple-header, .patrol-alert { flex-direction: column; align-items: flex-start; }
   .availability-row { grid-template-columns: 1fr; }
   .content { padding: 14px; gap: 10px; }
   .card { padding: 14px; border-radius: 16px; }
@@ -6898,6 +6915,37 @@ def patrol_completion_percentage(total, completed):
     return round((completed / total) * 100, 1) if total else 0
 
 
+def pluralize(count, singular, plural=None):
+    return singular if count == 1 else (plural or f'{singular}s')
+
+
+def patrol_issue_alert_data(total_assigned, total_completed, incomplete_count, active_count, missed_count, completion_percentage):
+    if not total_assigned or (incomplete_count <= 0 and missed_count <= 0 and completion_percentage >= 100):
+        return None
+
+    severity = 'warning' if active_count and not missed_count else 'danger'
+    patrol_label = pluralize(incomplete_count, 'patrol tour')
+    checkpoint_label = pluralize(missed_count, 'checkpoint')
+    message_parts = []
+    if incomplete_count:
+        message_parts.append(f'{incomplete_count} {patrol_label} {"is" if incomplete_count == 1 else "are"} incomplete')
+    if missed_count:
+        message_parts.append(f'{missed_count} {checkpoint_label} {"was" if missed_count == 1 else "were"} missed')
+    if completion_percentage < 100:
+        message_parts.append(f'completion rate is {completion_percentage:.1f}%')
+    message = 'Patrol Alert: ' + '; '.join(message_parts) + '. Review missed checkpoints.'
+
+    return {
+        'severity': severity,
+        'message': message,
+        'incomplete_count': incomplete_count,
+        'active_count': active_count,
+        'missed_count': missed_count,
+        'completion_percentage': completion_percentage,
+        'href': '/patrols#patrol-issues',
+    }
+
+
 def patrol_dashboard_data(conn, user):
     company_id = get_company_scope_id(user)
     allowed_site_ids = supervisor_site_ids(conn, user)
@@ -6911,6 +6959,7 @@ def patrol_dashboard_data(conn, user):
             empty_analytics = {
                 'patrol_completion_summary': {'total_assigned': 0, 'total_completed': 0, 'completion_percentage': 0},
                 'patrol_dashboard_widgets': {'patrols_today': 0, 'completed_today': 0, 'missed_today': 0},
+                'patrol_issue_alert': None,
                 'missed_checkpoints_by_guard': [],
                 'missed_checkpoints_by_site': [],
                 'missed_checkpoint_history': [],
@@ -6962,6 +7011,17 @@ def patrol_dashboard_data(conn, user):
     patrols_today = len([r for r in all_runs if str(row_value(r, 'started_at') or '')[:10] == today.isoformat()])
     completed_today = len([r for r in all_runs if row_value(r, 'status') == 'completed' and str(row_value(r, 'completed_at') or '')[:10] == today.isoformat()])
     missed_today = sum(int(row_value(r, 'missed_checkpoint_count', 0) or 0) for r in all_runs if row_value(r, 'status') == 'completed' and str(row_value(r, 'completed_at') or '')[:10] == today.isoformat())
+    incomplete_count = len([r for r in all_runs if row_value(r, 'status') != 'completed'])
+    active_count = len([r for r in all_runs if row_value(r, 'status') == 'in_progress'])
+    missed_total = sum(int(row_value(r, 'missed_checkpoint_count', 0) or 0) for r in all_runs)
+    patrol_issue_alert = patrol_issue_alert_data(
+        total_assigned,
+        total_completed,
+        incomplete_count,
+        active_count,
+        missed_total,
+        patrol_completion_summary['completion_percentage'],
+    )
 
     missed_where, missed_params = patrol_scope_clause(conn, user, 'pcs')
     missed_history = conn.execute(f'''
@@ -7035,6 +7095,7 @@ def patrol_dashboard_data(conn, user):
         'client_patrol_history': [r for r in runs if row_value(r, 'status') == 'completed'],
         'patrol_completion_summary': patrol_completion_summary,
         'patrol_dashboard_widgets': patrol_dashboard_widgets,
+        'patrol_issue_alert': patrol_issue_alert,
         'missed_checkpoints_by_guard': [{'name': name, 'missed_count': count} for name, count in sorted(missed_by_guard.items(), key=lambda item: item[1], reverse=True)],
         'missed_checkpoints_by_site': [{'name': name, 'missed_count': count} for name, count in sorted(missed_by_site.items(), key=lambda item: item[1], reverse=True)],
         'missed_checkpoint_history': missed_history,
