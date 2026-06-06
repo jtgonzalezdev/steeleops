@@ -4602,7 +4602,7 @@ Back Entrance</textarea></label><button class="btn primary" type="submit">Create
     </section>
     {% elif user.role == 'client' %}
     <section class="grid two-col">
-      <div class="card"><div class="section-head"><h3>Patrol History</h3><span>Read-only completed and excused tours</span></div>{% for run in client_patrol_history %}<div class="list-item detailed"><div><strong>{{ run.tour_name }}</strong><div class="small-muted">{{ run.site_name }} · {% if run.excused_at %}Excused {{ run.excused_at }} by {{ run.excused_by_name or 'Admin/Supervisor' }}{% else %}Completed {{ run.completed_at }}{% endif %}</div><div class="small-muted">Scanned {{ run.scanned_checkpoints }}/{{ run.total_checkpoints }} · Missed {{ run.missed_checkpoint_count or 0 }}{% if run.excused_reason %} · {{ run.excused_reason }}{% endif %}</div></div><div class="actions"><a class="btn ghost" href="/patrol/run?id={{ run.id }}">View</a></div></div>{% else %}<div class="empty">No patrol history yet.</div>{% endfor %}</div>
+      <div class="card"><div class="section-head"><h3>Patrol History</h3><span>Read-only completed and excused tours</span></div>{% for run in client_patrol_history %}<div class="list-item detailed"><div><strong>{{ run.tour_name }}</strong><div class="small-muted">{{ run.site_name }} · {% if run.excused_at %}Excused {{ run.excused_at }} by {{ run.excused_by_name or 'Admin/Supervisor' }}{% else %}Completed {{ run.completed_at }}{% endif %}</div><div class="small-muted">Scanned {{ run.scanned_checkpoints }}/{{ run.total_checkpoints }} · {% if run.excused_at %}Missed 0 · Not Counted{% else %}Missed {{ run.missed_checkpoint_count or 0 }}{% endif %}{% if run.excused_reason %} · {{ run.excused_reason }}{% endif %}</div></div><div class="actions"><a class="btn ghost" href="/patrol/run?id={{ run.id }}">View</a></div></div>{% else %}<div class="empty">No patrol history yet.</div>{% endfor %}</div>
     </section>
     {% endif %}
 {% endblock %}
@@ -4611,9 +4611,9 @@ PATROL_RUN_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
 <section class="card">
   <div class="section-head"><h3>{{ run.tour_name }}</h3><span>{{ run.site_name }} · {{ run.status.replace('_', ' ').title() }}</span></div>
-  <div class="row-4"><div><strong>Guard</strong><div class="small-muted">{{ run.guard_name }} · ID {{ run.guard_id }}</div></div><div><strong>Site ID</strong><div class="small-muted">{{ run.site_id }}</div></div><div><strong>Tour ID</strong><div class="small-muted">{{ run.tour_id }}</div></div><div><strong>Missed Checkpoints</strong><div class="small-muted">{{ run.missed_checkpoint_count or 0 }}</div></div></div>
+  <div class="row-4"><div><strong>Guard</strong><div class="small-muted">{{ run.guard_name }} · ID {{ run.guard_id }}</div></div><div><strong>Site ID</strong><div class="small-muted">{{ run.site_id }}</div></div><div><strong>Tour ID</strong><div class="small-muted">{{ run.tour_id }}</div></div><div><strong>Missed Checkpoints</strong><div class="small-muted">{% if (run.status == 'excused' or run.excused_at) %}0 · Not Counted{% else %}{{ run.missed_checkpoint_count or 0 }}{% endif %}</div></div></div>
   <div class="small-muted">Started {{ run.started_at }}{% if run.completed_at %} · Completed {{ run.completed_at }}{% endif %}{% if run.excused_at %} · Excused {{ run.excused_at }} by {{ run.excused_by_name or 'Admin/Supervisor' }}{% endif %}</div>
-  {% if run.excused_at %}<div class="notice success top-gap"><strong>Excused / Not Counted</strong><div>{{ run.excused_reason }} · {{ run.excused_note }}</div></div>{% endif %}
+  {% if run.excused_at %}<div class="notice success top-gap"><strong>Excused / Not Counted</strong><div class="summary-list"><div><span>Reason</span><strong>{{ run.excused_reason or 'Not specified' }}</strong></div><div><span>Admin/Supervisor Note</span><strong>{{ run.excused_note or 'No note provided' }}</strong></div><div><span>Excused By</span><strong>{{ run.excused_by_name or 'Admin/Supervisor' }}</strong></div><div><span>Date/Time Excused</span><strong>{{ run.excused_at }}</strong></div></div></div>{% endif %}
 </section>
 {% if user.role == 'guard' or can_review_patrol %}
 <section class="card">
@@ -4629,13 +4629,13 @@ PATROL_RUN_HTML = r'''{% extends "app_shell.html" %}
   <div class="section-head"><h3>Patrol Checklist</h3><span>Scan QR, tap/enter NFC, or use manual testing fallback</span></div>
   <div class="checkpoint-grid">
     {% for checkpoint in checkpoints %}
-    <article class="checkpoint-card {% if checkpoint.missed_checkpoint %}missed{% elif checkpoint.scanned_at %}done{% endif %}">
+    <article class="checkpoint-card {% if (run.status == 'excused' or run.excused_at) and (checkpoint.missed_checkpoint or not checkpoint.scanned_at) %}done{% elif checkpoint.missed_checkpoint %}missed{% elif checkpoint.scanned_at %}done{% endif %}">
       <div class="checkpoint-card-head">
         <div><span class="checkpoint-order">{{ checkpoint.sort_order }}</span> <strong>{{ checkpoint.checkpoint_name }}</strong><div class="small-muted">Checkpoint ID {{ checkpoint.id }}</div></div>
-        <div>{% if checkpoint.missed_checkpoint %}<span class="badge declined">Missed</span>{% elif checkpoint.scanned_at %}<span class="badge completed">Completed</span>{% else %}<span class="badge pending">Pending</span>{% endif %}</div>
+        <div>{% if (run.status == 'excused' or run.excused_at) and (checkpoint.missed_checkpoint or not checkpoint.scanned_at) %}<span class="badge completed">Excused / Not Required</span>{% elif checkpoint.missed_checkpoint %}<span class="badge declined">Missed</span>{% elif checkpoint.scanned_at %}<span class="badge completed">Completed</span>{% else %}<span class="badge pending">Pending</span>{% endif %}</div>
       </div>
       <div class="identifier-list"><div><span>QR</span><code>{{ checkpoint.qr_code }}</code></div><div><span>NFC</span><code>{{ checkpoint.nfc_tag_id }}</code></div></div>
-      {% if checkpoint.scanned_at %}<div class="small-muted">{{ checkpoint.scan_method }} completed at {{ checkpoint.scanned_at }}{% if checkpoint.gps_latitude or checkpoint.gps_longitude %} · GPS {{ checkpoint.gps_latitude }}, {{ checkpoint.gps_longitude }}{% endif %}</div>{% endif %}
+      {% if (run.status == 'excused' or run.excused_at) and (checkpoint.missed_checkpoint or not checkpoint.scanned_at) %}<div class="small-muted">Checkpoint not required because this patrol was excused / not counted.</div>{% elif checkpoint.scanned_at %}<div class="small-muted">{{ checkpoint.scan_method }} completed at {{ checkpoint.scanned_at }}{% if checkpoint.gps_latitude or checkpoint.gps_longitude %} · GPS {{ checkpoint.gps_latitude }}, {{ checkpoint.gps_longitude }}{% endif %}</div>{% endif %}
       {% if user.role == 'guard' and run.status == 'in_progress' and not checkpoint.scanned_at %}
       <div class="scan-actions">
         <form method="post" action="/patrol/scan" class="stack compact offline-queue-form" data-offline-kind="patrol_scan"><input type="hidden" name="run_id" value="{{ run.id }}"><input type="hidden" name="checkpoint_id" value="{{ checkpoint.id }}"><input type="hidden" name="scan_method" value="QR"><label>QR Identifier<input type="text" name="scan_value" placeholder="Scan or enter QR value" required></label><div class="row-2"><label>GPS Lat<input type="text" name="gps_latitude"></label><label>GPS Lng<input type="text" name="gps_longitude"></label></div><button class="btn primary" type="submit">Scan QR</button></form>
@@ -6985,6 +6985,14 @@ def patrol_is_missed(row):
     return not patrol_is_compliant(row)
 
 
+def patrol_counts_for_completion(row):
+    return not patrol_is_excused(row)
+
+
+def effective_missed_checkpoint_count(row):
+    return 0 if patrol_is_excused(row) else int(row_value(row, 'missed_checkpoint_count', 0) or 0)
+
+
 def patrol_event(conn, company_id, run_id, event_type, event_label, event_note='', reason='', actor_user_id=None, created_at=None):
     conn.execute(
         '''INSERT INTO patrol_tour_run_events (company_id, tour_run_id, event_type, event_label, event_note, reason, actor_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
@@ -7117,15 +7125,15 @@ def patrol_dashboard_data(conn, user):
     total_assigned = len(all_runs)
     total_completed = len([r for r in all_runs if patrol_is_completed(r)])
     total_excused = len([r for r in all_runs if patrol_is_excused(r)])
-    total_compliant = total_completed + total_excused
-    total_missed = len([r for r in all_runs if patrol_is_missed(r)])
+    total_counted = len([r for r in all_runs if patrol_counts_for_completion(r)])
+    total_missed = len([r for r in all_runs if patrol_counts_for_completion(r) and patrol_is_missed(r)])
     patrol_completion_summary = {
         'total_assigned': total_assigned,
         'total_completed': total_completed,
         'total_excused': total_excused,
-        'total_compliant': total_compliant,
+        'total_compliant': total_completed,
         'total_missed': total_missed,
-        'completion_percentage': patrol_completion_percentage(total_assigned, total_compliant),
+        'completion_percentage': patrol_completion_percentage(total_counted, total_completed),
     }
     patrols_today = len([r for r in all_runs if str(row_value(r, 'started_at') or '')[:10] == today.isoformat()])
     completed_today = len([r for r in all_runs if patrol_is_completed(r) and str(row_value(r, 'completed_at') or '')[:10] == today.isoformat()])
@@ -7135,7 +7143,7 @@ def patrol_dashboard_data(conn, user):
     active_count = len([r for r in all_runs if row_value(r, 'status') == 'in_progress'])
     missed_total = total_missed
     patrol_issue_alert = patrol_issue_alert_data(
-        total_assigned,
+        total_counted,
         total_completed,
         incomplete_count,
         active_count,
@@ -7151,7 +7159,8 @@ def patrol_dashboard_data(conn, user):
         JOIN patrol_tours pt ON pt.id=pcs.tour_id AND pt.company_id=pcs.company_id
         JOIN sites s ON s.id=pcs.site_id AND s.company_id=pcs.company_id
         JOIN users u ON u.id=pcs.guard_id
-        WHERE {missed_where} AND COALESCE(pcs.missed_checkpoint,0)=1
+        JOIN patrol_tour_runs ptr ON ptr.id=pcs.tour_run_id AND ptr.company_id=pcs.company_id
+        WHERE {missed_where} AND COALESCE(pcs.missed_checkpoint,0)=1 AND COALESCE(ptr.status,'')!='excused'
         ORDER BY pcs.scanned_at DESC
         LIMIT 25
     ''', tuple(missed_params)).fetchall()
@@ -7171,9 +7180,10 @@ def patrol_dashboard_data(conn, user):
         site_id = row_value(run, 'site_id')
         guard = guard_stats.setdefault(guard_id, {'guard_id': guard_id, 'guard_name': row_value(run, 'guard_name') or 'Unknown guard', 'week_completed': 0, 'month_completed': 0, 'completed_total': 0, 'duration_total': 0, 'duration_count': 0, 'missed_count': 0, 'assigned_total': 0})
         site = site_stats.setdefault(site_id, {'site_id': site_id, 'site_name': row_value(run, 'site_name') or 'Unknown site', 'total_assigned': 0, 'total_completed': 0, 'last_completed_patrol': None, 'active_routes': 0})
-        guard['assigned_total'] += 1
-        site['total_assigned'] += 1
-        if patrol_is_compliant(run):
+        if patrol_counts_for_completion(run):
+            guard['assigned_total'] += 1
+            site['total_assigned'] += 1
+        if patrol_is_completed(run):
             completed_at = str(row_value(run, 'completed_at') or '')
             guard['completed_total'] += 1
             site['total_completed'] += 1
@@ -7187,7 +7197,7 @@ def patrol_dashboard_data(conn, user):
                 guard['duration_count'] += 1
             if completed_at and (site['last_completed_patrol'] is None or completed_at > site['last_completed_patrol']):
                 site['last_completed_patrol'] = completed_at
-        guard['missed_count'] += int(row_value(run, 'missed_checkpoint_count', 0) or 0)
+        guard['missed_count'] += effective_missed_checkpoint_count(run)
     for tour in tours:
         site_id = row_value(tour, 'site_id')
         site = site_stats.setdefault(site_id, {'site_id': site_id, 'site_name': row_value(tour, 'site_name') or 'Unknown site', 'total_assigned': 0, 'total_completed': 0, 'last_completed_patrol': None, 'active_routes': 0})
@@ -7230,7 +7240,7 @@ def patrol_dashboard_data(conn, user):
 def patrol_history_csv(conn, user):
     run_where, run_params = patrol_scope_clause(conn, user, 'ptr')
     rows = conn.execute(f'''
-        SELECT ptr.id, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name, ptr.status, ptr.started_at, ptr.completed_at, ptr.missed_checkpoint_count,
+        SELECT ptr.id, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name, ptr.status, ptr.started_at, ptr.completed_at, CASE WHEN ptr.status='excused' THEN 0 ELSE ptr.missed_checkpoint_count END AS missed_checkpoint_count,
                (SELECT COUNT(*) FROM patrol_tour_checkpoints pc WHERE pc.company_id=ptr.company_id AND pc.tour_id=ptr.tour_id AND COALESCE(pc.active,1)=1) AS total_checkpoints,
                (SELECT COUNT(DISTINCT pcs.checkpoint_id) FROM patrol_checkpoint_scans pcs WHERE pcs.tour_run_id=ptr.id AND COALESCE(pcs.missed_checkpoint,0)=0) AS scanned_checkpoints
         FROM patrol_tour_runs ptr
@@ -7257,7 +7267,8 @@ def missed_checkpoints_csv(conn, user):
         JOIN patrol_tours pt ON pt.id=pcs.tour_id AND pt.company_id=pcs.company_id
         JOIN sites s ON s.id=pcs.site_id AND s.company_id=pcs.company_id
         JOIN users u ON u.id=pcs.guard_id
-        WHERE {missed_where} AND COALESCE(pcs.missed_checkpoint,0)=1
+        JOIN patrol_tour_runs ptr ON ptr.id=pcs.tour_run_id AND ptr.company_id=pcs.company_id
+        WHERE {missed_where} AND COALESCE(pcs.missed_checkpoint,0)=1 AND COALESCE(ptr.status,'')!='excused'
         ORDER BY pcs.scanned_at DESC
     ''', tuple(missed_params)).fetchall()
     output = io.StringIO()
@@ -8086,7 +8097,7 @@ def application(environ, start_response):
             conn.close(); return redirect_with_feedback(start_response, f'/patrol/run?id={run["id"]}', error='Completed patrols cannot be excused.')
         now = utc_now_str()
         if action == 'excuse':
-            conn.execute("UPDATE patrol_tour_runs SET status='excused', excused_reason=?, excused_note=?, excused_by=?, excused_at=?, completed_at=COALESCE(completed_at, ?) WHERE id=? AND company_id=?", (reason, note, user['id'], now, now, run['id'], company_id))
+            conn.execute("UPDATE patrol_tour_runs SET status='excused', excused_reason=?, excused_note=?, excused_by=?, excused_at=?, completed_at=COALESCE(completed_at, ?), missed_checkpoint_count=0 WHERE id=? AND company_id=?", (reason, note, user['id'], now, now, run['id'], company_id))
             patrol_event(conn, company_id, run['id'], 'patrol_excused', 'Patrol excused by admin/supervisor', note, reason, user['id'], now)
             message = 'Patrol marked excused and removed from missed patrol calculations.'
         else:
