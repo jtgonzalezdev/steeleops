@@ -3938,6 +3938,7 @@ ADMIN_COMPANY_LOGO_HTML = r'''{% extends "app_shell.html" %}
       {% endif %}
     </div>
     <form method="post" action="/admin/company/logo" enctype="multipart/form-data" class="stack compact">
+      {{ csrf_input|safe }}
       <label>Upload Company Logo<input type="file" name="logo" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" required></label>
       <div class="small-muted">PNG uploads are supported. JPG, GIF, WebP, and SVG images are also accepted.</div>
       <button class="btn primary" type="submit">Save Logo</button>
