@@ -69,13 +69,13 @@ BOOTSTRAP_ADMIN_EMAIL = os.getenv('BOOTSTRAP_ADMIN_EMAIL', '').strip()
 TEMP_ADMIN_RESET_PASSWORD = os.getenv('TEMP_ADMIN_RESET_PASSWORD', 'Admin123!')
 TEMP_ADMIN_RESET_MARKER = os.path.join(BASE_DIR, '.temp_admin_password_reset_done')
 
-# Branding defaults keep SteeleOps as the product while separating the
-# company/provider mark so future white-label deployments can override these
-# values without replacing product copy throughout the application.
+# Branding defaults keep SteeleOps as the product/platform while keeping
+# Steele Security Services as the operating company/user brand. Avoid
+# provider-as-sponsor language because it reverses that hierarchy.
 PRODUCT_SHORT_NAME = os.getenv('PRODUCT_SHORT_NAME', 'SteeleOps').strip() or 'SteeleOps'
 PRODUCT_FULL_NAME = os.getenv('PRODUCT_FULL_NAME', 'SteeleOps Control Center').strip() or 'SteeleOps Control Center'
 PROVIDER_BRAND_NAME = os.getenv('PROVIDER_BRAND_NAME', 'Steele Security Services').strip() or 'Steele Security Services'
-PROVIDER_POWERED_BY_TEXT = os.getenv('PROVIDER_POWERED_BY_TEXT', f'Powered by {PROVIDER_BRAND_NAME}').strip() or f'Powered by {PROVIDER_BRAND_NAME}'
+BRAND_SUBTITLE = os.getenv('BRAND_SUBTITLE', f'Built for {PROVIDER_BRAND_NAME}').strip() or f'Built for {PROVIDER_BRAND_NAME}'
 
 PROVIDER_SHIELD_LOGO_FILENAME = 'steele-security-shield.svg'
 PROVIDER_SHIELD_LOGO_URL = f'/static/{PROVIDER_SHIELD_LOGO_FILENAME}'
@@ -114,7 +114,7 @@ def bootstrap_initial_admin(conn, now):
     if not company_row:
         conn.execute(
             'INSERT INTO companies (name, tagline, created_at) VALUES (?, ?, ?)',
-            ('SteeleOps', 'Security Operations Simplified', now),
+            (PROVIDER_BRAND_NAME, 'Security Operations Simplified', now),
         )
         company_row = conn.execute('SELECT id FROM companies ORDER BY id LIMIT 1').fetchone()
 
@@ -176,7 +176,7 @@ def repair_admin_account(conn):
         now = utc_now_str()
         conn.execute(
             'INSERT INTO companies (name, tagline, created_at) VALUES (?, ?, ?)',
-            ('SteeleOps', 'Security Operations Simplified', now),
+            (PROVIDER_BRAND_NAME, 'Security Operations Simplified', now),
         )
         company_row = conn.execute('SELECT id FROM companies ORDER BY id LIMIT 1').fetchone()
 
@@ -1533,10 +1533,17 @@ def init_db():
     now = utc_now_str()
     bootstrap_created = bootstrap_initial_admin(conn, now)
     if not bootstrap_created and fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM companies') == 0:
-        conn.execute('INSERT INTO companies (name, tagline, created_at) VALUES (?, ?, ?)', ('SteeleOps Demo', 'Security Operations Simplified', now))
+        conn.execute('INSERT INTO companies (name, tagline, created_at) VALUES (?, ?, ?)', (PROVIDER_BRAND_NAME, 'Security Operations Simplified', now))
         conn.execute('INSERT INTO companies (name, tagline, created_at) VALUES (?, ?, ?)', ('BlueLine Protective', 'Security Operations Simplified', now))
 
-    demo_company_row = conn.execute("SELECT id FROM companies WHERE name='SteeleOps Demo'").fetchone()
+    old_demo_company_row = conn.execute("SELECT id FROM companies WHERE name='SteeleOps Demo'").fetchone()
+    provider_company_row = conn.execute("SELECT id FROM companies WHERE name=?", (PROVIDER_BRAND_NAME,)).fetchone()
+    if old_demo_company_row and provider_company_row:
+        conn.execute('UPDATE users SET company_id=? WHERE company_id=?', (provider_company_row['id'], old_demo_company_row['id']))
+        conn.execute('DELETE FROM companies WHERE id=?', (old_demo_company_row['id'],))
+    elif old_demo_company_row:
+        conn.execute('UPDATE companies SET name=? WHERE id=?', (PROVIDER_BRAND_NAME, old_demo_company_row['id']))
+    demo_company_row = conn.execute("SELECT id FROM companies WHERE name=?", (PROVIDER_BRAND_NAME,)).fetchone()
     other_company_row = conn.execute("SELECT id FROM companies WHERE name='BlueLine Protective'").fetchone()
     demo_company = demo_company_row['id'] if demo_company_row else None
     other_company = other_company_row['id'] if other_company_row else None
@@ -1544,7 +1551,7 @@ def init_db():
     if not bootstrap_created and fetch_scalar(conn, 'SELECT COUNT(*) AS cnt FROM users') == 0:
         users = [
             (None, 'superadmin', hash_password('admin123'), 'Platform Admin', 'superadmin', '', 'platform@steeleops.local', '', 0, 1, now),
-            (demo_company, 'admin', hash_password('admin123'), 'SteeleOps Admin', 'company_admin', '210-555-0101', 'admin@demo.local', 'ADM-100', 28, 1, now),
+            (demo_company, 'admin', hash_password('admin123'), 'Steele Security Admin', 'company_admin', '210-555-0101', 'admin@demo.local', 'ADM-100', 28, 1, now),
             (demo_company, 'guard1', hash_password('guard123'), 'Marcus Hill', 'guard', '210-555-0199', 'marcus@demo.local', 'TX-2201', 18, 1, now),
             (demo_company, 'guard2', hash_password('guard123'), 'Ava Carter', 'guard', '210-555-0188', 'ava@demo.local', 'TX-2202', 18.5, 1, now),
             (other_company, 'demoadmin', hash_password('admin123'), 'BlueLine Admin', 'company_admin', '830-555-0112', 'admin@blueline.local', 'ADM-200', 27, 1, now),
@@ -1809,7 +1816,7 @@ def render(template_name, **context):
     context.setdefault('product_short_name', PRODUCT_SHORT_NAME)
     context.setdefault('product_full_name', PRODUCT_FULL_NAME)
     context.setdefault('provider_brand_name', PROVIDER_BRAND_NAME)
-    context.setdefault('powered_by_text', PROVIDER_POWERED_BY_TEXT)
+    context.setdefault('brand_subtitle', BRAND_SUBTITLE)
     context.setdefault('provider_logo_url', PROVIDER_SHIELD_LOGO_URL)
     template = env.get_template(template_name)
     return template.render(**context).encode('utf-8')
@@ -3751,7 +3758,7 @@ LOGIN_HTML = r'''{% extends "layout.html" %}
         <div class="eyebrow">{{ product_short_name }}</div>
         <h1>{{ product_full_name }}</h1>
         <p class="tagline">Security Operations Simplified</p>
-        <p class="powered-by">{{ powered_by_text }}</p>
+        <p class="brand-subtitle">{{ brand_subtitle }}</p>
       </div>
       <div class="hero-copy">
         One platform for schedules, reports, patrol checkpoints, time tracking, and payroll-ready exports.
@@ -3766,7 +3773,7 @@ LOGIN_HTML = r'''{% extends "layout.html" %}
       </div>
       <h2>Sign in</h2>
       <p class="small-muted">Access the {{ product_full_name }}</p>
-      <p class="powered-by compact">{{ powered_by_text }}</p>
+      <p class="brand-subtitle compact">{{ brand_subtitle }}</p>
       {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
       <form method="post" action="/login" class="stack">{{ csrf_input|safe }}
         <label>Username<input type="text" name="username" required></label>
@@ -3790,11 +3797,10 @@ APP_SHELL_HTML = r'''{% extends "layout.html" %}
   <aside class="sidebar">
     <div class="sidebar-brand">
       {% if user.company_logo_url %}<img src="{{ user.company_logo_url }}" alt="{{ user.company_name or product_full_name }} logo" class="company-logo">{% else %}<img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-sidebar">{% endif %}
-      <div>
-        <div class="eyebrow">{{ product_short_name }}</div>
-        <h2>{{ product_full_name }}</h2>
-        <div class="small-muted">{{ user.company_name or 'Platform' }}</div>
-        <div class="powered-by sidebar-powered">{{ powered_by_text }}</div>
+      <div class="sidebar-brand-copy">
+        <div class="eyebrow">{{ product_short_name }} Platform</div>
+        <h2>{{ user.company_name or provider_brand_name }}</h2>
+        <div class="small-muted">{{ product_full_name }}</div>
       </div>
     </div>
     <div class="nav-links">
@@ -3810,8 +3816,7 @@ APP_SHELL_HTML = r'''{% extends "layout.html" %}
       <div>
         <div class="eyebrow">{{ product_short_name }} Platform</div>
         <h1>{{ page_title or product_full_name }}</h1>
-        <p class="small-muted">Security Operations Simplified</p>
-        <p class="powered-by compact">{{ powered_by_text }}</p>
+        <p class="small-muted">{{ brand_subtitle }}</p>
       </div>
       <div class="user-chip">{{ user.full_name }} · {{ user.role.replace('_', ' ').title() }}</div>
     </section>
@@ -5071,9 +5076,8 @@ img { max-width: 100%; }
 .logo-mark { width: 58px; height: 58px; display: grid; place-items: center; margin: 0 auto 8px; font-size: 26px; font-weight: 800; background: linear-gradient(145deg, var(--accent), var(--accent-2)); color: #03111d; }
 .eyebrow { text-transform: uppercase; letter-spacing: .16em; font-size: 11px; color: var(--accent-2); }
 .tagline, .small-muted { color: var(--muted); }
-.powered-by { margin: 8px 0 0; color: #b9d7ff; font-size: 13px; font-weight: 700; letter-spacing: .02em; }
-.powered-by.compact { margin-top: 6px; color: var(--accent-2); }
-.sidebar-powered { margin-top: 4px; font-size: 11px; color: var(--accent-2); }
+.brand-subtitle { margin: 8px 0 0; color: #b9d7ff; font-size: 13px; font-weight: 700; letter-spacing: .02em; }
+.brand-subtitle.compact { margin-top: 6px; color: var(--accent-2); }
 .hero-copy { max-width: 480px; line-height: 1.6; color: #d9e6f7; }
 .feature-pills span { display: inline-block; margin: 0 8px 8px 0; padding: 8px 12px; border-radius: 999px; border: 1px solid var(--line); background: rgba(255,255,255,.04); }
 .demo-box, .alert { margin-top: 16px; padding: 14px; border-radius: 16px; }
@@ -5090,12 +5094,14 @@ button, .btn { display: inline-flex; justify-content: center; align-items: cente
 .btn.ghost { background: transparent; }
 .app-shell { min-height: 100vh; display: grid; grid-template-columns: 280px 1fr; }
 .sidebar { border-right: 1px solid var(--line); padding: 24px; background: rgba(6,10,18,.75); position: sticky; top: 0; height: 100vh; }
-.sidebar-brand { display: flex; gap: 14px; align-items: center; margin-bottom: 26px; }
-.company-logo { width: 56px; height: 56px; object-fit: cover; border-radius: 16px; }
+.sidebar-brand { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 26px; }
+.sidebar-brand-copy { min-width: 0; padding-top: 3px; }
+.sidebar-brand-copy h2 { margin: 3px 0 4px; font-size: 18px; line-height: 1.15; overflow-wrap: anywhere; }
+.company-logo { width: 56px; height: 56px; flex: 0 0 56px; object-fit: cover; border-radius: 16px; }
 .brand-shield { display: block; flex: 0 0 auto; object-fit: contain; filter: drop-shadow(0 16px 32px rgba(78,164,255,.22)); }
 .brand-shield-large { width: 82px; height: 102px; }
 .brand-shield-form { width: 74px; height: 92px; margin: 0 auto; }
-.brand-shield-sidebar { width: 56px; height: 70px; }
+.brand-shield-sidebar { width: 56px; height: 70px; flex-basis: 56px; }
 .brand-shield-topbar { width: 38px; height: 48px; }
 .nav-links { display: grid; gap: 8px; }
 .nav-links a { padding: 12px 14px; border-radius: 14px; color: #d8e6f6; }
@@ -5892,7 +5898,7 @@ def render_page(environ, template_name, **context):
     context.setdefault('product_short_name', PRODUCT_SHORT_NAME)
     context.setdefault('product_full_name', PRODUCT_FULL_NAME)
     context.setdefault('provider_brand_name', PROVIDER_BRAND_NAME)
-    context.setdefault('powered_by_text', PROVIDER_POWERED_BY_TEXT)
+    context.setdefault('brand_subtitle', BRAND_SUBTITLE)
     context.setdefault('provider_logo_url', PROVIDER_SHIELD_LOGO_URL)
     return render(template_name, **context)
 
@@ -6254,7 +6260,7 @@ def init_db():
             ensure_column(conn, 'guards', col)
     if APP_ENV == 'production':
         # conn.execute("DELETE FROM users WHERE username IN ('superadmin','admin','guard1','guard2','demoadmin') AND email LIKE '%%.local'")
-        conn.execute("DELETE FROM companies WHERE name IN ('SteeleOps Demo','BlueLine Protective') AND id NOT IN (SELECT DISTINCT company_id FROM users WHERE company_id IS NOT NULL)")
+        conn.execute("DELETE FROM companies WHERE name IN ('SteeleOps Demo',?,'BlueLine Protective') AND id NOT IN (SELECT DISTINCT company_id FROM users WHERE company_id IS NOT NULL)", (PROVIDER_BRAND_NAME,))
     conn.commit(); conn.close()
 
 
