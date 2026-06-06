@@ -69,6 +69,14 @@ BOOTSTRAP_ADMIN_EMAIL = os.getenv('BOOTSTRAP_ADMIN_EMAIL', '').strip()
 TEMP_ADMIN_RESET_PASSWORD = os.getenv('TEMP_ADMIN_RESET_PASSWORD', 'Admin123!')
 TEMP_ADMIN_RESET_MARKER = os.path.join(BASE_DIR, '.temp_admin_password_reset_done')
 
+# Branding defaults keep SteeleOps as the product while separating the
+# company/provider mark so future white-label deployments can override these
+# values without replacing product copy throughout the application.
+PRODUCT_SHORT_NAME = os.getenv('PRODUCT_SHORT_NAME', 'SteeleOps').strip() or 'SteeleOps'
+PRODUCT_FULL_NAME = os.getenv('PRODUCT_FULL_NAME', 'SteeleOps Control Center').strip() or 'SteeleOps Control Center'
+PROVIDER_BRAND_NAME = os.getenv('PROVIDER_BRAND_NAME', 'Steele Security Services').strip() or 'Steele Security Services'
+PROVIDER_POWERED_BY_TEXT = os.getenv('PROVIDER_POWERED_BY_TEXT', f'Powered by {PROVIDER_BRAND_NAME}').strip() or f'Powered by {PROVIDER_BRAND_NAME}'
+
 env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=select_autoescape(['html']))
 
 
@@ -1770,6 +1778,10 @@ def init_db():
 
 
 def render(template_name, **context):
+    context.setdefault('product_short_name', PRODUCT_SHORT_NAME)
+    context.setdefault('product_full_name', PRODUCT_FULL_NAME)
+    context.setdefault('provider_brand_name', PROVIDER_BRAND_NAME)
+    context.setdefault('powered_by_text', PROVIDER_POWERED_BY_TEXT)
     template = env.get_template(template_name)
     return template.render(**context).encode('utf-8')
 
@@ -1971,7 +1983,7 @@ def sidebar_nav_items(user, active_path):
     return items
 
 
-def app_page(environ, start_response, user, template_name, active_path='/dashboard', view='week', title='SteeleOps Control Center', **extra_context):
+def app_page(environ, start_response, user, template_name, active_path='/dashboard', view='week', title=PRODUCT_FULL_NAME, **extra_context):
     query = parse_query(environ)
     selected_site_id = (query.get('site_id') or '').strip()
     if row_value(user, 'role') == 'guard' and selected_site_id:
@@ -1990,7 +2002,7 @@ def app_page(environ, start_response, user, template_name, active_path='/dashboa
     context.update(extra_context)
     context.setdefault('active_path', active_path)
     context.setdefault('nav_items', sidebar_nav_items(user, active_path))
-    context.setdefault('page_title', title)
+    context.setdefault('page_title', title or PRODUCT_FULL_NAME)
     context.setdefault('flash_message', query.get('message', ''))
     context.setdefault('flash_error', query.get('error', ''))
     return html_response(
@@ -2000,7 +2012,7 @@ def app_page(environ, start_response, user, template_name, active_path='/dashboa
     )
 
 
-def dashboard_page(environ, start_response, user, active_path='/dashboard', view='week', title='SteeleOps Control Center', **extra_context):
+def dashboard_page(environ, start_response, user, active_path='/dashboard', view='week', title=PRODUCT_FULL_NAME, **extra_context):
     return app_page(environ, start_response, user, 'dashboard.html', active_path=active_path, view=view, title=title, **extra_context)
 
 
@@ -2991,7 +3003,7 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
 
 
 def login_page(start_response, error=None):
-    return html_response(start_response, render('login.html', title='SteeleOps Login', error=error))
+    return html_response(start_response, render('login.html', title=PRODUCT_FULL_NAME, error=error))
 
 
 def log_route_exception(route_name, exc):
@@ -3252,7 +3264,7 @@ def application(environ, start_response):
             if response:
                 return response
             ctx = get_dashboard_context(user, query.get('view', 'week'))
-            return html_response(start_response, render('dashboard.html', title='SteeleOps Control Center', user=user, **ctx))
+            return html_response(start_response, render('dashboard.html', title=PRODUCT_FULL_NAME, user=user, **ctx))
         except Exception as exc:
             log_route_exception('/dashboard', exc)
             return dashboard_error_page(start_response)
@@ -3670,7 +3682,7 @@ def application(environ, start_response):
         start_date = query.get('start', (date.today() - timedelta(days=date.today().weekday())).isoformat())
         end_date = query.get('end', (date.today() - timedelta(days=date.today().weekday()) + timedelta(days=13)).isoformat())
         rows = payroll_rows(user['company_id'], start_date, end_date, query.get('guard_id'))
-        html = render('dashboard.html', title='SteeleOps Control Center', user=user, **get_dashboard_context(user, query.get('view', 'week')), payroll_rows=rows, payroll_start=start_date, payroll_end=end_date)
+        html = render('dashboard.html', title=PRODUCT_FULL_NAME, user=user, **get_dashboard_context(user, query.get('view', 'week')), payroll_rows=rows, payroll_start=start_date, payroll_end=end_date)
         return html_response(start_response, html)
 
     if path == '/admin/payroll/export.csv':
@@ -3704,11 +3716,12 @@ LOGIN_HTML = r'''{% extends "layout.html" %}
 <div class="login-shell">
   <div class="login-card">
     <div class="brand-panel">
-      <div class="logo-box">S</div>
+      <div class="logo-box shield-logo" aria-label="Steele Security Services shield branding">S</div>
       <div>
-        <div class="eyebrow">SteeleOps</div>
-        <h1>SteeleOps</h1>
+        <div class="eyebrow">{{ product_short_name }}</div>
+        <h1>{{ product_full_name }}</h1>
         <p class="tagline">Security Operations Simplified</p>
+        <p class="powered-by">{{ powered_by_text }}</p>
       </div>
       <div class="hero-copy">
         One platform for schedules, reports, patrol checkpoints, time tracking, and payroll-ready exports.
@@ -3719,13 +3732,14 @@ LOGIN_HTML = r'''{% extends "layout.html" %}
     </div>
     <div class="form-panel">
       <div class="logo-placeholder">
-        <div class="logo-mark">SteeleOps Logo</div>
-        <div class="small-muted">Placeholder for company branding</div>
+        <div class="logo-mark shield-logo">S</div>
+        <div class="small-muted">{{ provider_brand_name }} shield branding</div>
       </div>
       <h2>Sign in</h2>
-      <p class="small-muted">Access the SteeleOps Control Center</p>
+      <p class="small-muted">Access the {{ product_full_name }}</p>
+      <p class="powered-by compact">{{ powered_by_text }}</p>
       {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
-      <form method="post" action="/login" class="stack">
+      <form method="post" action="/login" class="stack">{{ csrf_input|safe }}
         <label>Username<input type="text" name="username" required></label>
         <label>Password<input type="password" name="password" required></label>
         <button type="submit" class="btn primary">Sign In</button>
@@ -3746,11 +3760,12 @@ APP_SHELL_HTML = r'''{% extends "layout.html" %}
 <div class="app-shell">
   <aside class="sidebar">
     <div class="sidebar-brand">
-      {% if user.company_logo %}<img src="/{{ user.company_logo }}" class="company-logo">{% else %}<div class="logo-box small">S</div>{% endif %}
+      {% if user.company_logo %}<img src="/{{ user.company_logo }}" class="company-logo">{% else %}<div class="logo-box small shield-logo" aria-label="Steele Security Services shield branding">S</div>{% endif %}
       <div>
-        <div class="eyebrow">SteeleOps</div>
-        <h2>Control Center</h2>
+        <div class="eyebrow">{{ product_short_name }}</div>
+        <h2>{{ product_full_name }}</h2>
         <div class="small-muted">{{ user.company_name or 'Platform' }}</div>
+        <div class="powered-by sidebar-powered">{{ powered_by_text }}</div>
       </div>
     </div>
     <div class="nav-links">
@@ -3763,9 +3778,10 @@ APP_SHELL_HTML = r'''{% extends "layout.html" %}
   <main class="content">
     <section class="topbar card">
       <div>
-        <div class="eyebrow">SteeleOps Platform</div>
-        <h1>{{ page_title or 'SteeleOps Control Center' }}</h1>
+        <div class="eyebrow">{{ product_short_name }} Platform</div>
+        <h1>{{ page_title or product_full_name }}</h1>
         <p class="small-muted">Security Operations Simplified</p>
+        <p class="powered-by compact">{{ powered_by_text }}</p>
       </div>
       <div class="user-chip">{{ user.full_name }} · {{ user.role.replace('_', ' ').title() }}</div>
     </section>
@@ -5020,10 +5036,14 @@ img { max-width: 100%; }
 .form-panel { padding: 40px; background: rgba(12,19,31,.92); }
 .logo-box { width: 78px; height: 78px; display: grid; place-items: center; font-size: 34px; font-weight: 800; border-radius: 22px; background: linear-gradient(145deg, var(--accent), var(--accent-2)); color: #03111d; }
 .logo-box.small { width: 54px; height: 54px; font-size: 24px; border-radius: 16px; }
+.shield-logo { clip-path: polygon(50% 0, 88% 13%, 82% 72%, 50% 100%, 18% 72%, 12% 13%); border-radius: 0; box-shadow: inset 0 0 0 2px rgba(255,255,255,.24), 0 16px 32px rgba(78,164,255,.22); }
 .logo-placeholder { padding: 18px; border: 1px dashed rgba(255,255,255,.18); border-radius: 18px; text-align: center; margin-bottom: 18px; background: rgba(255,255,255,.02); }
-.logo-mark { font-weight: 700; margin-bottom: 6px; }
+.logo-mark { width: 58px; height: 58px; display: grid; place-items: center; margin: 0 auto 8px; font-size: 26px; font-weight: 800; background: linear-gradient(145deg, var(--accent), var(--accent-2)); color: #03111d; }
 .eyebrow { text-transform: uppercase; letter-spacing: .16em; font-size: 11px; color: var(--accent-2); }
 .tagline, .small-muted { color: var(--muted); }
+.powered-by { margin: 8px 0 0; color: #b9d7ff; font-size: 13px; font-weight: 700; letter-spacing: .02em; }
+.powered-by.compact { margin-top: 6px; color: var(--accent-2); }
+.sidebar-powered { margin-top: 4px; font-size: 11px; color: var(--accent-2); }
 .hero-copy { max-width: 480px; line-height: 1.6; color: #d9e6f7; }
 .feature-pills span { display: inline-block; margin: 0 8px 8px 0; padding: 8px 12px; border-radius: 999px; border: 1px solid var(--line); background: rgba(255,255,255,.04); }
 .demo-box, .alert { margin-top: 16px; padding: 14px; border-radius: 16px; }
@@ -5824,6 +5844,10 @@ def run_missed_clock_check(company_id, actor_user_id=None, environ=None):
 def render_page(environ, template_name, **context):
     context.setdefault('csrf_input', csrf_hidden_input(environ))
     context.setdefault('show_demo_accounts', APP_ENV != 'production')
+    context.setdefault('product_short_name', PRODUCT_SHORT_NAME)
+    context.setdefault('product_full_name', PRODUCT_FULL_NAME)
+    context.setdefault('provider_brand_name', PROVIDER_BRAND_NAME)
+    context.setdefault('powered_by_text', PROVIDER_POWERED_BY_TEXT)
     return render(template_name, **context)
 
 
@@ -6453,7 +6477,7 @@ def ensure_assets():
 
 
 def login_page(environ, start_response, error=None, message=None, reset_link=None):
-    return html_response(start_response, render_page(environ, 'login.html', title='SteeleOps Login', error=error, message=message, reset_link=reset_link), extra_headers=csrf_headers(environ))
+    return html_response(start_response, render_page(environ, 'login.html', title=PRODUCT_FULL_NAME, error=error, message=message, reset_link=reset_link), extra_headers=csrf_headers(environ))
 
 
 
@@ -7111,7 +7135,7 @@ def application(environ, start_response):
     if path == '/dashboard':
         user, response = require_login(environ, start_response)
         if response: return response
-        return dashboard_page(environ, start_response, user, active_path='/dashboard', view='week', title='SteeleOps Control Center')
+        return dashboard_page(environ, start_response, user, active_path='/dashboard', view='week', title=PRODUCT_FULL_NAME)
     if path == '/patrols':
         user, response = require_login(environ, start_response)
         if response: return response
