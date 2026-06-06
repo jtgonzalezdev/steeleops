@@ -1539,8 +1539,9 @@ def init_db():
     patrol_pk = 'SERIAL PRIMARY KEY' if conn.backend == 'postgres' else 'INTEGER PRIMARY KEY AUTOINCREMENT'
     conn.execute(f'''CREATE TABLE IF NOT EXISTS patrol_tours (id {patrol_pk}, company_id INTEGER NOT NULL, site_id INTEGER NOT NULL, name TEXT NOT NULL, description TEXT, active INTEGER DEFAULT 1, created_by INTEGER, created_at TEXT NOT NULL, updated_at TEXT)''')
     conn.execute(f'''CREATE TABLE IF NOT EXISTS patrol_tour_checkpoints (id {patrol_pk}, company_id INTEGER NOT NULL, tour_id INTEGER NOT NULL, site_id INTEGER NOT NULL, checkpoint_name TEXT NOT NULL, sort_order INTEGER DEFAULT 0, qr_code TEXT NOT NULL UNIQUE, nfc_tag_id TEXT NOT NULL UNIQUE, active INTEGER DEFAULT 1, created_at TEXT NOT NULL)''')
-    conn.execute(f'''CREATE TABLE IF NOT EXISTS patrol_tour_runs (id {patrol_pk}, company_id INTEGER NOT NULL, site_id INTEGER NOT NULL, tour_id INTEGER NOT NULL, guard_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'in_progress', started_at TEXT NOT NULL, completed_at TEXT, missed_checkpoint_count INTEGER DEFAULT 0, notes TEXT)''')
+    conn.execute(f'''CREATE TABLE IF NOT EXISTS patrol_tour_runs (id {patrol_pk}, company_id INTEGER NOT NULL, site_id INTEGER NOT NULL, tour_id INTEGER NOT NULL, guard_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'in_progress', started_at TEXT NOT NULL, completed_at TEXT, missed_checkpoint_count INTEGER DEFAULT 0, notes TEXT, excused_reason TEXT, excused_note TEXT, excused_by INTEGER, excused_at TEXT)''')
     conn.execute(f'''CREATE TABLE IF NOT EXISTS patrol_checkpoint_scans (id {patrol_pk}, company_id INTEGER NOT NULL, site_id INTEGER NOT NULL, tour_id INTEGER NOT NULL, tour_run_id INTEGER NOT NULL, checkpoint_id INTEGER NOT NULL, guard_id INTEGER NOT NULL, scan_method TEXT NOT NULL, scanned_at TEXT NOT NULL, gps_latitude TEXT, gps_longitude TEXT, missed_checkpoint INTEGER DEFAULT 0)''')
+    conn.execute(f'''CREATE TABLE IF NOT EXISTS patrol_tour_run_events (id {patrol_pk}, company_id INTEGER NOT NULL, tour_run_id INTEGER NOT NULL, event_type TEXT NOT NULL, event_label TEXT NOT NULL, event_note TEXT, reason TEXT, actor_user_id INTEGER, created_at TEXT NOT NULL)''')
 
     now = utc_now_str()
     bootstrap_created = bootstrap_initial_admin(conn, now)
@@ -2936,12 +2937,14 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         'weekly_hours': fetch_scalar(conn, 'SELECT COALESCE(SUM(worked_hours),0) AS cnt FROM shifts WHERE company_id=? AND shift_date BETWEEN ? AND ?', (company_id, (today - timedelta(days=today.weekday())).isoformat(), (today - timedelta(days=today.weekday()) + timedelta(days=6)).isoformat())),
         'active_patrols': fetch_scalar(conn, "SELECT COUNT(*) AS cnt FROM patrol_tour_runs WHERE company_id=? AND status='in_progress'", (company_id,)),
         'completed_tours': fetch_scalar(conn, "SELECT COUNT(*) AS cnt FROM patrol_tour_runs WHERE company_id=? AND status='completed' AND date(completed_at)=date(?)", (company_id, today.isoformat())),
-        'missed_checkpoints': fetch_scalar(conn, "SELECT COALESCE(SUM(missed_checkpoint_count),0) AS cnt FROM patrol_tour_runs WHERE company_id=? AND status='completed' AND date(completed_at)=date(?)", (company_id, today.isoformat())),
+        'missed_checkpoints': fetch_scalar(conn, "SELECT COUNT(*) AS cnt FROM patrol_tour_runs WHERE company_id=? AND status NOT IN ('completed','excused') AND date(started_at)=date(?)", (company_id, today.isoformat())),
+        'excused_patrols': fetch_scalar(conn, "SELECT COUNT(*) AS cnt FROM patrol_tour_runs WHERE company_id=? AND status='excused' AND date(excused_at)=date(?)", (company_id, today.isoformat())),
     }
     if user['role'] == 'guard':
         stats['active_patrols'] = fetch_scalar(conn, "SELECT COUNT(*) AS cnt FROM patrol_tour_runs WHERE company_id=? AND guard_id=? AND status='in_progress'", (company_id, user['id']))
         stats['completed_tours'] = fetch_scalar(conn, "SELECT COUNT(*) AS cnt FROM patrol_tour_runs WHERE company_id=? AND guard_id=? AND status='completed' AND date(completed_at)=date(?)", (company_id, user['id'], today.isoformat()))
-        stats['missed_checkpoints'] = fetch_scalar(conn, "SELECT COALESCE(SUM(missed_checkpoint_count),0) AS cnt FROM patrol_tour_runs WHERE company_id=? AND guard_id=? AND status='completed' AND date(completed_at)=date(?)", (company_id, user['id'], today.isoformat()))
+        stats['missed_checkpoints'] = fetch_scalar(conn, "SELECT COUNT(*) AS cnt FROM patrol_tour_runs WHERE company_id=? AND guard_id=? AND status NOT IN ('completed','excused') AND date(started_at)=date(?)", (company_id, user['id'], today.isoformat()))
+        stats['excused_patrols'] = fetch_scalar(conn, "SELECT COUNT(*) AS cnt FROM patrol_tour_runs WHERE company_id=? AND guard_id=? AND status='excused' AND date(excused_at)=date(?)", (company_id, user['id'], today.isoformat()))
     if allowed_site_ids is not None:
         site_params = tuple(sorted(allowed_site_ids))
         if site_params:
@@ -2961,13 +2964,15 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
             )
             stats['active_patrols'] = fetch_scalar(conn, f"SELECT COUNT(*) AS cnt FROM patrol_tour_runs WHERE company_id=? AND status='in_progress' AND site_id IN ({placeholders})", (company_id, *site_params))
             stats['completed_tours'] = fetch_scalar(conn, f"SELECT COUNT(*) AS cnt FROM patrol_tour_runs WHERE company_id=? AND status='completed' AND date(completed_at)=date(?) AND site_id IN ({placeholders})", (company_id, today.isoformat(), *site_params))
-            stats['missed_checkpoints'] = fetch_scalar(conn, f"SELECT COALESCE(SUM(missed_checkpoint_count),0) AS cnt FROM patrol_tour_runs WHERE company_id=? AND status='completed' AND date(completed_at)=date(?) AND site_id IN ({placeholders})", (company_id, today.isoformat(), *site_params))
+            stats['missed_checkpoints'] = fetch_scalar(conn, f"SELECT COUNT(*) AS cnt FROM patrol_tour_runs WHERE company_id=? AND status NOT IN ('completed','excused') AND date(started_at)=date(?) AND site_id IN ({placeholders})", (company_id, today.isoformat(), *site_params))
+            stats['excused_patrols'] = fetch_scalar(conn, f"SELECT COUNT(*) AS cnt FROM patrol_tour_runs WHERE company_id=? AND status='excused' AND date(excused_at)=date(?) AND site_id IN ({placeholders})", (company_id, today.isoformat(), *site_params))
         else:
             stats['guards_on_duty'] = 0
             stats['open_incidents'] = 0
             stats['active_patrols'] = 0
             stats['completed_tours'] = 0
             stats['missed_checkpoints'] = 0
+            stats['excused_patrols'] = 0
     guard_dashboard_summary = {
         'current_shift': None,
         'assigned_site': None,
@@ -3080,6 +3085,7 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         'guard_option_rows': guard_option_rows,
         'guard_availability': guard_availability,
         'guard_dashboard_summary': guard_dashboard_summary,
+        'patrol_excuse_reasons': PATROL_EXCUSE_REASONS,
         'supervisor_dashboard_summary': {
             'open_incidents': stats['open_incidents'],
             'guards_on_duty': stats['guards_on_duty'],
@@ -4030,21 +4036,23 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
       </div>
       <div class="stat card"><div class="stat-label">Active Patrols{% if patrol_issue_alert and patrol_issue_alert.active_count %}<span class="issue-badge warning">{{ patrol_issue_alert.active_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.active_patrols }}</div></div>
       <div class="stat card"><div class="stat-label">Completed Tours</div><div class="stat-number">{{ stats.completed_tours }}</div></div>
-      <div class="stat card"><div class="stat-label">Missed Checkpoints{% if patrol_issue_alert and patrol_issue_alert.missed_count %}<span class="issue-badge danger">{{ patrol_issue_alert.missed_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.missed_checkpoints }}</div></div>
+      <div class="stat card"><div class="stat-label">Excused Patrols</div><div class="stat-number">{{ stats.excused_patrols or 0 }}</div></div>
+      <div class="stat card"><div class="stat-label">Missed Patrols{% if patrol_issue_alert and patrol_issue_alert.missed_count %}<span class="issue-badge danger">{{ patrol_issue_alert.missed_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.missed_checkpoints }}</div></div>
       {% else %}
       <div class="stat card"><div class="stat-label">Guards On Duty</div><div class="stat-number">{{ stats.guards_on_duty }}</div></div>
       <div class="stat card"><div class="stat-label">Company-wide Open Incidents</div><div class="stat-number">{{ stats.open_incidents }}</div></div>
       <div class="stat card"><div class="stat-label">Sites Active Today</div><div class="stat-number">{{ stats.sites_active_today }}</div></div>
       <div class="stat card"><div class="stat-label">Active Patrols{% if patrol_issue_alert and patrol_issue_alert.active_count %}<span class="issue-badge warning">{{ patrol_issue_alert.active_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.active_patrols }}</div></div>
       <div class="stat card"><div class="stat-label">Completed Tours</div><div class="stat-number">{{ stats.completed_tours }}</div></div>
-      <div class="stat card"><div class="stat-label">Missed Checkpoints{% if patrol_issue_alert and patrol_issue_alert.missed_count %}<span class="issue-badge danger">{{ patrol_issue_alert.missed_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.missed_checkpoints }}</div></div>
+      <div class="stat card"><div class="stat-label">Excused Patrols</div><div class="stat-number">{{ stats.excused_patrols or 0 }}</div></div>
+      <div class="stat card"><div class="stat-label">Missed Patrols{% if patrol_issue_alert and patrol_issue_alert.missed_count %}<span class="issue-badge danger">{{ patrol_issue_alert.missed_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.missed_checkpoints }}</div></div>
       {% endif %}
     </section>
 
     {% if user.role in ['company_admin', 'superadmin', 'supervisor', 'admin'] %}
     <section class="card">
       <div class="section-head">
-        <div><h3>Patrol Analytics Dashboard</h3><span>Completion rates, missed checkpoints, guard and site performance</span></div>
+        <div><h3>Patrol Analytics Dashboard</h3><span>Completion rates, excused patrols, missed patrols, guard and site performance</span></div>
         <div class="actions">
           <a class="btn ghost" href="/admin/patrol/export/history.csv">Export Patrol History CSV</a>
           <a class="btn ghost" href="/admin/patrol/export/missed-checkpoints.csv">Export Missed Checkpoints CSV</a>
@@ -4053,10 +4061,13 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
       <div class="grid stats-grid">
         <div class="stat card"><div class="stat-label">Total Tours Assigned</div><div class="stat-number">{{ patrol_completion_summary.total_assigned }}</div></div>
         <div class="stat card"><div class="stat-label">Total Tours Completed</div><div class="stat-number">{{ patrol_completion_summary.total_completed }}</div></div>
+        <div class="stat card"><div class="stat-label">Excused Patrols</div><div class="stat-number">{{ patrol_completion_summary.total_excused }}</div></div>
+        <div class="stat card"><div class="stat-label">Missed Patrols</div><div class="stat-number">{{ patrol_completion_summary.total_missed }}</div></div>
         <div class="stat card"><div class="stat-label">Patrol Completion Rate</div><div class="stat-number">{{ '%.1f'|format(patrol_completion_summary.completion_percentage|float) }}%</div></div>
         <div class="stat card"><div class="stat-label">Patrols Today</div><div class="stat-number">{{ patrol_dashboard_widgets.patrols_today }}</div></div>
         <div class="stat card"><div class="stat-label">Completed Tours Today</div><div class="stat-number">{{ patrol_dashboard_widgets.completed_today }}</div></div>
-        <div class="stat card"><div class="stat-label">Missed Checkpoints Today{% if patrol_issue_alert and patrol_issue_alert.missed_count %}<span class="issue-badge danger">{{ patrol_issue_alert.missed_count }}</span>{% endif %}</div><div class="stat-number">{{ patrol_dashboard_widgets.missed_today }}</div></div>
+        <div class="stat card"><div class="stat-label">Excused Patrols Today</div><div class="stat-number">{{ patrol_dashboard_widgets.excused_today }}</div></div>
+        <div class="stat card"><div class="stat-label">Missed Patrols Today{% if patrol_issue_alert and patrol_issue_alert.missed_count %}<span class="issue-badge danger">{{ patrol_issue_alert.missed_count }}</span>{% endif %}</div><div class="stat-number">{{ patrol_dashboard_widgets.missed_today }}</div></div>
       </div>
       <div class="grid two-col">
         <div class="card compact-card">
@@ -4567,26 +4578,31 @@ PATROLS_HTML = r'''{% extends "app_shell.html" %}
     <section id="patrol-issues" class="grid stats-grid">
       <div class="stat card"><div class="stat-label">Active Patrols{% if patrol_issue_alert and patrol_issue_alert.active_count %}<span class="issue-badge warning">{{ patrol_issue_alert.active_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.active_patrols }}</div></div>
       <div class="stat card"><div class="stat-label">Completed Tours</div><div class="stat-number">{{ stats.completed_tours }}</div></div>
-      <div class="stat card"><div class="stat-label">Missed Checkpoints{% if patrol_issue_alert and patrol_issue_alert.missed_count %}<span class="issue-badge danger">{{ patrol_issue_alert.missed_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.missed_checkpoints }}</div></div>
+      <div class="stat card"><div class="stat-label">Excused Patrols</div><div class="stat-number">{{ stats.excused_patrols or 0 }}</div></div>
+      <div class="stat card"><div class="stat-label">Missed Patrols{% if patrol_issue_alert and patrol_issue_alert.missed_count %}<span class="issue-badge danger">{{ patrol_issue_alert.missed_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.missed_checkpoints }}</div></div>
     </section>
 
     {% if user.role in ['company_admin', 'superadmin', 'admin', 'supervisor'] %}
     <section class="grid two-col">
-      <div class="card"><div class="section-head"><h3>Patrol Tours</h3><span>Create routes and manage QR/NFC checkpoints</span></div>{% if user.role in ['company_admin', 'superadmin', 'admin', 'supervisor'] %}<form method="post" action="/admin/patrol/tour/new" class="stack compact"><h4>Create Patrol Route</h4><div class="row-2"><label>Site<select name="site_id" required>{% for site in sites %}<option value="{{ site.id }}">{{ site.name }}</option>{% endfor %}</select></label><label>Tour Name<input type="text" name="name" placeholder="Perimeter Tour" required></label></div><label>Description<input type="text" name="description"></label><label>Checkpoints<textarea name="checkpoints" rows="5" required>Front Gate
+      <div class="card"><div class="section-head"><h3>Patrol Tours</h3><span>Create routes and manage QR/NFC checkpoints</span></div><form method="post" action="/admin/patrol/tour/new" class="stack compact"><h4>Create Patrol Route</h4><div class="row-2"><label>Site<select name="site_id" required>{% for site in sites %}<option value="{{ site.id }}">{{ site.name }}</option>{% endfor %}</select></label><label>Tour Name<input type="text" name="name" placeholder="Perimeter Tour" required></label></div><label>Description<input type="text" name="description"></label><label>Checkpoints<textarea name="checkpoints" rows="5" required>Front Gate
 Loading Dock
 Fence Line North
 Parking Lot
-Back Entrance</textarea></label><button class="btn primary" type="submit">Create Tour + Checkpoints</button></form><hr>{% endif %}{% for tour in patrol_tours %}<div class="list-item detailed"><div><strong>{{ tour.name }}</strong><div class="small-muted">{{ tour.site_name }} · {{ tour.checkpoint_count }} checkpoints · {% if tour.active %}Active{% else %}Inactive{% endif %}</div></div><div class="actions"><a class="btn ghost" href="/patrol/tour?id={{ tour.id }}">Manage Checkpoints</a></div></div>{% else %}<div class="empty">No patrol tours configured.</div>{% endfor %}</div>
-      <div class="card"><div class="section-head"><h3>Completed Tours</h3><span>Review recent completed patrol history</span></div>{% for run in completed_tours[:12] %}<div class="list-item detailed"><div><strong>{{ run.tour_name }}</strong><div class="small-muted">{{ run.site_name }} · {{ run.guard_name }} · {{ run.completed_at }}</div><div class="small-muted">Scanned {{ run.scanned_checkpoints }}/{{ run.total_checkpoints }} · Missed {{ run.missed_checkpoint_count or 0 }}</div></div><div class="actions"><a class="btn ghost" href="/patrol/run?id={{ run.id }}">Review Tour</a></div></div>{% else %}<div class="empty">No completed patrol tours yet.</div>{% endfor %}</div>
+Back Entrance</textarea></label><button class="btn primary" type="submit">Create Tour + Checkpoints</button></form><hr>{% for tour in patrol_tours %}<div class="list-item detailed"><div><strong>{{ tour.name }}</strong><div class="small-muted">{{ tour.site_name }} · {{ tour.checkpoint_count }} checkpoints · {% if tour.active %}Active{% else %}Inactive{% endif %}</div></div><div class="actions"><a class="btn ghost" href="/patrol/tour?id={{ tour.id }}">Manage Checkpoints</a></div></div>{% else %}<div class="empty">No patrol tours configured.</div>{% endfor %}</div>
+      <div class="card"><div class="section-head"><h3>Review Incomplete Patrols</h3><span>Add admin notes, excuse valid exceptions, or keep patrols as missed</span></div>{% for run in missed_tours[:12] %}<div class="list-item detailed"><div><strong>{{ run.tour_name }}</strong><div class="small-muted">{{ run.site_name }} · {{ run.guard_name }} · Started {{ run.started_at }} · {{ run.status.replace('_', ' ').title() }}</div><div class="small-muted">Progress {{ run.scanned_checkpoints }}/{{ run.total_checkpoints }} · Missed checkpoints {{ run.missed_checkpoint_count or 0 }}</div><form method="post" action="/admin/patrol/review" class="stack compact top-gap"><input type="hidden" name="run_id" value="{{ run.id }}"><label>Reason<select name="reason" required>{% for reason in patrol_excuse_reasons %}<option value="{{ reason }}">{{ reason }}</option>{% endfor %}</select></label><label>Admin/Supervisor Note<textarea name="note" rows="3" required placeholder="Explain the safety or operational exception."></textarea></label><div class="actions"><button class="btn primary" type="submit" name="action" value="excuse">Mark Excused</button><button class="btn ghost" type="submit" name="action" value="missed">Keep as Missed</button><a class="btn ghost" href="/patrol/run?id={{ run.id }}">Review Tour</a></div></form></div></div>{% else %}<div class="empty">No incomplete patrols need review.</div>{% endfor %}</div>
+    </section>
+    <section class="grid two-col">
+      <div class="card"><div class="section-head"><h3>Completed Tours</h3><span>Review recent completed patrol history</span></div>{% for run in completed_tours[:12] %}<div class="list-item detailed"><div><strong>{{ run.tour_name }}</strong><div class="small-muted">{{ run.site_name }} · {{ run.guard_name }} · {{ run.completed_at }}</div><div class="small-muted">Scanned {{ run.scanned_checkpoints }}/{{ run.total_checkpoints }} · Missed checkpoints {{ run.missed_checkpoint_count or 0 }}</div></div><div class="actions"><a class="btn ghost" href="/patrol/run?id={{ run.id }}">Review Tour</a></div></div>{% else %}<div class="empty">No completed patrol tours yet.</div>{% endfor %}</div>
+      <div class="card"><div class="section-head"><h3>Excused Patrols</h3><span>Valid exceptions excluded from missed patrol totals</span></div>{% for run in excused_tours[:12] %}<div class="list-item detailed"><div><strong>{{ run.tour_name }}</strong><div class="small-muted">{{ run.site_name }} · {{ run.guard_name }} · Excused {{ run.excused_at }} by {{ run.excused_by_name or 'Admin/Supervisor' }}</div><div class="small-muted">{{ run.excused_reason }} · {{ run.excused_note }}</div></div><div class="actions"><a class="btn ghost" href="/patrol/run?id={{ run.id }}">Review Tour</a></div></div>{% else %}<div class="empty">No excused patrols yet.</div>{% endfor %}</div>
     </section>
     {% elif user.role == 'guard' %}
     <section class="grid two-col">
       <div class="card"><div class="section-head"><h3>Mobile Patrol Tours</h3><span>Start a patrol tour and scan QR/NFC checkpoints</span></div><form method="post" action="/patrol/start" class="stack compact"><label>Tour<select name="tour_id" required>{% for tour in active_patrol_tours %}<option value="{{ tour.id }}">{{ tour.site_name }} · {{ tour.name }} ({{ tour.checkpoint_count }} checkpoints)</option>{% endfor %}</select></label><button class="btn primary" type="submit" {% if not active_patrol_tours %}disabled{% endif %}>Start Patrol Tour</button></form>{% if not active_patrol_tours %}<div class="empty">No active patrol tours are configured yet.</div>{% endif %}</div>
-      <div class="card"><div class="section-head"><h3>My Patrol Runs</h3><span>Continue or review recent tours</span></div>{% for run in patrol_runs[:12] %}<div class="list-item detailed"><div><strong>{{ run.tour_name }}</strong><div class="small-muted">{{ run.site_name }} · {{ run.started_at }} · {{ run.status.replace('_', ' ').title() }}</div><div class="small-muted">Progress: {{ run.scanned_checkpoints }}/{{ run.total_checkpoints }} · Missed: {{ run.missed_checkpoint_count or 0 }}</div></div><div class="actions"><a class="btn ghost" href="/patrol/run?id={{ run.id }}">Open</a></div></div>{% else %}<div class="empty">No patrol runs yet.</div>{% endfor %}</div>
+      <div class="card"><div class="section-head"><h3>My Patrol Runs</h3><span>Continue or review recent tours; submit notes if a patrol cannot be safely completed</span></div>{% for run in patrol_runs[:12] %}<div class="list-item detailed"><div><strong>{{ run.tour_name }}</strong><div class="small-muted">{{ run.site_name }} · {{ run.started_at }} · {{ run.status.replace('_', ' ').title() }}</div><div class="small-muted">Progress: {{ run.scanned_checkpoints }}/{{ run.total_checkpoints }} · Missed: {{ run.missed_checkpoint_count or 0 }}</div></div><div class="actions"><a class="btn ghost" href="/patrol/run?id={{ run.id }}">Open</a></div></div>{% else %}<div class="empty">No patrol runs yet.</div>{% endfor %}</div>
     </section>
     {% elif user.role == 'client' %}
     <section class="grid two-col">
-      <div class="card"><div class="section-head"><h3>Patrol History</h3><span>Read-only completed tours</span></div>{% for run in client_patrol_history %}<div class="list-item detailed"><div><strong>{{ run.tour_name }}</strong><div class="small-muted">{{ run.site_name }} · {{ run.completed_at }}</div><div class="small-muted">Scanned {{ run.scanned_checkpoints }}/{{ run.total_checkpoints }} · Missed {{ run.missed_checkpoint_count or 0 }}</div></div><div class="actions"><a class="btn ghost" href="/patrol/run?id={{ run.id }}">View</a></div></div>{% else %}<div class="empty">No completed patrol history yet.</div>{% endfor %}</div>
+      <div class="card"><div class="section-head"><h3>Patrol History</h3><span>Read-only completed and excused tours</span></div>{% for run in client_patrol_history %}<div class="list-item detailed"><div><strong>{{ run.tour_name }}</strong><div class="small-muted">{{ run.site_name }} · {% if run.excused_at %}Excused {{ run.excused_at }} by {{ run.excused_by_name or 'Admin/Supervisor' }}{% else %}Completed {{ run.completed_at }}{% endif %}</div><div class="small-muted">Scanned {{ run.scanned_checkpoints }}/{{ run.total_checkpoints }} · Missed {{ run.missed_checkpoint_count or 0 }}{% if run.excused_reason %} · {{ run.excused_reason }}{% endif %}</div></div><div class="actions"><a class="btn ghost" href="/patrol/run?id={{ run.id }}">View</a></div></div>{% else %}<div class="empty">No patrol history yet.</div>{% endfor %}</div>
     </section>
     {% endif %}
 {% endblock %}
@@ -4596,8 +4612,19 @@ PATROL_RUN_HTML = r'''{% extends "app_shell.html" %}
 <section class="card">
   <div class="section-head"><h3>{{ run.tour_name }}</h3><span>{{ run.site_name }} · {{ run.status.replace('_', ' ').title() }}</span></div>
   <div class="row-4"><div><strong>Guard</strong><div class="small-muted">{{ run.guard_name }} · ID {{ run.guard_id }}</div></div><div><strong>Site ID</strong><div class="small-muted">{{ run.site_id }}</div></div><div><strong>Tour ID</strong><div class="small-muted">{{ run.tour_id }}</div></div><div><strong>Missed Checkpoints</strong><div class="small-muted">{{ run.missed_checkpoint_count or 0 }}</div></div></div>
-  <div class="small-muted">Started {{ run.started_at }}{% if run.completed_at %} · Completed {{ run.completed_at }}{% endif %}</div>
+  <div class="small-muted">Started {{ run.started_at }}{% if run.completed_at %} · Completed {{ run.completed_at }}{% endif %}{% if run.excused_at %} · Excused {{ run.excused_at }} by {{ run.excused_by_name or 'Admin/Supervisor' }}{% endif %}</div>
+  {% if run.excused_at %}<div class="notice success top-gap"><strong>Excused / Not Counted</strong><div>{{ run.excused_reason }} · {{ run.excused_note }}</div></div>{% endif %}
 </section>
+{% if user.role == 'guard' or can_review_patrol %}
+<section class="card">
+  <div class="section-head"><h3>Patrol Notes</h3><span>{% if user.role == 'guard' %}Guards can submit notes/explanations only; admins and supervisors decide exceptions.{% else %}Admin and supervisor notes are preserved for client accountability.{% endif %}</span></div>
+  <form method="post" action="/patrol/note" class="stack compact"><input type="hidden" name="run_id" value="{{ run.id }}"><label>Note / Explanation<textarea name="note" rows="3" required placeholder="Add context for this patrol."></textarea></label><button class="btn primary" type="submit">Add Note</button></form>
+  {% if can_review_patrol and run.status not in ['completed', 'excused'] %}
+  <hr>
+  <form method="post" action="/admin/patrol/review" class="stack compact"><input type="hidden" name="run_id" value="{{ run.id }}"><label>Required Reason<select name="reason" required>{% for reason in patrol_excuse_reasons %}<option value="{{ reason }}">{{ reason }}</option>{% endfor %}</select></label><label>Required Admin/Supervisor Note<textarea name="note" rows="3" required placeholder="Document why this incomplete patrol should be excused or kept missed."></textarea></label><div class="actions"><button class="btn primary" type="submit" name="action" value="excuse">Mark Excused</button><button class="btn ghost" type="submit" name="action" value="missed">Keep as Missed</button></div></form>
+  {% endif %}
+</section>
+{% endif %}
 <section class="card">
   <div class="section-head"><h3>Patrol Checklist</h3><span>Scan QR, tap/enter NFC, or use manual testing fallback</span></div>
   <div class="checkpoint-grid">
@@ -4621,7 +4648,12 @@ PATROL_RUN_HTML = r'''{% extends "app_shell.html" %}
   </div>
   {% if user.role == 'guard' and run.status == 'in_progress' %}<form method="post" action="/patrol/complete" class="stack compact top-gap"><input type="hidden" name="run_id" value="{{ run.id }}"><button class="btn primary" type="submit">Complete Tour / Mark Unfinished Checkpoints Missed</button></form>{% endif %}
 </section>
-{% endblock %}'''
+<section class="card">
+  <div class="section-head"><h3>Patrol Timeline</h3><span>Audit trail for client accountability</span></div>
+  <div class="timeline-list">{% for event in patrol_timeline %}<div class="list-item detailed"><div><strong>{{ event.event_label }}</strong><div class="small-muted">{{ event.created_at }}{% if event.actor_name %} · {{ event.actor_name }}{% endif %}{% if event.reason %} · {{ event.reason }}{% endif %}</div>{% if event.event_note %}<div>{{ event.event_note }}</div>{% endif %}</div></div>{% else %}<div class="empty">No patrol timeline entries yet.</div>{% endfor %}</div>
+</section>
+{% endblock %}
+'''
 
 PATROL_TOUR_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
@@ -6401,9 +6433,16 @@ def init_db():
                 "UPDATE patrol_tour_checkpoints SET qr_code=COALESCE(NULLIF(qr_code,''), ?), nfc_tag_id=COALESCE(NULLIF(nfc_tag_id,''), ?) WHERE id=?",
                 (patrol_token('QR'), patrol_token('NFC'), checkpoint['id']),
             )
+    if table_exists(conn, 'patrol_tour_runs'):
+        ensure_column(conn, 'patrol_tour_runs', 'excused_reason TEXT')
+        ensure_column(conn, 'patrol_tour_runs', 'excused_note TEXT')
+        ensure_column(conn, 'patrol_tour_runs', 'excused_by INTEGER')
+        ensure_column(conn, 'patrol_tour_runs', 'excused_at TEXT')
     if table_exists(conn, 'patrol_checkpoint_scans'):
         for col in offline_cols:
             ensure_column(conn, 'patrol_checkpoint_scans', col)
+    patrol_event_pk = 'SERIAL PRIMARY KEY' if conn.backend == 'postgres' else 'INTEGER PRIMARY KEY AUTOINCREMENT'
+    conn.execute(f'''CREATE TABLE IF NOT EXISTS patrol_tour_run_events (id {patrol_event_pk}, company_id INTEGER NOT NULL, tour_run_id INTEGER NOT NULL, event_type TEXT NOT NULL, event_label TEXT NOT NULL, event_note TEXT, reason TEXT, actor_user_id INTEGER, created_at TEXT NOT NULL)''')
     if table_exists(conn, 'sites'):
         ensure_column(conn, 'sites', 'client_id INTEGER')
     if table_exists(conn, 'payroll_guard_records'):
@@ -6919,13 +6958,85 @@ def pluralize(count, singular, plural=None):
     return singular if count == 1 else (plural or f'{singular}s')
 
 
+PATROL_EXCUSE_REASONS = (
+    'Bad Weather',
+    'Unsafe Conditions',
+    'Emergency',
+    'Client Instruction',
+    'Site Access Issue',
+    'Officer Safety',
+    'Other',
+)
+
+
+def patrol_is_excused(row):
+    return row_value(row, 'status') == 'excused' or bool(row_value(row, 'excused_at'))
+
+
+def patrol_is_completed(row):
+    return row_value(row, 'status') == 'completed'
+
+
+def patrol_is_compliant(row):
+    return patrol_is_completed(row) or patrol_is_excused(row)
+
+
+def patrol_is_missed(row):
+    return not patrol_is_compliant(row)
+
+
+def patrol_event(conn, company_id, run_id, event_type, event_label, event_note='', reason='', actor_user_id=None, created_at=None):
+    conn.execute(
+        '''INSERT INTO patrol_tour_run_events (company_id, tour_run_id, event_type, event_label, event_note, reason, actor_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+        (company_id, run_id, event_type, event_label, (event_note or '').strip(), (reason or '').strip(), actor_user_id, created_at or utc_now_str()),
+    )
+
+
+def patrol_timeline(conn, run, checkpoints):
+    run_id = row_value(run, 'id')
+    company_id = row_value(run, 'company_id')
+    rows = conn.execute("""
+        SELECT e.*, u.full_name AS actor_name
+        FROM patrol_tour_run_events e
+        LEFT JOIN users u ON u.id=e.actor_user_id
+        WHERE e.company_id=? AND e.tour_run_id=?
+        ORDER BY e.created_at ASC, e.id ASC
+    """, (company_id, run_id)).fetchall()
+    timeline = [{
+        'created_at': row_value(event, 'created_at'),
+        'event_label': row_value(event, 'event_label'),
+        'event_note': row_value(event, 'event_note'),
+        'reason': row_value(event, 'reason'),
+        'actor_name': row_value(event, 'actor_name'),
+    } for event in rows]
+    if not timeline:
+        started_at = row_value(run, 'started_at')
+        if started_at:
+            timeline.append({'created_at': started_at, 'event_label': 'Patrol assigned', 'event_note': f"Tour assigned to {row_value(run, 'guard_name') or 'guard'}.", 'actor_name': row_value(run, 'guard_name')})
+            timeline.append({'created_at': started_at, 'event_label': 'Patrol started', 'event_note': row_value(run, 'site_name') or '', 'actor_name': row_value(run, 'guard_name')})
+        for checkpoint in checkpoints:
+            if row_value(checkpoint, 'scanned_at'):
+                label = 'Patrol incomplete' if row_value(checkpoint, 'missed_checkpoint') else 'Checkpoint scanned'
+                note = row_value(checkpoint, 'checkpoint_name') or ''
+                timeline.append({'created_at': row_value(checkpoint, 'scanned_at'), 'event_label': label, 'event_note': note, 'actor_name': row_value(run, 'guard_name')})
+        if patrol_is_excused(run):
+            timeline.append({'created_at': row_value(run, 'excused_at'), 'event_label': 'Patrol excused by admin/supervisor', 'event_note': row_value(run, 'excused_note'), 'reason': row_value(run, 'excused_reason'), 'actor_name': row_value(run, 'excused_by_name')})
+        elif patrol_is_missed(run) and row_value(run, 'completed_at'):
+            timeline.append({'created_at': row_value(run, 'completed_at'), 'event_label': 'Patrol incomplete', 'event_note': 'Incomplete patrol kept as missed.', 'actor_name': row_value(run, 'guard_name')})
+    return sorted(timeline, key=lambda item: item.get('created_at') or '')
+
+
+def admin_can_review_patrol(conn, user, run):
+    return row_value(user, 'role') in {'superadmin', 'company_admin', 'admin', 'supervisor'} and supervisor_can_access_site(conn, user, row_value(run, 'site_id'))
+
+
 def patrol_issue_alert_data(total_assigned, total_completed, incomplete_count, active_count, missed_count, completion_percentage):
     if not total_assigned or (incomplete_count <= 0 and missed_count <= 0 and completion_percentage >= 100):
         return None
 
     severity = 'warning' if active_count and not missed_count else 'danger'
     patrol_label = pluralize(incomplete_count, 'patrol tour')
-    checkpoint_label = pluralize(missed_count, 'checkpoint')
+    checkpoint_label = pluralize(missed_count, 'missed patrol')
     message_parts = []
     if incomplete_count:
         message_parts.append(f'{incomplete_count} {patrol_label} {"is" if incomplete_count == 1 else "are"} incomplete')
@@ -6933,7 +7044,7 @@ def patrol_issue_alert_data(total_assigned, total_completed, incomplete_count, a
         message_parts.append(f'{missed_count} {checkpoint_label} {"was" if missed_count == 1 else "were"} missed')
     if completion_percentage < 100:
         message_parts.append(f'completion rate is {completion_percentage:.1f}%')
-    message = 'Patrol Alert: ' + '; '.join(message_parts) + '. Review missed checkpoints.'
+    message = 'Patrol Alert: ' + '; '.join(message_parts) + '. Review patrol exceptions.'
 
     return {
         'severity': severity,
@@ -6957,8 +7068,8 @@ def patrol_dashboard_data(conn, user):
     if allowed_site_ids is not None:
         if not allowed_site_ids:
             empty_analytics = {
-                'patrol_completion_summary': {'total_assigned': 0, 'total_completed': 0, 'completion_percentage': 0},
-                'patrol_dashboard_widgets': {'patrols_today': 0, 'completed_today': 0, 'missed_today': 0},
+                'patrol_completion_summary': {'total_assigned': 0, 'total_completed': 0, 'total_excused': 0, 'total_compliant': 0, 'total_missed': 0, 'completion_percentage': 0},
+                'patrol_dashboard_widgets': {'patrols_today': 0, 'completed_today': 0, 'excused_today': 0, 'missed_today': 0},
                 'patrol_issue_alert': None,
                 'missed_checkpoints_by_guard': [],
                 'missed_checkpoints_by_site': [],
@@ -6981,39 +7092,48 @@ def patrol_dashboard_data(conn, user):
     ''', tuple(params)).fetchall()
     run_where, run_params = patrol_scope_clause(conn, user, 'ptr')
     runs = conn.execute(f'''
-        SELECT ptr.*, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name,
+        SELECT ptr.*, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name, ex.full_name AS excused_by_name,
                (SELECT COUNT(*) FROM patrol_tour_checkpoints pc WHERE pc.company_id=ptr.company_id AND pc.tour_id=ptr.tour_id AND COALESCE(pc.active,1)=1) AS total_checkpoints,
                (SELECT COUNT(DISTINCT pcs.checkpoint_id) FROM patrol_checkpoint_scans pcs WHERE pcs.tour_run_id=ptr.id AND COALESCE(pcs.missed_checkpoint,0)=0) AS scanned_checkpoints
         FROM patrol_tour_runs ptr
         JOIN patrol_tours pt ON pt.id=ptr.tour_id AND pt.company_id=ptr.company_id
         JOIN sites s ON s.id=ptr.site_id AND s.company_id=ptr.company_id
         JOIN users u ON u.id=ptr.guard_id
+        LEFT JOIN users ex ON ex.id=ptr.excused_by
         WHERE {run_where}
         ORDER BY ptr.started_at DESC
         LIMIT 20
     ''', tuple(run_params)).fetchall()
     all_runs = conn.execute(f'''
-        SELECT ptr.*, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name
+        SELECT ptr.*, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name, ex.full_name AS excused_by_name
         FROM patrol_tour_runs ptr
         JOIN patrol_tours pt ON pt.id=ptr.tour_id AND pt.company_id=ptr.company_id
         JOIN sites s ON s.id=ptr.site_id AND s.company_id=ptr.company_id
         JOIN users u ON u.id=ptr.guard_id
+        LEFT JOIN users ex ON ex.id=ptr.excused_by
         WHERE {run_where}
         ORDER BY ptr.started_at DESC
     ''', tuple(run_params)).fetchall()
     total_assigned = len(all_runs)
-    total_completed = len([r for r in all_runs if row_value(r, 'status') == 'completed'])
+    total_completed = len([r for r in all_runs if patrol_is_completed(r)])
+    total_excused = len([r for r in all_runs if patrol_is_excused(r)])
+    total_compliant = total_completed + total_excused
+    total_missed = len([r for r in all_runs if patrol_is_missed(r)])
     patrol_completion_summary = {
         'total_assigned': total_assigned,
         'total_completed': total_completed,
-        'completion_percentage': patrol_completion_percentage(total_assigned, total_completed),
+        'total_excused': total_excused,
+        'total_compliant': total_compliant,
+        'total_missed': total_missed,
+        'completion_percentage': patrol_completion_percentage(total_assigned, total_compliant),
     }
     patrols_today = len([r for r in all_runs if str(row_value(r, 'started_at') or '')[:10] == today.isoformat()])
-    completed_today = len([r for r in all_runs if row_value(r, 'status') == 'completed' and str(row_value(r, 'completed_at') or '')[:10] == today.isoformat()])
-    missed_today = sum(int(row_value(r, 'missed_checkpoint_count', 0) or 0) for r in all_runs if row_value(r, 'status') == 'completed' and str(row_value(r, 'completed_at') or '')[:10] == today.isoformat())
-    incomplete_count = len([r for r in all_runs if row_value(r, 'status') != 'completed'])
+    completed_today = len([r for r in all_runs if patrol_is_completed(r) and str(row_value(r, 'completed_at') or '')[:10] == today.isoformat()])
+    excused_today = len([r for r in all_runs if patrol_is_excused(r) and str(row_value(r, 'excused_at') or '')[:10] == today.isoformat()])
+    missed_today = len([r for r in all_runs if patrol_is_missed(r) and str(row_value(r, 'started_at') or '')[:10] == today.isoformat()])
+    incomplete_count = total_missed
     active_count = len([r for r in all_runs if row_value(r, 'status') == 'in_progress'])
-    missed_total = sum(int(row_value(r, 'missed_checkpoint_count', 0) or 0) for r in all_runs)
+    missed_total = total_missed
     patrol_issue_alert = patrol_issue_alert_data(
         total_assigned,
         total_completed,
@@ -7053,7 +7173,7 @@ def patrol_dashboard_data(conn, user):
         site = site_stats.setdefault(site_id, {'site_id': site_id, 'site_name': row_value(run, 'site_name') or 'Unknown site', 'total_assigned': 0, 'total_completed': 0, 'last_completed_patrol': None, 'active_routes': 0})
         guard['assigned_total'] += 1
         site['total_assigned'] += 1
-        if row_value(run, 'status') == 'completed':
+        if patrol_is_compliant(run):
             completed_at = str(row_value(run, 'completed_at') or '')
             guard['completed_total'] += 1
             site['total_completed'] += 1
@@ -7086,13 +7206,15 @@ def patrol_dashboard_data(conn, user):
     site_performance.sort(key=lambda item: item['site_name'])
     top_performing_guards = sorted(guard_performance, key=lambda item: (item['completion_percentage'], item['month_completed'], -item['missed_count']), reverse=True)[:5]
 
-    patrol_dashboard_widgets = {'patrols_today': patrols_today, 'completed_today': completed_today, 'missed_today': missed_today}
+    patrol_dashboard_widgets = {'patrols_today': patrols_today, 'completed_today': completed_today, 'excused_today': excused_today, 'missed_today': missed_today}
     return {
         'patrol_tours': tours,
         'active_patrol_tours': [t for t in tours if row_value(t, 'active')],
         'patrol_runs': runs,
-        'completed_tours': [r for r in runs if row_value(r, 'status') == 'completed'],
-        'client_patrol_history': [r for r in runs if row_value(r, 'status') == 'completed'],
+        'completed_tours': [r for r in runs if patrol_is_completed(r)],
+        'excused_tours': [r for r in runs if patrol_is_excused(r)],
+        'missed_tours': [r for r in runs if patrol_is_missed(r)],
+        'client_patrol_history': [r for r in runs if patrol_is_compliant(r)],
         'patrol_completion_summary': patrol_completion_summary,
         'patrol_dashboard_widgets': patrol_dashboard_widgets,
         'patrol_issue_alert': patrol_issue_alert,
@@ -7147,7 +7269,7 @@ def missed_checkpoints_csv(conn, user):
 
 
 def patrol_run_detail(conn, company_id, run_id):
-    run = conn.execute('''SELECT ptr.*, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name FROM patrol_tour_runs ptr JOIN patrol_tours pt ON pt.id=ptr.tour_id AND pt.company_id=ptr.company_id JOIN sites s ON s.id=ptr.site_id AND s.company_id=ptr.company_id JOIN users u ON u.id=ptr.guard_id WHERE ptr.company_id=? AND ptr.id=?''', (company_id, run_id)).fetchone()
+    run = conn.execute('''SELECT ptr.*, pt.name AS tour_name, s.name AS site_name, u.full_name AS guard_name, ex.full_name AS excused_by_name FROM patrol_tour_runs ptr JOIN patrol_tours pt ON pt.id=ptr.tour_id AND pt.company_id=ptr.company_id JOIN sites s ON s.id=ptr.site_id AND s.company_id=ptr.company_id JOIN users u ON u.id=ptr.guard_id LEFT JOIN users ex ON ex.id=ptr.excused_by WHERE ptr.company_id=? AND ptr.id=?''', (company_id, run_id)).fetchone()
     if not run:
         return None, []
     checkpoints = conn.execute('''SELECT pc.*, pcs.scan_method, pcs.scanned_at, pcs.gps_latitude, pcs.gps_longitude, COALESCE(pcs.missed_checkpoint,0) AS missed_checkpoint FROM patrol_tour_checkpoints pc LEFT JOIN patrol_checkpoint_scans pcs ON pcs.checkpoint_id=pc.id AND pcs.tour_run_id=? WHERE pc.company_id=? AND pc.tour_id=? AND COALESCE(pc.active,1)=1 ORDER BY pc.sort_order, pc.id''', (run_id, company_id, run['tour_id'])).fetchall()
@@ -7934,6 +8056,45 @@ def application(environ, start_response):
         conn.execute('UPDATE patrol_tour_checkpoints SET qr_code=? WHERE id=? AND company_id=?', (new_qr, checkpoint['id'], company_id))
         conn.execute('UPDATE patrol_tours SET updated_at=? WHERE id=?', (utc_now_str(), checkpoint['tour_id'])); conn.commit(); conn.close()
         return redirect_with_feedback(start_response, f'/patrol/tour?id={checkpoint["tour_id"]}', message='QR identifier generated.')
+    if path == '/patrol/note' and method == 'POST':
+        user, response = require_login(environ, start_response)
+        if response: return response
+        data, _ = parse_post(environ); note = (data.get('note') or '').strip()
+        if not note:
+            return redirect_with_feedback(start_response, f'/patrol/run?id={data.get("run_id") or ""}', error='A note is required.')
+        conn = db(); company_id = get_company_scope_id(user); run = conn.execute('SELECT * FROM patrol_tour_runs WHERE id=? AND company_id=?', (data.get('run_id'), company_id)).fetchone()
+        if not run: conn.close(); return bad_request(start_response, 'Patrol run not found')
+        allowed = (user['role'] == 'guard' and run['guard_id'] == user['id'] and supervisor_can_access_site(conn, user, run['site_id'])) or admin_can_review_patrol(conn, user, run)
+        if not allowed:
+            conn.close(); return redirect_with_feedback(start_response, '/dashboard', error='You do not have permission to add notes to that patrol.')
+        note_type = 'Guard explanation' if user['role'] == 'guard' else 'Admin/Supervisor note'
+        patrol_event(conn, company_id, run['id'], 'note_added', 'Note/reason added', f'{note_type}: {note}', actor_user_id=user['id'])
+        conn.commit(); conn.close(); return redirect_with_feedback(start_response, f'/patrol/run?id={run["id"]}', message='Patrol note added.')
+    if path == '/admin/patrol/review' and method == 'POST':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        data, _ = parse_post(environ); action = (data.get('action') or '').strip().lower(); reason = (data.get('reason') or '').strip(); note = (data.get('note') or '').strip()
+        if action not in {'excuse', 'missed'}:
+            return redirect_with_feedback(start_response, '/patrols', error='Choose Mark Excused or Keep as Missed.')
+        if reason not in PATROL_EXCUSE_REASONS or not note:
+            return redirect_with_feedback(start_response, '/patrols', error='A valid reason and admin/supervisor note are required.')
+        conn = db(); company_id = get_company_scope_id(user); run = conn.execute('SELECT * FROM patrol_tour_runs WHERE id=? AND company_id=?', (data.get('run_id'), company_id)).fetchone()
+        if not run: conn.close(); return bad_request(start_response, 'Patrol run not found')
+        if not admin_can_review_patrol(conn, user, run):
+            conn.close(); return redirect_with_feedback(start_response, '/patrols', error='You do not have permission to review that patrol.')
+        if row_value(run, 'status') == 'completed':
+            conn.close(); return redirect_with_feedback(start_response, f'/patrol/run?id={run["id"]}', error='Completed patrols cannot be excused.')
+        now = utc_now_str()
+        if action == 'excuse':
+            conn.execute("UPDATE patrol_tour_runs SET status='excused', excused_reason=?, excused_note=?, excused_by=?, excused_at=?, completed_at=COALESCE(completed_at, ?) WHERE id=? AND company_id=?", (reason, note, user['id'], now, now, run['id'], company_id))
+            patrol_event(conn, company_id, run['id'], 'patrol_excused', 'Patrol excused by admin/supervisor', note, reason, user['id'], now)
+            message = 'Patrol marked excused and removed from missed patrol calculations.'
+        else:
+            conn.execute("UPDATE patrol_tour_runs SET status='missed', completed_at=COALESCE(completed_at, ?) WHERE id=? AND company_id=?", (now, run['id'], company_id))
+            patrol_event(conn, company_id, run['id'], 'patrol_missed', 'Patrol incomplete', 'Kept as missed: ' + note, reason, user['id'], now)
+            message = 'Patrol kept as missed.'
+        patrol_event(conn, company_id, run['id'], 'note_added', 'Note/reason added', note, reason, user['id'], now)
+        conn.commit(); conn.close(); return redirect_with_feedback(start_response, f'/patrol/run?id={run["id"]}', message=message)
     if path == '/patrol/start' and method == 'POST':
         user, response = require_login(environ, start_response)
         if response: return response
@@ -7942,7 +8103,10 @@ def application(environ, start_response):
         tour = conn.execute('SELECT * FROM patrol_tours WHERE id=? AND company_id=? AND active=1', (data.get('tour_id'), user['company_id'])).fetchone()
         if not tour: conn.close(); return bad_request(start_response, 'Tour not found')
         if not supervisor_can_access_site(conn, user, tour['site_id']): conn.close(); return bad_request(start_response, 'Tour is not at your assigned site')
-        run_id = insert_and_get_id(conn, '''INSERT INTO patrol_tour_runs (company_id, site_id, tour_id, guard_id, status, started_at, missed_checkpoint_count) VALUES (?, ?, ?, ?, 'in_progress', ?, 0)''', (user['company_id'], tour['site_id'], tour['id'], user['id'], utc_now_str()))
+        now = utc_now_str()
+        run_id = insert_and_get_id(conn, '''INSERT INTO patrol_tour_runs (company_id, site_id, tour_id, guard_id, status, started_at, missed_checkpoint_count) VALUES (?, ?, ?, ?, 'in_progress', ?, 0)''', (user['company_id'], tour['site_id'], tour['id'], user['id'], now))
+        patrol_event(conn, user['company_id'], run_id, 'patrol_assigned', 'Patrol assigned', 'Patrol route assigned when the guard started the tour.', actor_user_id=user['id'], created_at=now)
+        patrol_event(conn, user['company_id'], run_id, 'patrol_started', 'Patrol started', '', actor_user_id=user['id'], created_at=now)
         conn.commit(); conn.close(); return redirect(start_response, f'/patrol/run?id={run_id}')
     if path == '/patrol/scan' and method == 'POST':
         user, response = require_login(environ, start_response)
@@ -7962,6 +8126,7 @@ def application(environ, start_response):
         if not existing:
             device_timestamp = (data.get('device_timestamp') or utc_now_str()).strip()
             conn.execute('''INSERT INTO patrol_checkpoint_scans (company_id, site_id, tour_id, tour_run_id, checkpoint_id, guard_id, scan_method, scanned_at, gps_latitude, gps_longitude, missed_checkpoint, local_uuid, device_timestamp, synced_at, offline_submitted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 0)''', (user['company_id'], run['site_id'], run['tour_id'], run['id'], checkpoint['id'], user['id'], method_value, device_timestamp, data.get('gps_latitude', ''), data.get('gps_longitude', ''), local_uuid, device_timestamp, utc_now_str()))
+            patrol_event(conn, user['company_id'], run['id'], 'checkpoint_scanned', 'Checkpoint scanned', checkpoint['checkpoint_name'], actor_user_id=user['id'], created_at=device_timestamp)
         conn.commit(); conn.close(); return redirect_with_feedback(start_response, f'/patrol/run?id={run["id"]}', message='Checkpoint scan logged.')
     if path == '/patrol/complete' and method == 'POST':
         user, response = require_login(environ, start_response)
@@ -7972,7 +8137,7 @@ def application(environ, start_response):
         missed = 0
         for checkpoint in conn.execute('SELECT * FROM patrol_tour_checkpoints WHERE company_id=? AND tour_id=? AND active=1', (user['company_id'], run['tour_id'])).fetchall():
             if not conn.execute('SELECT id FROM patrol_checkpoint_scans WHERE tour_run_id=? AND checkpoint_id=?', (run['id'], checkpoint['id'])).fetchone():
-                missed += 1; conn.execute('''INSERT INTO patrol_checkpoint_scans (company_id, site_id, tour_id, tour_run_id, checkpoint_id, guard_id, scan_method, scanned_at, gps_latitude, gps_longitude, missed_checkpoint) VALUES (?, ?, ?, ?, ?, ?, 'MISSED', ?, '', '', 1)''', (user['company_id'], run['site_id'], run['tour_id'], run['id'], checkpoint['id'], user['id'], utc_now_str()))
+                missed += 1; missed_at = utc_now_str(); conn.execute('''INSERT INTO patrol_checkpoint_scans (company_id, site_id, tour_id, tour_run_id, checkpoint_id, guard_id, scan_method, scanned_at, gps_latitude, gps_longitude, missed_checkpoint) VALUES (?, ?, ?, ?, ?, ?, 'MISSED', ?, '', '', 1)''', (user['company_id'], run['site_id'], run['tour_id'], run['id'], checkpoint['id'], user['id'], missed_at)); patrol_event(conn, user['company_id'], run['id'], 'patrol_incomplete', 'Patrol incomplete', checkpoint['checkpoint_name'], actor_user_id=user['id'], created_at=missed_at)
         conn.execute("UPDATE patrol_tour_runs SET status='completed', completed_at=?, missed_checkpoint_count=? WHERE id=?", (utc_now_str(), missed, run['id'])); conn.commit(); conn.close()
         return redirect_with_feedback(start_response, f'/patrol/run?id={run["id"]}', message='Patrol tour completed.')
     if path == '/patrol/run' and method == 'GET':
@@ -7981,10 +8146,13 @@ def application(environ, start_response):
         conn = db(); company_id = get_company_scope_id(user); run, checkpoints = patrol_run_detail(conn, company_id, query.get('id'))
         if not run: conn.close(); return not_found(start_response)
         allowed = user['role'] in {'superadmin', 'company_admin', 'admin', 'client'} or (user['role'] == 'guard' and run['guard_id'] == user['id'] and supervisor_can_access_site(conn, user, run['site_id'])) or supervisor_can_access_site(conn, user, run['site_id'])
+        if not allowed:
+            conn.close(); return redirect_with_feedback(start_response, '/dashboard', error='You do not have permission to view that patrol run.')
+        timeline = patrol_timeline(conn, run, checkpoints)
+        can_review = admin_can_review_patrol(conn, user, run)
         conn.close()
-        if not allowed: return redirect_with_feedback(start_response, '/dashboard', error='You do not have permission to view that patrol run.')
         context = get_dashboard_context(user)
-        context.update({'run': run, 'checkpoints': checkpoints, 'nav_items': sidebar_nav_items(user, '/patrol/run'), 'active_path': '/patrol/run', 'page_title': 'Patrol Run'})
+        context.update({'run': run, 'checkpoints': checkpoints, 'patrol_timeline': timeline, 'patrol_excuse_reasons': PATROL_EXCUSE_REASONS, 'can_review_patrol': can_review, 'nav_items': sidebar_nav_items(user, '/patrol/run'), 'active_path': '/patrol/run', 'page_title': 'Patrol Run'})
         return html_response(start_response, render_page(environ, 'patrol_run.html', title='Patrol Run', user=user, **context), extra_headers=csrf_headers(environ))
     if path == '/patrol/tour' and method == 'GET':
         user, response = require_login(environ, start_response)
