@@ -988,7 +988,10 @@ def init_db():
         activity_type TEXT NOT NULL,
         summary TEXT NOT NULL,
         photo_path TEXT,
-        status TEXT NOT NULL DEFAULT 'submitted',
+        status TEXT NOT NULL DEFAULT 'Open',
+        supervisor_notes TEXT,
+        admin_notes TEXT,
+        resolved_at TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY(company_id) REFERENCES companies(id),
         FOREIGN KEY(site_id) REFERENCES sites(id),
@@ -1009,6 +1012,9 @@ def init_db():
         client_notified INTEGER NOT NULL DEFAULT 0,
         attachment_path TEXT,
         status TEXT NOT NULL DEFAULT 'Open',
+        supervisor_notes TEXT,
+        admin_notes TEXT,
+        resolved_at TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY(company_id) REFERENCES companies(id),
         FOREIGN KEY(site_id) REFERENCES sites(id),
@@ -1023,7 +1029,10 @@ def init_db():
         activity_type TEXT NOT NULL,
         summary TEXT NOT NULL,
         photo_path TEXT,
-        status TEXT NOT NULL DEFAULT 'submitted',
+        status TEXT NOT NULL DEFAULT 'Open',
+        supervisor_notes TEXT,
+        admin_notes TEXT,
+        resolved_at TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY(company_id) REFERENCES companies(id),
         FOREIGN KEY(site_id) REFERENCES sites(id),
@@ -1435,15 +1444,15 @@ def init_db():
             'company_id INTEGER', 'site_id INTEGER', 'officer_id INTEGER', 'incident_type TEXT',
             "priority TEXT NOT NULL DEFAULT 'Medium'", 'narrative TEXT', 'persons_involved TEXT',
             'witnesses TEXT', 'police_notified INTEGER NOT NULL DEFAULT 0', 'client_notified INTEGER NOT NULL DEFAULT 0',
-            'attachment_path TEXT', "status TEXT NOT NULL DEFAULT 'Open'", 'created_at TEXT'
+            'attachment_path TEXT', "status TEXT NOT NULL DEFAULT 'Open'", 'created_at TEXT',
+            'supervisor_notes TEXT', 'admin_notes TEXT', 'resolved_at TEXT'
         ]:
             ensure_column(conn, 'incident_reports', col)
-        ensure_column(conn, 'incident_reports', 'admin_notes TEXT')
+        conn.execute("UPDATE incident_reports SET status='Open' WHERE LOWER(COALESCE(status, '')) IN ('submitted', 'open')")
     if table_exists(conn, 'daily_activity_reports'):
-        ensure_column(conn, 'daily_activity_reports', 'admin_notes TEXT')
-        ensure_column(conn, 'daily_activity_reports', 'resolved_at TEXT')
-    if table_exists(conn, 'incident_reports'):
-        ensure_column(conn, 'incident_reports', 'resolved_at TEXT')
+        for col in ["status TEXT NOT NULL DEFAULT 'Open'", 'supervisor_notes TEXT', 'admin_notes TEXT', 'resolved_at TEXT']:
+            ensure_column(conn, 'daily_activity_reports', col)
+        conn.execute("UPDATE daily_activity_reports SET status='Open' WHERE LOWER(COALESCE(status, '')) IN ('submitted', 'open')")
     if conn.backend == 'postgres':
         conn.execute('''
             CREATE TABLE IF NOT EXISTS report_attachments (
@@ -1494,6 +1503,7 @@ def init_db():
                 report_kind TEXT NOT NULL,
                 report_id INTEGER NOT NULL,
                 note_text TEXT NOT NULL,
+                note_type TEXT NOT NULL DEFAULT 'admin',
                 created_by INTEGER,
                 created_at TEXT NOT NULL
             )
@@ -1518,11 +1528,13 @@ def init_db():
                 report_kind TEXT NOT NULL,
                 report_id INTEGER NOT NULL,
                 note_text TEXT NOT NULL,
+                note_type TEXT NOT NULL DEFAULT 'admin',
                 created_by INTEGER,
                 created_at TEXT NOT NULL
             )
         ''')
-
+    if table_exists(conn, 'report_notes'):
+        ensure_column(conn, 'report_notes', "note_type TEXT NOT NULL DEFAULT 'admin'")
 
     patrol_pk = 'SERIAL PRIMARY KEY' if conn.backend == 'postgres' else 'INTEGER PRIMARY KEY AUTOINCREMENT'
     conn.execute(f'''CREATE TABLE IF NOT EXISTS patrol_tours (id {patrol_pk}, company_id INTEGER NOT NULL, site_id INTEGER NOT NULL, name TEXT NOT NULL, description TEXT, active INTEGER DEFAULT 1, created_by INTEGER, created_at TEXT NOT NULL, updated_at TEXT)''')
@@ -2458,7 +2470,7 @@ def report_management_context(conn, user, query):
 
     daily_rows = conn.execute('''
         SELECT d.id as report_id, 'daily_activity' as report_kind, 'Daily Activity' as report_type, d.status, '' as priority, d.created_at, d.summary as narrative,
-               '' as persons_involved, '' as witnesses, d.photo_path, '' as attachment_path, s.name as site_name, u.full_name as officer_name, d.officer_id, d.site_id, d.admin_notes, d.resolved_at
+               '' as persons_involved, '' as witnesses, d.photo_path, '' as attachment_path, s.name as site_name, u.full_name as officer_name, d.officer_id, d.site_id, d.supervisor_notes, d.admin_notes, d.resolved_at
         FROM daily_activity_reports d
         JOIN sites s ON d.site_id=s.id
         JOIN users u ON d.officer_id=u.id
@@ -2466,7 +2478,7 @@ def report_management_context(conn, user, query):
     ''', (company_id,)).fetchall()
     incident_rows = conn.execute('''
         SELECT i.id as report_id, 'incident' as report_kind, 'Incident' as report_type, i.status, i.priority, i.created_at, i.narrative,
-               i.persons_involved, i.witnesses, '' as photo_path, i.attachment_path, s.name as site_name, u.full_name as officer_name, i.officer_id, i.site_id, i.admin_notes, i.resolved_at
+               i.persons_involved, i.witnesses, '' as photo_path, i.attachment_path, s.name as site_name, u.full_name as officer_name, i.officer_id, i.site_id, i.supervisor_notes, i.admin_notes, i.resolved_at
         FROM incident_reports i
         JOIN sites s ON i.site_id=s.id
         JOIN users u ON i.officer_id=u.id
@@ -2497,7 +2509,7 @@ def report_management_context(conn, user, query):
     ''', (company_id,)).fetchall()
     notes_by_key = {}
     for row in note_rows:
-        notes_by_key.setdefault(f"{row['report_kind']}:{row['report_id']}", []).append(row)
+        notes_by_key.setdefault(f"{row['report_kind']}:{row['report_id']}", []).append(dict(row))
     filtered = []
     for row in all_rows:
         row = dict(row)
@@ -2516,6 +2528,42 @@ def report_management_context(conn, user, query):
         key = f"{row['report_kind']}:{row['report_id']}"
         row['status_history'] = history_by_key.get(key, [])
         row['note_history'] = notes_by_key.get(key, [])
+        activity_timeline = [{
+            'event_at': row.get('created_at'),
+            'event_type': 'submission',
+            'label': 'Submission',
+            'description': f"Submitted by {row.get('officer_name') or 'Unknown officer'}",
+            'actor_name': row.get('officer_name') or 'Unknown officer',
+        }]
+        for history in row['status_history']:
+            new_status = history.get('new_status') or 'N/A'
+            event_label = 'Closure' if new_status.lower() == 'closed' else 'Status Change'
+            activity_timeline.append({
+                'event_at': history.get('changed_at'),
+                'event_type': 'closure' if new_status.lower() == 'closed' else 'status_change',
+                'label': event_label,
+                'description': f"{history.get('old_status') or 'N/A'} → {new_status}",
+                'actor_name': history.get('changed_by_name') or 'Unknown',
+            })
+        for note in row['note_history']:
+            note_label = 'Supervisor Note' if (note.get('note_type') or '').lower() == 'supervisor' else 'Admin Note'
+            activity_timeline.append({
+                'event_at': note.get('created_at'),
+                'event_type': 'note_addition',
+                'label': note_label,
+                'description': note.get('note_text') or '',
+                'actor_name': note.get('created_by_name') or 'Unknown',
+            })
+        has_closure_event = any(item.get('event_type') == 'closure' for item in activity_timeline)
+        if row.get('resolved_at') and not has_closure_event:
+            activity_timeline.append({
+                'event_at': row.get('resolved_at'),
+                'event_type': 'closure',
+                'label': 'Closure',
+                'description': 'Report closed',
+                'actor_name': 'Unknown',
+            })
+        row['activity_timeline'] = sorted(activity_timeline, key=lambda item: item.get('event_at') or '', reverse=True)
         if selected_type and row['report_kind'] != selected_type:
             continue
         if selected_status and (row.get('status') or '').strip().lower() != selected_status:
@@ -4649,8 +4697,7 @@ REPORTS_HTML = r'''{% extends "app_shell.html" %}
           <a class="btn {% if not report_filters.type %}primary{% else %}ghost{% endif %}" href="/reports">All</a>
           <a class="btn {% if report_filters.type == 'incident' %}primary{% else %}ghost{% endif %}" href="/reports?type=incident">Incident</a>
           <a class="btn {% if report_filters.type == 'daily_activity' %}primary{% else %}ghost{% endif %}" href="/reports?type=daily_activity">Daily Activity</a>
-          <a class="btn {% if report_filters.status == 'open' %}primary{% else %}ghost{% endif %}" href="/reports?status=open">Open</a>
-          <a class="btn {% if report_filters.status == 'closed' %}primary{% else %}ghost{% endif %}" href="/reports?status=closed">Closed</a>
+          {% for status in report_status_options %}<a class="btn {% if report_filters.status == status|lower %}primary{% else %}ghost{% endif %}" href="/reports?status={{ status|lower|urlencode }}">{{ status }}</a>{% endfor %}
         </div>
         <div class="row-4">
           <label>Search<input type="search" name="q" value="{{ report_filters.q }}" placeholder="Narrative, officer, site, persons involved"></label>
@@ -4708,19 +4755,24 @@ REPORTS_HTML = r'''{% extends "app_shell.html" %}
         </div>
         {% endif %}
         <div class="history-block">
-          <div class="small-muted"><strong>Status Timeline</strong> (Newest first)</div>
-          {% for history in report.status_history %}<div class="small-muted history-row">• {{ history.changed_at }}: {{ history.report_type_label or report.report_type }} #{{ history.report_id }} — {{ history.old_status or 'N/A' }} → {{ history.new_status }} by {{ history.changed_by_name or 'Unknown' }}</div>{% else %}<div class="small-muted history-row">No status history yet.</div>{% endfor %}
+          <div class="small-muted"><strong>Report Activity Timeline</strong> (submission, status changes, note additions, closures)</div>
+          {% for event in report.activity_timeline %}<div class="small-muted history-row">• {{ event.event_at or 'N/A' }} — <strong>{{ event.label }}</strong> by {{ event.actor_name or 'Unknown' }}: {{ event.description }}</div>{% else %}<div class="small-muted history-row">No activity yet.</div>{% endfor %}
         </div>
         <div class="history-block">
-          <div class="small-muted"><strong>Supervisor/Admin Notes Timeline</strong> (Newest first)</div>
-          {% for note in report.note_history %}<div class="small-muted history-row">• {{ note.created_at }} — {{ note.created_by_name or 'Unknown' }} ({{ note.created_by_role or 'n/a' }}): {{ note.note_text }}</div>{% else %}<div class="small-muted history-row">No admin notes yet.</div>{% endfor %}
+          <div class="small-muted"><strong>Supervisor Notes</strong></div>
+          <div class="small-muted history-row">{{ report.supervisor_notes or 'No supervisor notes yet.' }}</div>
+        </div>
+        <div class="history-block">
+          <div class="small-muted"><strong>Admin Notes</strong></div>
+          <div class="small-muted history-row">{{ report.admin_notes or 'No admin notes yet.' }}</div>
         </div>
         {% if user.role in ['company_admin', 'superadmin', 'supervisor', 'admin'] %}
         <form method="post" action="/admin/reports/manage" class="stack compact">
           <input type="hidden" name="report_kind" value="{{ report.report_kind }}">
           <input type="hidden" name="report_id" value="{{ report.report_id }}">
-          <div class="row-2"><label>Status<select name="status">{% for status in report_status_options %}<option value="{{ status }}" {% if report.status == status %}selected{% endif %}>{{ status }}</option>{% endfor %}</select></label><label>Supervisor/Admin Note<textarea name="admin_note" rows="2" placeholder="Add internal review note"></textarea></label></div>
-          <button class="btn primary" type="submit">Update Status / Add Note</button>
+          <label>Status<select name="status">{% for status in report_status_options %}<option value="{{ status }}" {% if report.status == status %}selected{% endif %}>{{ status }}</option>{% endfor %}</select></label>
+          <div class="row-2"><label>Supervisor Notes<textarea name="supervisor_note" rows="2" placeholder="Add supervisor review note"></textarea></label><label>Admin Notes<textarea name="admin_note" rows="2" placeholder="Add admin review note"></textarea></label></div>
+          <button class="btn primary" type="submit">Update Report</button>
         </form>
         {% endif %}
       </details>
@@ -6006,7 +6058,10 @@ def init_db():
             activity_type TEXT NOT NULL,
             summary TEXT NOT NULL,
             photo_path TEXT,
-            status TEXT NOT NULL DEFAULT 'submitted',
+            status TEXT NOT NULL DEFAULT 'Open',
+            supervisor_notes TEXT,
+            admin_notes TEXT,
+            resolved_at TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY(company_id) REFERENCES companies(id),
             FOREIGN KEY(site_id) REFERENCES sites(id),
@@ -6026,6 +6081,9 @@ def init_db():
             client_notified INTEGER NOT NULL DEFAULT 0,
             attachment_path TEXT,
             status TEXT NOT NULL DEFAULT 'Open',
+            supervisor_notes TEXT,
+            admin_notes TEXT,
+            resolved_at TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY(company_id) REFERENCES companies(id),
             FOREIGN KEY(site_id) REFERENCES sites(id),
@@ -6042,7 +6100,10 @@ def init_db():
             activity_type TEXT NOT NULL,
             summary TEXT NOT NULL,
             photo_path TEXT,
-            status TEXT NOT NULL DEFAULT 'submitted',
+            status TEXT NOT NULL DEFAULT 'Open',
+            supervisor_notes TEXT,
+            admin_notes TEXT,
+            resolved_at TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY(company_id) REFERENCES companies(id),
             FOREIGN KEY(site_id) REFERENCES sites(id),
@@ -6062,6 +6123,9 @@ def init_db():
             client_notified INTEGER NOT NULL DEFAULT 0,
             attachment_path TEXT,
             status TEXT NOT NULL DEFAULT 'Open',
+            supervisor_notes TEXT,
+            admin_notes TEXT,
+            resolved_at TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY(company_id) REFERENCES companies(id),
             FOREIGN KEY(site_id) REFERENCES sites(id),
@@ -6741,7 +6805,7 @@ def insert_daily_activity_report(conn, user, assigned_site_id, data, uploads=Non
         _, photo_path = save_upload(uploads[0], 'dar_photos')
     report_id = insert_and_get_id(conn, '''
         INSERT INTO daily_activity_reports (company_id, site_id, officer_id, activity_type, summary, photo_path, status, created_at, local_uuid, device_timestamp, synced_at, offline_submitted)
-        VALUES (?, ?, ?, ?, ?, ?, 'submitted', ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 'Open', ?, ?, ?, ?, ?)
     ''', (user['company_id'], assigned_site_id, user['id'], data['activity_type'], data['summary'], photo_path, device_timestamp, local_uuid, device_timestamp, now, 1 if offline_submitted else 0))
     for upload in uploads:
         create_report_attachment(conn, user['company_id'], 'daily_activity', report_id, user['id'], upload, 'dar_photos')
@@ -7981,10 +8045,11 @@ def application(environ, start_response):
             conn.close(); return bad_request(start_response, 'Report not found.')
         if user.get('role') == 'supervisor' and not supervisor_can_access_site(conn, user, row['site_id']):
             conn.close(); return redirect_with_feedback(start_response, '/reports', error='Supervisors can only manage reports for assigned sites.')
-        old_status = row.get('status') or ''
+        old_status = row_value(row, 'status') or ''
         now = utc_now_str()
-        new_note = (data.get('admin_note') or '').strip()
-        resolved_at_value = row.get('resolved_at')
+        supervisor_note = (data.get('supervisor_note') or '').strip()
+        admin_note = (data.get('admin_note') or '').strip()
+        resolved_at_value = row_value(row, 'resolved_at')
         if new_status.lower() == 'closed' and str(old_status).lower() != 'closed':
             resolved_at_value = now
         elif new_status.lower() != 'closed':
@@ -7992,18 +8057,27 @@ def application(environ, start_response):
         conn.execute(f'UPDATE {table_name} SET status=?, resolved_at=? WHERE id=?', (new_status, resolved_at_value, report_id))
         if new_status != old_status:
             conn.execute('INSERT INTO report_status_history (company_id, report_kind, report_id, old_status, new_status, changed_by, changed_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (user['company_id'], report_kind, report_id, old_status, new_status, user['id'], now))
-        if new_note:
+        if supervisor_note:
             conn.execute(
-                'INSERT INTO report_notes (company_id, report_kind, report_id, note_text, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-                (user['company_id'], report_kind, report_id, new_note, user['id'], now),
+                'INSERT INTO report_notes (company_id, report_kind, report_id, note_text, note_type, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (user['company_id'], report_kind, report_id, supervisor_note, 'supervisor', user['id'], now),
             )
-            merged_notes = ((row.get('admin_notes') or '').strip() + '\n' + f'[{now}] {new_note}').strip()
-            conn.execute(f'UPDATE {table_name} SET admin_notes=? WHERE id=?', (merged_notes, report_id))
+            merged_supervisor_notes = ((row_value(row, 'supervisor_notes') or '').strip() + '\n' + f'[{now}] {supervisor_note}').strip()
+            conn.execute(f'UPDATE {table_name} SET supervisor_notes=? WHERE id=?', (merged_supervisor_notes, report_id))
+        if admin_note:
+            conn.execute(
+                'INSERT INTO report_notes (company_id, report_kind, report_id, note_text, note_type, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (user['company_id'], report_kind, report_id, admin_note, 'admin', user['id'], now),
+            )
+            merged_admin_notes = ((row_value(row, 'admin_notes') or '').strip() + '\n' + f'[{now}] {admin_note}').strip()
+            conn.execute(f'UPDATE {table_name} SET admin_notes=? WHERE id=?', (merged_admin_notes, report_id))
         conn.commit(); conn.close()
         return redirect_with_feedback(start_response, '/reports', message='Report updated.')
     if path == '/reports':
         user, response = require_login(environ, start_response)
         if response: return response
+        if user.get('role') == 'guard':
+            return redirect_with_feedback(start_response, '/guard/my-reports', message='Guards can submit reports and view their own submissions from My Reports.')
         conn = db()
         report_context = report_management_context(conn, user, parse_query(environ))
         conn.close()
