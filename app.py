@@ -313,7 +313,7 @@ def ensure_assets():
         'layout.html': LAYOUT_HTML,
         'app_shell.html': APP_SHELL_HTML,
         'login.html': LOGIN_HTML,
-        'dashboard.html': DASHBOARD_HTML,
+        'dashboard.html': DASHBOARD_HTML, 'admin_company_logo.html': ADMIN_COMPANY_LOGO_HTML,
         'patrols.html': PATROLS_HTML,
         'schedule.html': SCHEDULE_HTML,
         'guards.html': GUARDS_HTML,
@@ -2208,6 +2208,8 @@ def serve_static(environ, start_response, path):
 
 
 def save_upload(file_info, folder='general'):
+    if isinstance(file_info, list):
+        file_info = next((item for item in file_info if item and item.get('filename')), None)
     if not file_info or not file_info.get('filename'):
         return None, None
     if len(file_info.get('content', b'')) > MAX_UPLOAD_MB * 1024 * 1024:
@@ -3753,7 +3755,7 @@ LOGIN_HTML = r'''{% extends "layout.html" %}
 <div class="login-shell">
   <div class="login-card">
     <div class="brand-panel">
-      <img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-large">
+      {% if default_company_logo_url %}<img src="{{ default_company_logo_url }}" alt="{{ default_company_name }} logo" class="brand-shield brand-shield-large company-logo-auth">{% else %}<img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-large">{% endif %}
       <div>
         <div class="eyebrow">{{ product_short_name }}</div>
         <h1>{{ product_full_name }}</h1>
@@ -3769,7 +3771,7 @@ LOGIN_HTML = r'''{% extends "layout.html" %}
     </div>
     <div class="form-panel">
       <div class="logo-placeholder">
-        <img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-form">
+        {% if default_company_logo_url %}<img src="{{ default_company_logo_url }}" alt="{{ default_company_name }} logo" class="brand-shield brand-shield-form company-logo-auth">{% else %}<img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-form">{% endif %}
       </div>
       <h2>Sign in</h2>
       <p class="small-muted">Access the {{ product_full_name }}</p>
@@ -3796,7 +3798,7 @@ APP_SHELL_HTML = r'''{% extends "layout.html" %}
 <div class="app-shell">
   <aside class="sidebar">
     <div class="sidebar-brand">
-      {% if user.company_name == provider_brand_name or not user.company_logo_url %}<img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-sidebar">{% else %}<img src="{{ user.company_logo_url }}" alt="{{ user.company_name or product_full_name }} logo" class="company-logo">{% endif %}
+      {% if user.company_logo_url %}<img src="{{ user.company_logo_url }}" alt="{{ user.company_name or provider_brand_name }} logo" class="company-logo">{% else %}<img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-sidebar">{% endif %}
       <div class="sidebar-brand-copy">
         <div class="eyebrow">{{ product_short_name }} Platform</div>
         <h2>{{ user.company_name or provider_brand_name }}</h2>
@@ -3812,7 +3814,7 @@ APP_SHELL_HTML = r'''{% extends "layout.html" %}
 
   <main class="content">
     <section class="topbar card">
-      <img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-topbar">
+      {% if user.company_logo_url %}<img src="{{ user.company_logo_url }}" alt="{{ user.company_name or provider_brand_name }} logo" class="company-logo topbar-logo">{% else %}<img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-topbar">{% endif %}
       <div>
         <div class="eyebrow">{{ product_short_name }} Platform</div>
         <h1>{{ page_title or product_full_name }}</h1>
@@ -3918,6 +3920,31 @@ APP_SHELL_HTML = r'''{% extends "layout.html" %}
   {% endif %}
   </main>
 </div>
+{% endblock %}'''
+
+ADMIN_COMPANY_LOGO_HTML = r'''{% extends "app_shell.html" %}
+{% block page_content %}
+<section class="card">
+  <div class="section-head"><h3>Company Logo</h3><span>Branding controls</span></div>
+  <p class="small-muted">Upload the company logo for {{ user.company_name or provider_brand_name }}. {{ product_full_name }} remains the software name, and {{ provider_brand_name }} remains the operating company brand.</p>
+  <div class="logo-management-grid">
+    <div class="logo-preview-card">
+      <div class="small-muted">Current company logo</div>
+      {% if user.company_logo_url %}
+        <img src="{{ user.company_logo_url }}" alt="{{ user.company_name or provider_brand_name }} logo" class="company-logo-preview">
+      {% else %}
+        <img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-large">
+        <p class="small-muted">No custom logo uploaded. The default {{ provider_brand_name }} shield is shown.</p>
+      {% endif %}
+    </div>
+    <form method="post" action="/admin/company/logo" enctype="multipart/form-data" class="stack compact">
+      <label>Upload Company Logo<input type="file" name="logo" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" required></label>
+      <div class="small-muted">PNG uploads are supported. JPG, GIF, WebP, and SVG images are also accepted.</div>
+      <button class="btn primary" type="submit">Save Logo</button>
+      <a class="btn ghost" href="/dashboard">Back to Dashboard</a>
+    </form>
+  </div>
+</section>
 {% endblock %}'''
 
 DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
@@ -5098,6 +5125,11 @@ button, .btn { display: inline-flex; justify-content: center; align-items: cente
 .sidebar-brand-copy { min-width: 0; padding-top: 3px; }
 .sidebar-brand-copy h2 { margin: 3px 0 4px; font-size: 18px; line-height: 1.15; overflow-wrap: anywhere; }
 .company-logo { width: 56px; height: 70px; flex: 0 0 56px; object-fit: contain; border-radius: 14px; padding: 4px; border: 1px solid rgba(192,192,192,.24); background: rgba(0,0,0,.28); }
+.company-logo.topbar-logo { width: 38px; height: 48px; flex-basis: 38px; border-radius: 10px; }
+.company-logo-auth { object-fit: contain; border-radius: 16px; padding: 6px; border: 1px solid rgba(192,192,192,.24); background: rgba(0,0,0,.24); }
+.logo-management-grid { display: grid; grid-template-columns: 220px 1fr; gap: 20px; align-items: start; }
+.logo-preview-card { padding: 16px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.03); text-align: center; }
+.company-logo-preview { width: 160px; height: 160px; object-fit: contain; margin: 12px auto; border-radius: 18px; padding: 8px; border: 1px solid rgba(192,192,192,.24); background: rgba(0,0,0,.28); }
 .brand-shield { display: block; flex: 0 0 auto; object-fit: contain; filter: drop-shadow(0 16px 32px rgba(220,38,38,.24)); }
 .brand-shield-large { width: 82px; height: 102px; }
 .brand-shield-form { width: 74px; height: 92px; margin: 0 auto; }
@@ -5223,6 +5255,53 @@ def public_asset_url(path):
     if value.startswith(('http://', 'https://', '//')):
         return value
     return '/' + value.lstrip('/')
+
+
+def first_uploaded_file(files, field_name):
+    value = (files or {}).get(field_name)
+    if not value:
+        return None
+    if isinstance(value, list):
+        return next((item for item in value if item and item.get('filename')), None)
+    return value if value.get('filename') else None
+
+
+def default_company_branding():
+    try:
+        conn = db()
+        row = conn.execute(
+            '''
+            SELECT name, logo_path
+            FROM companies
+            WHERE logo_path IS NOT NULL AND TRIM(logo_path) <> ''
+            ORDER BY CASE WHEN name=? THEN 0 ELSE 1 END, id
+            LIMIT 1
+            ''',
+            (PROVIDER_BRAND_NAME,),
+        ).fetchone()
+        conn.close()
+    except Exception:
+        return {'name': PROVIDER_BRAND_NAME, 'logo_url': ''}
+    if not row:
+        return {'name': PROVIDER_BRAND_NAME, 'logo_url': ''}
+    return {'name': row['name'] or PROVIDER_BRAND_NAME, 'logo_url': public_asset_url(row['logo_path'])}
+
+
+def is_allowed_company_logo(file_info):
+    if not file_info or not file_info.get('filename'):
+        return False
+    ext = os.path.splitext(os.path.basename(file_info['filename']))[1].lower()
+    content = file_info.get('content', b'') or b''
+    signatures = {
+        '.png': lambda data: data.startswith(b'\x89PNG\r\n\x1a\n'),
+        '.jpg': lambda data: data.startswith(b'\xff\xd8\xff'),
+        '.jpeg': lambda data: data.startswith(b'\xff\xd8\xff'),
+        '.gif': lambda data: data.startswith((b'GIF87a', b'GIF89a')),
+        '.webp': lambda data: data.startswith(b'RIFF') and data[8:12] == b'WEBP',
+        '.svg': lambda data: b'<svg' in data[:512].lower(),
+    }
+    checker = signatures.get(ext)
+    return bool(checker and checker(content))
 
 
 def parse_cookies(environ):
@@ -5363,7 +5442,7 @@ class _S3StorageBackend:
         original = os.path.basename(file_info['filename'])
         ext = os.path.splitext(original)[1].lower()
         key = f"steeleops/{folder}/{datetime.now().strftime('%Y/%m/%d')}/{secrets.token_urlsafe(10)}{ext}"
-        content_type = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.pdf': 'application/pdf'}.get(ext, 'application/octet-stream')
+        content_type = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.pdf': 'application/pdf'}.get(ext, 'application/octet-stream')
         self.client.put_object(Bucket=S3_BUCKET, Key=key, Body=file_info['content'], ContentType=content_type)
         if S3_PUBLIC_BASE_URL:
             return original, f"{S3_PUBLIC_BASE_URL}/{key}"
@@ -5374,6 +5453,8 @@ class _S3StorageBackend:
 
 
 def save_upload(file_info, folder='general'):
+    if isinstance(file_info, list):
+        file_info = next((item for item in file_info if item and item.get('filename')), None)
     if not file_info or not file_info.get('filename'):
         return None, None
     if len(file_info.get('content', b'')) > MAX_UPLOAD_MB * 1024 * 1024:
@@ -5893,6 +5974,7 @@ def run_missed_clock_check(company_id, actor_user_id=None, environ=None):
 
 
 def render_page(environ, template_name, **context):
+    company_branding = default_company_branding()
     context.setdefault('csrf_input', csrf_hidden_input(environ))
     context.setdefault('show_demo_accounts', APP_ENV != 'production')
     context.setdefault('product_short_name', PRODUCT_SHORT_NAME)
@@ -5900,6 +5982,8 @@ def render_page(environ, template_name, **context):
     context.setdefault('provider_brand_name', PROVIDER_BRAND_NAME)
     context.setdefault('brand_subtitle', BRAND_SUBTITLE)
     context.setdefault('provider_logo_url', PROVIDER_SHIELD_LOGO_URL)
+    context.setdefault('default_company_name', company_branding['name'])
+    context.setdefault('default_company_logo_url', company_branding['logo_url'])
     return render(template_name, **context)
 
 
@@ -6516,7 +6600,7 @@ def reset_admin_password_once(conn):
 
 def ensure_assets():
     env.cache.clear()
-    templates = {'layout.html': LAYOUT_HTML, 'app_shell.html': APP_SHELL_HTML, 'login.html': LOGIN_HTML, 'dashboard.html': DASHBOARD_HTML, 'patrols.html': PATROLS_HTML, 'schedule.html': SCHEDULE_HTML, 'guards.html': GUARDS_HTML, 'patrol_run.html': PATROL_RUN_HTML, 'patrol_tour.html': PATROL_TOUR_HTML, 'reports.html': REPORTS_HTML, 'payroll.html': PAYROLL_HTML, 'profile.html': PROFILE_HTML, 'admin_paystub_upload.html': ADMIN_PAYSTUB_UPLOAD_HTML, 'guard_paystubs.html': GUARD_PAYSTUBS_HTML,
+    templates = {'layout.html': LAYOUT_HTML, 'app_shell.html': APP_SHELL_HTML, 'login.html': LOGIN_HTML, 'dashboard.html': DASHBOARD_HTML, 'admin_company_logo.html': ADMIN_COMPANY_LOGO_HTML, 'patrols.html': PATROLS_HTML, 'schedule.html': SCHEDULE_HTML, 'guards.html': GUARDS_HTML, 'patrol_run.html': PATROL_RUN_HTML, 'patrol_tour.html': PATROL_TOUR_HTML, 'reports.html': REPORTS_HTML, 'payroll.html': PAYROLL_HTML, 'profile.html': PROFILE_HTML, 'admin_paystub_upload.html': ADMIN_PAYSTUB_UPLOAD_HTML, 'guard_paystubs.html': GUARD_PAYSTUBS_HTML,
         'guard_daily_activity_reports.html': GUARD_DAILY_ACTIVITY_REPORTS_HTML,
         'guard_incident_reports.html': GUARD_INCIDENT_REPORTS_HTML,
         'guard_my_reports.html': GUARD_MY_REPORTS_HTML, 'guard_my_report_detail.html': GUARD_MY_REPORT_DETAIL_HTML, 'password_reset_request.html': PASSWORD_RESET_REQUEST_HTML, 'password_reset_form.html': PASSWORD_RESET_FORM_HTML, 'guard_login_list.html': GUARD_LOGIN_LIST_HTML, 'guard_login_assigned_sites.html': GUARD_LOGIN_ASSIGNED_SITES_HTML, 'guard_login_site_list.html': GUARD_LOGIN_SITE_LIST_HTML, 'guard_login_guard_list.html': GUARD_LOGIN_GUARD_LIST_HTML, 'guard_login_password.html': GUARD_LOGIN_PASSWORD_HTML}
@@ -7834,13 +7918,24 @@ def application(environ, start_response):
         conn.close()
         log_audit('shift_edit', actor_user_id=user['id'], company_id=user['company_id'], target_type='shift', target_id='new', message='shift created', environ=environ, metadata={'site_id': data.get('site_id'), 'shift_date': data.get('shift_date')})
         return redirect(start_response, '/dashboard')
+    if path == '/admin/company/logo' and method == 'GET':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        return app_page(environ, start_response, user, 'admin_company_logo.html', active_path='/admin/company/logo', view='week', title='Company Logo')
     if path == '/admin/company/logo' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
-        _, files = parse_post(environ); _, logo_path = save_upload(files.get('logo'), 'logos') if files.get('logo') else (None, None)
+        _data, files = parse_post(environ)
+        logo_file = first_uploaded_file(files, 'logo')
+        if not logo_file:
+            return redirect_with_feedback(start_response, '/admin/company/logo', error='Choose a logo image to upload.')
+        if not is_allowed_company_logo(logo_file):
+            return redirect_with_feedback(start_response, '/admin/company/logo', error='Logo must be a valid PNG, JPG, GIF, WebP, or SVG image.')
+        _original_name, logo_path = save_upload(logo_file, 'logos')
         if logo_path:
-            conn = db(); conn.execute('UPDATE companies SET logo_path=? WHERE id=?', (logo_path, user['company_id'])); conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='company', target_id=user['company_id'], message='company logo updated', environ=environ)
-        return redirect(start_response, '/dashboard')
+            conn = db(); conn.execute('UPDATE companies SET logo_path=? WHERE id=?', (logo_path, user['company_id'])); conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='company', target_id=user['company_id'], message='company logo updated', environ=environ, metadata={'logo_path': logo_path})
+            return redirect_with_feedback(start_response, '/admin/company/logo', message='Company logo updated successfully.')
+        return redirect_with_feedback(start_response, '/admin/company/logo', error='Logo upload failed. Check the file size and try again.')
     if path == '/admin/patrol/export/history.csv':
         user, response = require_admin(environ, start_response)
         if response: return response
