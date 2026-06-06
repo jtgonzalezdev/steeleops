@@ -77,6 +77,32 @@ PRODUCT_FULL_NAME = os.getenv('PRODUCT_FULL_NAME', 'SteeleOps Control Center').s
 PROVIDER_BRAND_NAME = os.getenv('PROVIDER_BRAND_NAME', 'Steele Security Services').strip() or 'Steele Security Services'
 PROVIDER_POWERED_BY_TEXT = os.getenv('PROVIDER_POWERED_BY_TEXT', f'Powered by {PROVIDER_BRAND_NAME}').strip() or f'Powered by {PROVIDER_BRAND_NAME}'
 
+PROVIDER_SHIELD_LOGO_FILENAME = 'steele-security-shield.svg'
+PROVIDER_SHIELD_LOGO_URL = f'/static/{PROVIDER_SHIELD_LOGO_FILENAME}'
+PROVIDER_SHIELD_LOGO_SVG = r'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 160" role="img" aria-labelledby="title desc">
+  <title id="title">Steele Security Services shield logo</title>
+  <desc id="desc">Blue and silver shield mark with an S monogram.</desc>
+  <defs>
+    <linearGradient id="shield" x1="18" y1="8" x2="110" y2="148" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7dd3fc"/>
+      <stop offset="0.45" stop-color="#3d99ff"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="25" y1="15" x2="103" y2="139" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#bfdbfe" stop-opacity="0.42"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-15%" width="140%" height="135%">
+      <feDropShadow dx="0" dy="10" stdDeviation="8" flood-color="#0b1220" flood-opacity="0.36"/>
+    </filter>
+  </defs>
+  <path d="M64 6 112 22l-7 73c-3 31-22 45-41 59-19-14-38-28-41-59l-7-73L64 6Z" fill="url(#shield)" filter="url(#shadow)"/>
+  <path d="M64 16 101 29l-6 63c-2 24-16 36-31 47-15-11-29-23-31-47l-6-63 37-13Z" fill="none" stroke="url(#edge)" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M76 54c-4-5-10-8-18-8-11 0-19 6-19 15 0 22 49 10 49 39 0 14-12 24-29 24-13 0-24-5-31-14l11-10c5 7 12 10 21 10 8 0 14-4 14-10 0-15-49-8-49-38 0-18 15-29 34-29 12 0 22 4 29 12L76 54Z" fill="#f8fbff"/>
+  <path d="M64 26v107" stroke="#dbeafe" stroke-width="4" stroke-linecap="round" opacity="0.28"/>
+</svg>
+'''
+
 env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=select_autoescape(['html']))
 
 
@@ -307,6 +333,8 @@ def ensure_assets():
             f.write(content)
     with open(os.path.join(STATIC_DIR, 'styles.css'), 'w', encoding='utf-8') as f:
         f.write(STYLES_CSS)
+    with open(os.path.join(STATIC_DIR, PROVIDER_SHIELD_LOGO_FILENAME), 'w', encoding='utf-8') as f:
+        f.write(PROVIDER_SHIELD_LOGO_SVG)
 
 
 
@@ -1782,6 +1810,7 @@ def render(template_name, **context):
     context.setdefault('product_full_name', PRODUCT_FULL_NAME)
     context.setdefault('provider_brand_name', PROVIDER_BRAND_NAME)
     context.setdefault('powered_by_text', PROVIDER_POWERED_BY_TEXT)
+    context.setdefault('provider_logo_url', PROVIDER_SHIELD_LOGO_URL)
     template = env.get_template(template_name)
     return template.render(**context).encode('utf-8')
 
@@ -1878,6 +1907,7 @@ def get_current_user(environ):
     for key in ('company_id', 'site_id', 'role'):
         if key in session:
             user_data[f'session_{key}'] = session.get(key)
+    user_data['company_logo_url'] = public_asset_url(user_data.get('company_logo'))
     return user_data
 
 
@@ -3716,7 +3746,7 @@ LOGIN_HTML = r'''{% extends "layout.html" %}
 <div class="login-shell">
   <div class="login-card">
     <div class="brand-panel">
-      <div class="logo-box shield-logo" aria-label="Steele Security Services shield branding">S</div>
+      <img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-large">
       <div>
         <div class="eyebrow">{{ product_short_name }}</div>
         <h1>{{ product_full_name }}</h1>
@@ -3732,8 +3762,7 @@ LOGIN_HTML = r'''{% extends "layout.html" %}
     </div>
     <div class="form-panel">
       <div class="logo-placeholder">
-        <div class="logo-mark shield-logo">S</div>
-        <div class="small-muted">{{ provider_brand_name }} shield branding</div>
+        <img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-form">
       </div>
       <h2>Sign in</h2>
       <p class="small-muted">Access the {{ product_full_name }}</p>
@@ -3760,7 +3789,7 @@ APP_SHELL_HTML = r'''{% extends "layout.html" %}
 <div class="app-shell">
   <aside class="sidebar">
     <div class="sidebar-brand">
-      {% if user.company_logo %}<img src="/{{ user.company_logo }}" class="company-logo">{% else %}<div class="logo-box small shield-logo" aria-label="Steele Security Services shield branding">S</div>{% endif %}
+      {% if user.company_logo_url %}<img src="{{ user.company_logo_url }}" alt="{{ user.company_name or product_full_name }} logo" class="company-logo">{% else %}<img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-sidebar">{% endif %}
       <div>
         <div class="eyebrow">{{ product_short_name }}</div>
         <h2>{{ product_full_name }}</h2>
@@ -3777,6 +3806,7 @@ APP_SHELL_HTML = r'''{% extends "layout.html" %}
 
   <main class="content">
     <section class="topbar card">
+      <img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-topbar">
       <div>
         <div class="eyebrow">{{ product_short_name }} Platform</div>
         <h1>{{ page_title or product_full_name }}</h1>
@@ -5062,6 +5092,11 @@ button, .btn { display: inline-flex; justify-content: center; align-items: cente
 .sidebar { border-right: 1px solid var(--line); padding: 24px; background: rgba(6,10,18,.75); position: sticky; top: 0; height: 100vh; }
 .sidebar-brand { display: flex; gap: 14px; align-items: center; margin-bottom: 26px; }
 .company-logo { width: 56px; height: 56px; object-fit: cover; border-radius: 16px; }
+.brand-shield { display: block; flex: 0 0 auto; object-fit: contain; filter: drop-shadow(0 16px 32px rgba(78,164,255,.22)); }
+.brand-shield-large { width: 82px; height: 102px; }
+.brand-shield-form { width: 74px; height: 92px; margin: 0 auto; }
+.brand-shield-sidebar { width: 56px; height: 70px; }
+.brand-shield-topbar { width: 38px; height: 48px; }
 .nav-links { display: grid; gap: 8px; }
 .nav-links a { padding: 12px 14px; border-radius: 14px; color: #d8e6f6; }
 .nav-links a:hover { background: rgba(255,255,255,.05); }
@@ -5172,6 +5207,16 @@ def upload_relative_path(folder, filename):
     safe_folder = (folder or 'general').strip('/').replace('\\', '/')
     safe_file = os.path.basename(filename or '')
     return f"uploads/{safe_folder}/{safe_file}"
+
+
+
+def public_asset_url(path):
+    value = (path or '').strip()
+    if not value:
+        return ''
+    if value.startswith(('http://', 'https://', '//')):
+        return value
+    return '/' + value.lstrip('/')
 
 
 def parse_cookies(environ):
@@ -5848,6 +5893,7 @@ def render_page(environ, template_name, **context):
     context.setdefault('product_full_name', PRODUCT_FULL_NAME)
     context.setdefault('provider_brand_name', PROVIDER_BRAND_NAME)
     context.setdefault('powered_by_text', PROVIDER_POWERED_BY_TEXT)
+    context.setdefault('provider_logo_url', PROVIDER_SHIELD_LOGO_URL)
     return render(template_name, **context)
 
 
@@ -6275,7 +6321,6 @@ LOGIN_HTML = LOGIN_HTML.replace('''      <div class="demo-box">
         admin / admin123<br>
         guard1 / guard123
       </div>{% endif %}''')
-APP_SHELL_HTML = APP_SHELL_HTML.replace('src="/{{ user.company_logo }}"', 'src="{{ user.company_logo }}"')
 REPORTS_HTML = REPORTS_HTML.replace('src="/{{ report.photo_path }}"', 'src="{{ report.photo_path }}"')
 REPORTS_HTML = REPORTS_HTML.replace('<p>{{ report.summary }}</p>', '<p>{{ report.summary }}</p>{% if report.attachment_path %}<div class="small-muted"><a href="{{ report.attachment_path }}" target="_blank" rel="noopener">Download attachment</a></div>{% endif %}{% if user.role in [\'company_admin\', \'superadmin\', \'supervisor\'] %}<form method="post" action="/report/update" class="inline-form">{{ csrf_input|safe }}<input type="hidden" name="report_id" value="{{ report.id }}"><select name="status"><option value="open" {% if report.status == \'open\' %}selected{% endif %}>open</option><option value="pending" {% if report.status == \'pending\' %}selected{% endif %}>pending</option><option value="closed" {% if report.status == \'closed\' %}selected{% endif %}>closed</option></select><select name="priority"><option value="low" {% if report.priority == \'low\' %}selected{% endif %}>low</option><option value="medium" {% if report.priority == \'medium\' %}selected{% endif %}>medium</option><option value="high" {% if report.priority == \'high\' %}selected{% endif %}>high</option></select><button class="btn ghost" type="submit">Update</button></form>{% endif %}')
 PROFILE_HTML = PROFILE_HTML.replace('<h3>Change Password</h3>', '<h3>Change Password</h3><div class="small-muted">You can also use the password reset flow from the login screen.</div>')
@@ -6474,6 +6519,8 @@ def ensure_assets():
             f.write(content)
     with open(os.path.join(STATIC_DIR, 'styles.css'), 'w', encoding='utf-8') as f:
         f.write(STYLES_CSS)
+    with open(os.path.join(STATIC_DIR, PROVIDER_SHIELD_LOGO_FILENAME), 'w', encoding='utf-8') as f:
+        f.write(PROVIDER_SHIELD_LOGO_SVG)
 
 
 def login_page(environ, start_response, error=None, message=None, reset_link=None):

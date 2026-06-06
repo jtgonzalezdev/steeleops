@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 160" role="img" aria-labelledby="title desc">
+  <title id="title">Steele Security Services shield logo</title>
+  <desc id="desc">Blue and silver shield mark with an S monogram.</desc>
+  <defs>
+    <linearGradient id="shield" x1="18" y1="8" x2="110" y2="148" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7dd3fc"/>
+      <stop offset="0.45" stop-color="#3d99ff"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="25" y1="15" x2="103" y2="139" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#bfdbfe" stop-opacity="0.42"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-15%" width="140%" height="135%">
+      <feDropShadow dx="0" dy="10" stdDeviation="8" flood-color="#0b1220" flood-opacity="0.36"/>
+    </filter>
+  </defs>
+  <path d="M64 6 112 22l-7 73c-3 31-22 45-41 59-19-14-38-28-41-59l-7-73L64 6Z" fill="url(#shield)" filter="url(#shadow)"/>
+  <path d="M64 16 101 29l-6 63c-2 24-16 36-31 47-15-11-29-23-31-47l-6-63 37-13Z" fill="none" stroke="url(#edge)" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M76 54c-4-5-10-8-18-8-11 0-19 6-19 15 0 22 49 10 49 39 0 14-12 24-29 24-13 0-24-5-31-14l11-10c5 7 12 10 21 10 8 0 14-4 14-10 0-15-49-8-49-38 0-18 15-29 34-29 12 0 22 4 29 12L76 54Z" fill="#f8fbff"/>
+  <path d="M64 26v107" stroke="#dbeafe" stroke-width="4" stroke-linecap="round" opacity="0.28"/>
+</svg>
