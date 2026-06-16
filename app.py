@@ -1101,13 +1101,19 @@ def init_db():
         guard_id INTEGER NOT NULL,
         site_id INTEGER NOT NULL,
         requested_clock_in TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
+        request_type TEXT NOT NULL DEFAULT 'manual',
+        reason TEXT,
+        comments TEXT,
+        status TEXT NOT NULL DEFAULT 'Pending',
+        approval_timestamp TEXT,
+        approver_id INTEGER,
         reviewed_at TEXT,
         reviewed_by INTEGER,
         created_at TEXT NOT NULL,
         FOREIGN KEY(company_id) REFERENCES companies(id),
         FOREIGN KEY(guard_id) REFERENCES users(id),
         FOREIGN KEY(site_id) REFERENCES sites(id),
+        FOREIGN KEY(approver_id) REFERENCES users(id),
         FOREIGN KEY(reviewed_by) REFERENCES users(id)
     );
 
@@ -1366,13 +1372,19 @@ def init_db():
         guard_id INTEGER NOT NULL,
         site_id INTEGER NOT NULL,
         requested_clock_in TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
+        request_type TEXT NOT NULL DEFAULT 'manual',
+        reason TEXT,
+        comments TEXT,
+        status TEXT NOT NULL DEFAULT 'Pending',
+        approval_timestamp TEXT,
+        approver_id INTEGER,
         reviewed_at TEXT,
         reviewed_by INTEGER,
         created_at TEXT NOT NULL,
         FOREIGN KEY(company_id) REFERENCES companies(id),
         FOREIGN KEY(guard_id) REFERENCES users(id),
         FOREIGN KEY(site_id) REFERENCES sites(id),
+        FOREIGN KEY(approver_id) REFERENCES users(id),
         FOREIGN KEY(reviewed_by) REFERENCES users(id)
     );
 
@@ -1471,6 +1483,18 @@ def init_db():
     if table_exists(conn, 'time_off_requests'):
         for col in ['reviewed_at TEXT', 'reviewed_by INTEGER']:
             ensure_column(conn, 'time_off_requests', col)
+    if table_exists(conn, 'manual_clock_in_requests'):
+        for col in [
+            "request_type TEXT NOT NULL DEFAULT 'manual'", 'reason TEXT', 'comments TEXT',
+            'approval_timestamp TEXT', 'approver_id INTEGER', 'reviewed_at TEXT', 'reviewed_by INTEGER'
+        ]:
+            ensure_column(conn, 'manual_clock_in_requests', col)
+        conn.execute("UPDATE manual_clock_in_requests SET request_type='manual' WHERE request_type IS NULL OR TRIM(request_type)=''")
+        conn.execute("UPDATE manual_clock_in_requests SET status='Pending' WHERE LOWER(COALESCE(status, ''))='pending'")
+        conn.execute("UPDATE manual_clock_in_requests SET status='Approved' WHERE LOWER(COALESCE(status, ''))='approved'")
+        conn.execute("UPDATE manual_clock_in_requests SET status='Denied' WHERE LOWER(COALESCE(status, '')) IN ('denied', 'declined')")
+        conn.execute("UPDATE manual_clock_in_requests SET approver_id=reviewed_by WHERE approver_id IS NULL AND reviewed_by IS NOT NULL")
+        conn.execute("UPDATE manual_clock_in_requests SET approval_timestamp=reviewed_at WHERE approval_timestamp IS NULL AND reviewed_at IS NOT NULL")
     if table_exists(conn, 'incident_reports'):
         for col in [
             'company_id INTEGER', 'site_id INTEGER', 'officer_id INTEGER', 'incident_type TEXT',
@@ -2442,35 +2466,50 @@ def process_shift_clock_action(user, shift_id, action):
 
 
 
-def request_manual_clock_in(user):
+def request_manual_clock_in(user, reason=None, comments=None):
     if user['role'] != 'guard':
         return False, 'Only guards can request manual clock-in'
+    allowed_reasons = {
+        'Covering another officer',
+        'Supervisor instructed me to report',
+        'Emergency replacement',
+        'Schedule missing',
+        'Forgot to schedule shift',
+        'Other',
+    }
+    reason = (reason or '').strip()
+    comments = (comments or '').strip()
+    if reason not in allowed_reasons:
+        return False, 'Select a valid manual clock-in reason'
+    if reason == 'Other' and not comments:
+        return False, 'Comments are required when Other is selected'
     conn = db()
     try:
         assigned_site = guard_primary_assigned_site(conn, user, preferred_site_id=row_value(user, 'session_site_id'))
         if not assigned_site:
             return False, 'No assigned site found for manual clock-in request'
         today_key = date.today().isoformat()
-        existing_shift = conn.execute('''
+        existing_shift = conn.execute("""
             SELECT id FROM shifts
             WHERE company_id=? AND COALESCE(user_id, guard_id)=? AND shift_date=?
               AND clock_in_time IS NOT NULL AND clock_out_time IS NULL
             LIMIT 1
-        ''', (user['company_id'], user['id'], today_key)).fetchone()
+        """, (user['company_id'], user['id'], today_key)).fetchone()
         if existing_shift:
             return False, 'You are already clocked in'
-        pending = conn.execute('''
+        pending = conn.execute("""
             SELECT id FROM manual_clock_in_requests
-            WHERE company_id=? AND guard_id=? AND status='pending'
+            WHERE company_id=? AND guard_id=? AND LOWER(status)='pending'
             LIMIT 1
-        ''', (user['company_id'], user['id'])).fetchone()
+        """, (user['company_id'], user['id'])).fetchone()
         if pending:
             return False, 'Manual clock-in request already pending'
         requested_at = utc_now_str()
-        conn.execute('''
-            INSERT INTO manual_clock_in_requests (company_id, guard_id, site_id, requested_clock_in, status, created_at)
-            VALUES (?, ?, ?, ?, 'pending', ?)
-        ''', (user['company_id'], user['id'], assigned_site['id'], requested_at, requested_at))
+        conn.execute("""
+            INSERT INTO manual_clock_in_requests
+                (company_id, guard_id, site_id, requested_clock_in, request_type, reason, comments, status, created_at)
+            VALUES (?, ?, ?, ?, 'manual', ?, ?, 'Pending', ?)
+        """, (user['company_id'], user['id'], assigned_site['id'], requested_at, reason, comments, requested_at))
         conn.commit()
     finally:
         conn.close()
@@ -2478,7 +2517,9 @@ def request_manual_clock_in(user):
 
 
 def review_manual_clock_in_request(user, request_id, decision):
-    if decision not in {'approved', 'declined'}:
+    decision_map = {'approved': 'Approved', 'approve': 'Approved', 'denied': 'Denied', 'deny': 'Denied', 'declined': 'Denied'}
+    status = decision_map.get((decision or '').lower())
+    if not status:
         return False, 'Invalid manual clock-in decision', None
     conn = db()
     try:
@@ -2487,27 +2528,27 @@ def review_manual_clock_in_request(user, request_id, decision):
             return False, 'Manual clock-in request not found', None
         if not supervisor_can_access_site(conn, user, req['site_id']):
             return False, 'Supervisor can only review manual clock-in requests for assigned sites.', None
-        if req['status'] != 'pending':
+        if (req['status'] or '').lower() != 'pending':
             return False, 'Manual clock-in request already reviewed', None
         reviewed_at = utc_now_str()
         target_shift_id = None
-        if decision == 'approved':
+        if status == 'Approved':
             requested_dt = datetime.strptime(req['requested_clock_in'], '%Y-%m-%d %H:%M:%S')
             shift_date = requested_dt.date().isoformat()
             start_time = requested_dt.strftime('%H:%M')
-            target_shift_id = insert_and_get_id(conn, '''
+            target_shift_id = insert_and_get_id(conn, """
                 INSERT INTO shifts (company_id, user_id, site_id, shift_date, start_time, end_time, status, clock_in_time, notes)
                 VALUES (?, ?, ?, ?, ?, ?, 'clocked_in', ?, ?)
-            ''', (req['company_id'], req['guard_id'], req['site_id'], shift_date, start_time, '23:59', req['requested_clock_in'], 'Manual clock-in approved'))
-        conn.execute('''
+            """, (req['company_id'], req['guard_id'], req['site_id'], shift_date, start_time, '23:59', req['requested_clock_in'], 'Manual clock-in approved'))
+        conn.execute("""
             UPDATE manual_clock_in_requests
-            SET status=?, reviewed_at=?, reviewed_by=?
+            SET status=?, approval_timestamp=?, approver_id=?, reviewed_at=?, reviewed_by=?
             WHERE id=?
-        ''', (decision, reviewed_at, user['id'], req['id']))
+        """, (status, reviewed_at, user['id'], reviewed_at, user['id'], req['id']))
         conn.commit()
     finally:
         conn.close()
-    return True, f'manual clock-in {decision}', target_shift_id
+    return True, f'manual clock-in {status.lower()}', target_shift_id
 
 def company_filter_clause(user):
     if user['role'] == 'superadmin':
@@ -2951,7 +2992,7 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         FROM manual_clock_in_requests mcir
         JOIN users u ON mcir.guard_id=u.id
         JOIN sites s ON mcir.site_id=s.id
-        LEFT JOIN users reviewer ON mcir.reviewed_by=reviewer.id
+        LEFT JOIN users reviewer ON COALESCE(mcir.approver_id, mcir.reviewed_by)=reviewer.id
         WHERE mcir.company_id=?
         ORDER BY mcir.created_at DESC LIMIT 10
     ''', (company_id,)).fetchall()
@@ -3646,7 +3687,7 @@ def application(environ, start_response):
     if path == '/manual-clock-in/request' and method == 'POST':
         user, response = require_login(environ, start_response)
         if response: return response
-        ok, message = request_manual_clock_in(user)
+        data, _ = parse_post(environ); ok, message = request_manual_clock_in(user, data.get('reason'), data.get('comments'))
         if not ok: return bad_request(start_response, message)
         log_audit('manual_clock_in_request', actor_user_id=user['id'], company_id=user['company_id'], target_type='user', target_id=user['id'], message=message, environ=environ); return redirect(start_response, '/dashboard')
     if path == '/manual-clock-in/approve' and method == 'POST':
@@ -4151,8 +4192,12 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
         {% elif current_shift and current_shift.user_id and current_shift.clock_in_time and not current_shift.clock_out_time %}
         <form method="post" action="/clock-out" class="guard-action-form"><input type="hidden" name="shift_id" value="{{ current_shift.id }}"><button class="guard-action-btn primary" type="submit"><span>Clock Out</span><small>Clocked in {{ current_shift.clock_in_time }}</small></button></form>
         {% else %}
-        <form method="post" action="/manual-clock-in/request" class="guard-action-form">
-          <button class="guard-action-btn primary" type="submit"><span>Request Manual Clock-In</span><small>No scheduled shift found</small></button>
+        <button class="guard-action-btn primary" type="button" onclick="document.getElementById('manual-clock-in-request-form').hidden=false; this.hidden=true;"><span>No Shift Scheduled</span><strong>Request Clock-In Approval</strong><small>You are assigned to this site but no active shift is scheduled.</small></button>
+        <form id="manual-clock-in-request-form" method="post" action="/manual-clock-in/request" class="guard-action-form stack compact" hidden>
+          <h4>Request Clock-In Approval</h4>
+          <label>Reason<select name="reason" id="manual-clock-in-reason" required onchange="document.getElementById('manual-clock-in-comments').required=this.value==='Other';"><option value="">Select reason</option><option>Covering another officer</option><option>Supervisor instructed me to report</option><option>Emergency replacement</option><option>Schedule missing</option><option>Forgot to schedule shift</option><option>Other</option></select></label>
+          <label>Comments<textarea id="manual-clock-in-comments" name="comments" rows="3" placeholder="Required when Other is selected"></textarea></label>
+          <div class="actions"><button class="btn primary" type="submit">Submit Approval Request</button><button class="btn ghost" type="button" onclick="document.getElementById('manual-clock-in-request-form').hidden=true; document.querySelector('.guard-action-btn.primary[hidden]').hidden=false;">Cancel</button></div>
         </form>
         {% endif %}
         <a class="guard-action-btn" href="/patrols{% if guard_dashboard_summary.assigned_site_id %}?site_id={{ guard_dashboard_summary.assigned_site_id }}{% endif %}"><span>Start Patrol</span><small>Open assigned patrol tools</small></a>
@@ -4581,14 +4626,15 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
       <div class="list-item detailed">
         <div>
           <strong>{{ item.guard_name }}</strong>
-          <div class="small-muted">{{ item.site_name }} · Requested clock-in {{ item.requested_clock_in }}</div>
+          <div class="small-muted"><strong>Site:</strong> {{ item.site_name }} · <strong>Request Time:</strong> {{ item.requested_clock_in }}</div>
+          <div class="small-muted"><strong>Reason:</strong> {{ item.reason or '—' }}{% if item.comments %} · {{ item.comments }}{% endif %}</div>
           {% if item.reviewed_at %}<div class="small-muted">Reviewed: {{ item.reviewed_at }}{% if item.reviewed_by_name %} by {{ item.reviewed_by_name }}{% endif %}</div>{% endif %}
         </div>
         <div class="actions">
-          <span class="badge {{ item.status }}">{{ item.status }}</span>
-          {% if item.status == 'pending' %}
+          <span class="badge {{ item.status|lower }}">{{ item.status }}</span>
+          {% if item.status|lower == 'pending' %}
           <form method="post" action="/manual-clock-in/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="approved"><button class="btn">Approve</button></form>
-          <form method="post" action="/manual-clock-in/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="declined"><button class="btn ghost">Decline</button></form>
+          <form method="post" action="/manual-clock-in/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="denied"><button class="btn ghost">Deny</button></form>
           {% endif %}
         </div>
       </div>
@@ -7777,7 +7823,7 @@ def application(environ, start_response):
     if path == '/manual-clock-in/request' and method == 'POST':
         user, response = require_login(environ, start_response)
         if response: return response
-        ok, message = request_manual_clock_in(user)
+        data, _ = parse_post(environ); ok, message = request_manual_clock_in(user, data.get('reason'), data.get('comments'))
         if not ok:
             return bad_request(start_response, message)
         log_audit('manual_clock_in_request', actor_user_id=user['id'], company_id=user['company_id'], target_type='user', target_id=user['id'], message=message, environ=environ)
