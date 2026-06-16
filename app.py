@@ -1960,23 +1960,17 @@ def guard_site_ids(conn, user):
     guard_row_id = row_value(user, 'guard_id')
     if not user or row_value(user, 'role') != 'guard' or not guard_row_id:
         return None
-    preferred_site_id = str(row_value(user, 'session_site_id') or '').strip()
-    if preferred_site_id.isdigit():
-        preferred = conn.execute(
-            '''
-            SELECT gsa.site_id
-            FROM guard_site_assignments gsa
-            JOIN sites s ON s.id=gsa.site_id AND s.company_id=gsa.company_id
-            WHERE gsa.company_id=? AND gsa.guard_id=? AND gsa.site_id=? AND COALESCE(s.active,1)=1
-            ORDER BY gsa.assigned_at DESC, gsa.id DESC
-            LIMIT 1
-            ''',
-            (user['company_id'], guard_row_id, int(preferred_site_id)),
-        ).fetchone()
-        if preferred:
-            return {preferred['site_id']}
-    primary_site = guard_primary_assigned_site(conn, user)
-    return {primary_site['id']} if primary_site else set()
+    rows = conn.execute(
+        '''
+        SELECT DISTINCT gsa.site_id
+        FROM guard_site_assignments gsa
+        JOIN sites s ON s.id=gsa.site_id AND s.company_id=gsa.company_id
+        WHERE gsa.company_id=? AND gsa.guard_id=? AND COALESCE(s.active,1)=1
+        ORDER BY gsa.site_id
+        ''',
+        (user['company_id'], guard_row_id),
+    ).fetchall()
+    return {row['site_id'] for row in rows}
 
 
 def supervisor_site_ids(conn, user):
@@ -4015,6 +4009,31 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
     </section>
     {% endif %}
 
+    {% if user.role == 'guard' %}
+    <section class="card guard-action-dashboard">
+      <div class="section-head">
+        <div>
+          <div class="eyebrow">Guard Dashboard</div>
+          <h2>{{ guard_dashboard_summary.assigned_site }}</h2>
+          <span>Fast actions for your assigned post.</span>
+        </div>
+      </div>
+      <div class="guard-action-grid">
+        {% set current_shift = guard_dashboard_summary.current_shift %}
+        {% if current_shift and current_shift.user_id and not current_shift.clock_in_time %}
+        <form method="post" action="/clock-in" class="guard-action-form"><input type="hidden" name="shift_id" value="{{ current_shift.id }}"><button class="guard-action-btn primary" type="submit"><span>Clock In</span><small>{{ current_shift.start_time }} - {{ current_shift.end_time }}</small></button></form>
+        {% elif current_shift and current_shift.user_id and current_shift.clock_in_time and not current_shift.clock_out_time %}
+        <form method="post" action="/clock-out" class="guard-action-form"><input type="hidden" name="shift_id" value="{{ current_shift.id }}"><button class="guard-action-btn primary" type="submit"><span>Clock Out</span><small>Clocked in {{ current_shift.clock_in_time }}</small></button></form>
+        {% else %}
+        <button class="guard-action-btn" type="button" disabled><span>Clock In / Clock Out</span><small>No active assigned shift</small></button>
+        {% endif %}
+        <a class="guard-action-btn" href="/patrols{% if guard_dashboard_summary.assigned_site_id %}?site_id={{ guard_dashboard_summary.assigned_site_id }}{% endif %}"><span>Start Patrol</span><small>Open assigned patrol tools</small></a>
+        <a class="guard-action-btn" href="/guard/daily-activity-reports{% if guard_dashboard_summary.assigned_site_id %}?site_id={{ guard_dashboard_summary.assigned_site_id }}{% endif %}"><span>Submit DAR</span><small>Daily activity report</small></a>
+        <a class="guard-action-btn" href="/guard/incident-reports{% if guard_dashboard_summary.assigned_site_id %}?site_id={{ guard_dashboard_summary.assigned_site_id }}{% endif %}"><span>Incident Report</span><small>Report an incident</small></a>
+      </div>
+    </section>
+    {% endif %}
+
     {% if user.role != 'client' %}
     <section class="grid stats-grid">
       {% if user.role == 'guard' %}
@@ -5289,6 +5308,18 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
 .sticky-submit-wrap { position: sticky; bottom: 8px; padding-top: 4px; background: linear-gradient(180deg, rgba(8,8,8,0), rgba(8,8,8,.96) 36%); }
 .sticky-submit { width: 100%; }
 .slim-gap { margin-top: 16px; }
+
+.guard-action-dashboard { border-color: rgba(248,113,113,.38); }
+.guard-action-dashboard h2 { margin: 4px 0 6px; font-size: clamp(1.45rem, 5vw, 2.1rem); }
+.guard-action-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.guard-action-form { display: block; }
+.guard-action-btn { width: 100%; min-height: 112px; padding: 20px; border-radius: 22px; border: 1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.05); color: var(--text); display: flex; flex-direction: column; justify-content: center; align-items: flex-start; gap: 8px; text-align: left; box-shadow: 0 14px 34px rgba(0,0,0,.22); }
+.guard-action-btn span { font-size: clamp(1.2rem, 4.8vw, 1.65rem); font-weight: 850; line-height: 1.1; }
+.guard-action-btn small { color: var(--muted); font-weight: 650; }
+.guard-action-btn.primary { background: linear-gradient(145deg, #ef4444, #991b1b); border-color: rgba(255,255,255,.18); }
+.guard-action-btn.primary small { color: rgba(255,255,255,.86); }
+.guard-action-btn:disabled { opacity: .62; cursor: not-allowed; }
+@media (max-width: 720px) { .guard-action-grid { grid-template-columns: 1fr; } .guard-action-btn { min-height: 96px; } }
 
 @media (max-width: 1040px) {
   .login-card, .app-shell, .stats-grid, .two-col, .row-2, .row-3 { grid-template-columns: 1fr; }
@@ -7424,8 +7455,13 @@ def application(environ, start_response):
             record_login_attempt(username, False, environ=environ)
             return login_page(environ, start_response, 'Invalid username or password.')
         record_login_attempt(username, True, environ=environ, user_id=found['id'], company_id=found['company_id'])
-        session_id = create_session(found['id'])
-        return redirect(start_response, '/dashboard', [('Set-Cookie', cookie_header(session_id))])
+        assigned_sites = guard_login_assigned_sites(found['company_id'], found['guard_id']) if found['role'] == 'guard' and found['guard_id'] else []
+        selected_site_id = assigned_sites[0]['id'] if found['role'] == 'guard' and assigned_sites else None
+        session_id = create_session(found['id'], company_id=found['company_id'], site_id=selected_site_id, role=found['role'])
+        headers = [('Set-Cookie', cookie_header(session_id))]
+        if found['role'] == 'guard' and len(assigned_sites) > 1:
+            return redirect(start_response, '/guard-login/sites', headers)
+        return redirect(start_response, '/dashboard', headers)
 
     if path == '/guard-login' and method == 'GET':
         return guard_login_list_page(environ, start_response, current_user=user)
@@ -7531,6 +7567,10 @@ def application(environ, start_response):
     if path == '/dashboard':
         user, response = require_login(environ, start_response)
         if response: return response
+        if user['role'] == 'guard':
+            assigned_sites = guard_login_assigned_sites(user['company_id'], guard_assignment_id(user))
+            if len(assigned_sites) > 1 and not row_value(user, 'session_site_id'):
+                return redirect(start_response, '/guard-login/sites')
         return dashboard_page(environ, start_response, user, active_path='/dashboard', view='week', title=PRODUCT_FULL_NAME)
     if path == '/patrols':
         user, response = require_login(environ, start_response)
