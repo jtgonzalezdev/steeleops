@@ -2066,6 +2066,7 @@ def sidebar_nav_items(user, active_path):
         items.extend([
             {'label': 'Guards', 'href': '/guards', 'active': active_path == '/guards'},
             {'label': 'Reports', 'href': '/reports', 'active': active_path == '/reports'},
+            {'label': 'Clock-In Requests', 'href': '/clock-in-requests', 'active': active_path == '/clock-in-requests'},
         ])
         if user['role'] in {'company_admin', 'superadmin'}:
             items.extend([
@@ -2987,17 +2988,22 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
     if allowed_site_ids is not None:
         time_corrections = [row for row in time_corrections if row.get('site_id') in allowed_site_ids]
 
-    manual_clock_in_requests = conn.execute('''
+    manual_clock_in_rows = conn.execute('''
         SELECT mcir.*, u.full_name as guard_name, s.name as site_name, reviewer.full_name as reviewed_by_name
         FROM manual_clock_in_requests mcir
         JOIN users u ON mcir.guard_id=u.id
         JOIN sites s ON mcir.site_id=s.id
         LEFT JOIN users reviewer ON COALESCE(mcir.approver_id, mcir.reviewed_by)=reviewer.id
         WHERE mcir.company_id=?
-        ORDER BY mcir.created_at DESC LIMIT 10
+        ORDER BY CASE WHEN LOWER(COALESCE(mcir.status, ''))='pending' THEN 0 ELSE 1 END, mcir.created_at DESC
     ''', (company_id,)).fetchall()
+    manual_clock_in_requests = [dict(row) for row in manual_clock_in_rows]
     if allowed_site_ids is not None:
         manual_clock_in_requests = [row for row in manual_clock_in_requests if row.get('site_id') in allowed_site_ids]
+    pending_manual_clock_in_requests = [row for row in manual_clock_in_requests if (row.get('status') or '').lower() == 'pending']
+    pending_manual_clock_in_count = len(pending_manual_clock_in_requests)
+    manual_clock_in_requests = pending_manual_clock_in_requests + [row for row in manual_clock_in_requests if (row.get('status') or '').lower() != 'pending']
+    manual_clock_in_requests = manual_clock_in_requests[:25]
 
     my_time_off_requests = conn.execute('''
         SELECT tor.*, u.full_name as guard_name, reviewer.full_name as reviewed_by_name, reviewer.role as reviewed_by_role
@@ -3224,6 +3230,7 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
         'swap_requests': swap_requests,
         'time_corrections': time_corrections,
         'manual_clock_in_requests': manual_clock_in_requests,
+        'pending_manual_clock_in_count': pending_manual_clock_in_count,
         'my_time_off_requests': my_time_off_requests,
         'admin_time_off_requests': admin_time_off_requests,
         'checkpoints': checkpoints,
@@ -4234,6 +4241,7 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
       <div class="stat card"><div class="stat-label">Guards On Duty</div><div class="stat-number">{{ stats.guards_on_duty }}</div></div>
       <div class="stat card"><div class="stat-label">Company-wide Open Incidents</div><div class="stat-number">{{ stats.open_incidents }}</div></div>
       <div class="stat card"><div class="stat-label">Sites Active Today</div><div class="stat-number">{{ stats.sites_active_today }}</div></div>
+      <a class="stat card stat-link" href="#manual-clock-in-requests"><div class="stat-label">Pending Clock-In Requests</div><div class="stat-number">{{ pending_manual_clock_in_count }}</div></a>
       <div class="stat card"><div class="stat-label">Active Patrols{% if patrol_issue_alert and patrol_issue_alert.active_count %}<span class="issue-badge warning">{{ patrol_issue_alert.active_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.active_patrols }}</div></div>
       <div class="stat card"><div class="stat-label">Completed Tours</div><div class="stat-number">{{ stats.completed_tours }}</div></div>
       <div class="stat card"><div class="stat-label">Excused Patrols</div><div class="stat-number">{{ stats.excused_patrols or 0 }}</div></div>
@@ -4620,25 +4628,20 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
       </div>
       {% else %}<div class="empty">No pending time corrections.</div>{% endfor %}
     </section>
-    <section class="card">
-      <div class="section-head"><h3>Manual Clock-In Requests</h3><span>Supervisor/admin approval required</span></div>
-      {% for item in manual_clock_in_requests %}
-      <div class="list-item detailed">
-        <div>
-          <strong>{{ item.guard_name }}</strong>
-          <div class="small-muted"><strong>Site:</strong> {{ item.site_name }} · <strong>Request Time:</strong> {{ item.requested_clock_in }}</div>
-          <div class="small-muted"><strong>Reason:</strong> {{ item.reason or '—' }}{% if item.comments %} · {{ item.comments }}{% endif %}</div>
-          {% if item.reviewed_at %}<div class="small-muted">Reviewed: {{ item.reviewed_at }}{% if item.reviewed_by_name %} by {{ item.reviewed_by_name }}{% endif %}</div>{% endif %}
-        </div>
-        <div class="actions">
-          <span class="badge {{ item.status|lower }}">{{ item.status }}</span>
-          {% if item.status|lower == 'pending' %}
-          <form method="post" action="/manual-clock-in/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="approved"><button class="btn">Approve</button></form>
-          <form method="post" action="/manual-clock-in/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="denied"><button class="btn ghost">Deny</button></form>
-          {% endif %}
-        </div>
-      </div>
-      {% else %}<div class="empty">No manual clock-in requests.</div>{% endfor %}
+    <section class="card" id="manual-clock-in-requests">
+      <div class="section-head"><h3>Manual Clock-In Approval Requests</h3><span>{{ pending_manual_clock_in_count }} pending</span></div>
+      {% if manual_clock_in_requests %}
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>Guard name</th><th>Site</th><th>Requested time</th><th>Reason</th><th>Comments</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>{% for item in manual_clock_in_requests %}
+        <tr>
+          <td>{{ item.guard_name }}</td><td>{{ item.site_name }}</td><td>{{ item.requested_clock_in }}</td><td>{{ item.reason or '—' }}</td><td>{{ item.comments or '—' }}</td>
+          <td><span class="badge {{ item.status|lower }}">{{ item.status }}</span>{% if item.reviewed_at %}<div class="small-muted">{{ item.reviewed_at }}{% if item.reviewed_by_name %} by {{ item.reviewed_by_name }}{% endif %}</div>{% endif %}</td>
+          <td>{% if item.status|lower == 'pending' %}<div class="actions"><form method="post" action="/manual-clock-in/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="approved"><button class="btn">Approve</button></form><form method="post" action="/manual-clock-in/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="denied"><button class="btn ghost">Deny</button></form></div>{% else %}<span class="small-muted">Reviewed</span>{% endif %}</td>
+        </tr>
+        {% endfor %}</tbody>
+      </table></div>
+      {% else %}<div class="empty">No manual clock-in requests.</div>{% endif %}
     </section>
     <section class="card">
       <div class="section-head"><h3>Time Off Requests</h3><span>Guard leave review</span></div>
@@ -7777,6 +7780,10 @@ def application(environ, start_response):
         user, response = require_login(environ, start_response)
         if response: return response
         return app_page(environ, start_response, user, 'schedule.html', active_path='/monthly-schedule', view='month', title='Monthly Schedule')
+    if path == '/clock-in-requests':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        return redirect(start_response, '/dashboard#manual-clock-in-requests')
     if path == '/profile':
         user, response = require_login(environ, start_response)
         if response: return response
