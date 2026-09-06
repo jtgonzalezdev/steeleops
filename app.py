@@ -899,6 +899,11 @@ def init_db():
         contact_name TEXT,
         contact_email TEXT,
         contact_phone TEXT,
+        address_line1 TEXT,
+        address_line2 TEXT,
+        city TEXT,
+        state TEXT,
+        zip_code TEXT,
         notes TEXT,
         active INTEGER DEFAULT 1,
         created_at TEXT NOT NULL,
@@ -912,6 +917,11 @@ def init_db():
         name TEXT NOT NULL,
         client_company_name TEXT,
         address TEXT,
+        address_line1 TEXT,
+        address_line2 TEXT,
+        city TEXT,
+        state TEXT,
+        zip_code TEXT,
         notes TEXT,
         active INTEGER DEFAULT 1,
         FOREIGN KEY(company_id) REFERENCES companies(id),
@@ -1229,6 +1239,11 @@ def init_db():
         contact_name TEXT,
         contact_email TEXT,
         contact_phone TEXT,
+        address_line1 TEXT,
+        address_line2 TEXT,
+        city TEXT,
+        state TEXT,
+        zip_code TEXT,
         notes TEXT,
         active INTEGER DEFAULT 1,
         created_at TEXT NOT NULL,
@@ -1242,6 +1257,11 @@ def init_db():
         name TEXT NOT NULL,
         client_company_name TEXT,
         address TEXT,
+        address_line1 TEXT,
+        address_line2 TEXT,
+        city TEXT,
+        state TEXT,
+        zip_code TEXT,
         notes TEXT,
         active INTEGER DEFAULT 1,
         FOREIGN KEY(company_id) REFERENCES companies(id),
@@ -1457,10 +1477,10 @@ def init_db():
         ]:
             ensure_column(conn, 'users', col)
     if table_exists(conn, 'clients'):
-        for col in ['company_id INTEGER', 'name TEXT', 'contact_name TEXT', 'contact_email TEXT', 'contact_phone TEXT', 'notes TEXT', 'active INTEGER DEFAULT 1', 'created_at TEXT']:
+        for col in ['company_id INTEGER', 'name TEXT', 'contact_name TEXT', 'contact_email TEXT', 'contact_phone TEXT', 'address_line1 TEXT', 'address_line2 TEXT', 'city TEXT', 'state TEXT', 'zip_code TEXT', 'notes TEXT', 'active INTEGER DEFAULT 1', 'created_at TEXT']:
             ensure_column(conn, 'clients', col)
     if table_exists(conn, 'sites'):
-        for col in ['company_id INTEGER', 'client_id INTEGER', 'client_company_name TEXT', 'active INTEGER DEFAULT 1']:
+        for col in ['company_id INTEGER', 'client_id INTEGER', 'client_company_name TEXT', 'address_line1 TEXT', 'address_line2 TEXT', 'city TEXT', 'state TEXT', 'zip_code TEXT', 'active INTEGER DEFAULT 1']:
             ensure_column(conn, 'sites', col)
     if table_exists(conn, 'guards'):
         for col in ['company_id INTEGER', 'name TEXT', 'first_name TEXT', 'last_name TEXT', 'phone TEXT', 'email TEXT', 'license_number TEXT', 'employee_id TEXT', 'badge_id TEXT', "status TEXT DEFAULT 'active'", 'rating REAL DEFAULT 5', 'training_status TEXT', 'created_at TEXT']:
@@ -2116,6 +2136,35 @@ def app_page(environ, start_response, user, template_name, active_path='/dashboa
         render_page(environ, template_name, title=title, user=user, **context),
         extra_headers=csrf_headers(environ),
     )
+
+
+def client_site_management_context(company_id):
+    """Return client/site records joined and grouped within one company scope."""
+    conn = db()
+    clients = [dict(row) for row in conn.execute(
+        'SELECT * FROM clients WHERE company_id=? ORDER BY name', (company_id,)
+    ).fetchall()]
+    sites = [dict(row) for row in conn.execute('''
+        SELECT s.*, COALESCE(c.name, NULLIF(s.client_company_name, ''), 'Unassigned') AS client_name
+        FROM sites s
+        LEFT JOIN clients c ON c.id=s.client_id AND c.company_id=s.company_id
+        WHERE s.company_id=?
+        ORDER BY c.name, s.name
+    ''', (company_id,)).fetchall()]
+    conn.close()
+    sites_by_client = {}
+    for site in sites:
+        parts = [site.get('address_line1'), site.get('address_line2')]
+        locality = ', '.join(value for value in (site.get('city'), site.get('state')) if value)
+        if site.get('zip_code'):
+            locality = f"{locality} {site['zip_code']}".strip()
+        if locality:
+            parts.append(locality)
+        site['physical_address'] = ', '.join(value for value in parts if value) or site.get('address') or ''
+        sites_by_client.setdefault(site['client_id'], []).append(site)
+    for client in clients:
+        client['sites'] = sites_by_client.get(client['id'], [])
+    return {'client_records': clients, 'site_records': sites, 'clients': clients, 'sites': sites}
 
 
 def dashboard_page(environ, start_response, user, active_path='/dashboard', view='week', title=PRODUCT_FULL_NAME, **extra_context):
@@ -4192,9 +4241,15 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
     <div class="actions top-gap"><a class="btn primary" href="/weekly-schedule">Open Weekly Schedule</a><a class="btn ghost" href="/patrols">Open Patrols</a>{% if user.role in ['company_admin', 'superadmin', 'admin', 'supervisor'] %}<a class="btn ghost" href="/reports">Open Reports</a>{% endif %}</div>
   </section>
 {% endblock %}'''
-CLIENTS_HTML = r'''{% extends "app_shell.html" %}{% block page_content %}<section class="card"><div class="section-head"><h3>Clients</h3><span>Manage client records for your company</span></div><form method="post" action="/admin/client/new" class="stack compact"><h4>Create Client</h4><div class="row-2"><label>Client Name<input name="name" required></label><label>Contact Name<input name="contact_name"></label></div><div class="row-2"><label>Contact Email<input type="email" name="contact_email"></label><label>Contact Phone<input name="contact_phone"></label></div><label>Notes<textarea name="notes" rows="2"></textarea></label><button class="btn primary" type="submit">Add Client</button></form><hr>{% for client in clients %}<form method="post" action="/admin/client/update" class="stack compact"><input type="hidden" name="client_id" value="{{ client.id }}"><div class="row-2"><label>Client Name<input name="name" value="{{ client.name }}" required></label><label>Contact Name<input name="contact_name" value="{{ client.contact_name or '' }}"></label></div><div class="row-2"><label>Contact Email<input type="email" name="contact_email" value="{{ client.contact_email or '' }}"></label><label>Contact Phone<input name="contact_phone" value="{{ client.contact_phone or '' }}"></label></div><label>Notes<textarea name="notes" rows="2">{{ client.notes or '' }}</textarea></label><button class="btn ghost" type="submit">Save {{ client.name }}</button></form>{% if not loop.last %}<hr>{% endif %}{% else %}<div class="empty">No clients added yet.</div>{% endfor %}</section>{% endblock %}'''
+CLIENTS_HTML = r'''{% extends "app_shell.html" %}{% block page_content %}
+<section class="card"><div class="section-head"><div><h3>Clients</h3><span>Contract customers and their locations</span></div></div>
+<details class="checkpoint-edit" open><summary class="btn primary">Add Client</summary><form method="post" action="/admin/client/new" class="stack compact"><h4>Client Information</h4><div class="row-2"><label>Client Name<input name="name" required></label><label>Contact Name<input name="contact_name"></label></div><div class="row-2"><label>Contact Email<input type="email" name="contact_email"></label><label>Contact Phone<input name="contact_phone"></label></div><h4>Client Mailing / Business Address</h4><label>Address Line 1<input name="address_line1"></label><label>Address Line 2 <span class="small-muted">(optional)</span><input name="address_line2"></label><div class="row-3"><label>City<input name="city"></label><label>State<input name="state"></label><label>ZIP Code<input name="zip_code"></label></div><label>Notes<textarea name="notes" rows="2"></textarea></label><button class="btn primary" type="submit">Add Client</button></form></details></section>
+{% for client in client_records %}<section class="card" id="client-{{ client.id }}"><div class="section-head"><div><h3>{{ client.name }}</h3><span>Client record</span></div><a class="btn primary" href="/sites?client_id={{ client.id }}#create-site">Add Site / Location</a></div>
+<form method="post" action="/admin/client/update" class="stack compact"><input type="hidden" name="client_id" value="{{ client.id }}"><h4>Client Information</h4><div class="row-2"><label>Client Name<input name="name" value="{{ client.name }}" required></label><label>Contact Name<input name="contact_name" value="{{ client.contact_name or '' }}"></label></div><div class="row-2"><label>Contact Email<input type="email" name="contact_email" value="{{ client.contact_email or '' }}"></label><label>Contact Phone<input name="contact_phone" value="{{ client.contact_phone or '' }}"></label></div><h4>Client Mailing / Business Address</h4><label>Address Line 1<input name="address_line1" value="{{ client.address_line1 or '' }}"></label><label>Address Line 2 <span class="small-muted">(optional)</span><input name="address_line2" value="{{ client.address_line2 or '' }}"></label><div class="row-3"><label>City<input name="city" value="{{ client.city or '' }}"></label><label>State<input name="state" value="{{ client.state or '' }}"></label><label>ZIP Code<input name="zip_code" value="{{ client.zip_code or '' }}"></label></div><label>Notes<textarea name="notes" rows="2">{{ client.notes or '' }}</textarea></label><button class="btn ghost" type="submit">Save Client</button></form>
+<hr><div class="section-head"><div><h4>Sites / Locations</h4><span>Physical locations belonging to this client</span></div></div><div class="table-wrap"><table><thead><tr><th>Site Name</th><th>Physical Site Address</th><th>Status</th><th>Actions</th></tr></thead><tbody>{% for site in client.sites %}<tr><td>{{ site.name }}</td><td>{{ site.physical_address or '—' }}</td><td>{% if site.active %}Active{% else %}Inactive{% endif %}</td><td><a href="/sites?edit_site_id={{ site.id }}#site-{{ site.id }}">View / Edit</a></td></tr>{% else %}<tr><td colspan="4">No sites belong to this client yet.</td></tr>{% endfor %}</tbody></table></div></section>{% else %}<section class="card"><div class="empty">No clients added yet.</div></section>{% endfor %}{% endblock %}'''
 
-SITES_HTML = r'''{% extends "app_shell.html" %}{% block page_content %}<section class="card"><div class="section-head"><h3>Sites</h3><span>Manage company posts and client relationships</span></div><form method="post" action="/admin/site/new" class="stack compact"><h4>Create Site</h4><div class="row-2"><label>Site Name<input name="name" required></label><label>Client<select name="client_id"><option value="">None</option>{% for client in clients %}<option value="{{ client.id }}">{{ client.name }}</option>{% endfor %}</select></label></div><label>Client Company Name<input name="client_company_name"></label><label>Address<input name="address"></label><label>Notes<textarea name="notes" rows="2"></textarea></label><button class="btn primary" type="submit">Add Site</button></form><hr><div class="table-wrap"><table><thead><tr><th>Site</th><th>Client</th><th>Address</th><th>Status</th></tr></thead><tbody>{% for site in sites %}<tr><td>{{ site.name }}</td><td>{{ site.client_company_name or '—' }}</td><td>{{ site.address or '—' }}</td><td>{% if site.active %}Active{% else %}Inactive{% endif %}</td></tr>{% else %}<tr><td colspan="4">No sites added yet.</td></tr>{% endfor %}</tbody></table></div></section>{% endblock %}'''
+SITES_HTML = r'''{% extends "app_shell.html" %}{% block page_content %}<section class="card"><div class="section-head"><div><h3>Sites</h3><span>Physical guard-reporting locations, organized by client</span></div></div><form id="create-site" method="post" action="/admin/site/new" class="stack compact"><h4>Create Site</h4><div class="row-2"><label>Site Name<input name="name" required></label><label>Client<select name="client_id" required><option value="" disabled {% if not selected_client_id %}selected{% endif %}>Select a client</option>{% for client in clients %}<option value="{{ client.id }}" {% if selected_client_id == client.id|string %}selected{% endif %}>{{ client.name }}</option>{% endfor %}</select></label></div><h4>Physical Site Address — Guard Reporting Location</h4><p class="small-muted">Enter the physical address where guards report for duty.</p><label>Address Line 1<input name="address_line1"></label><label>Address Line 2 <span class="small-muted">(optional)</span><input name="address_line2"></label><div class="row-3"><label>City<input name="city"></label><label>State<input name="state"></label><label>ZIP Code<input name="zip_code"></label></div><label>Notes<textarea name="notes" rows="2"></textarea></label><button class="btn primary" type="submit">Add Site</button></form></section>
+{% for site in site_records %}<section class="card" id="site-{{ site.id }}"><div class="section-head"><div><h3>{{ site.name }}</h3><span>Client: <strong>{{ site.client_name }}</strong></span></div><span>{% if site.active %}Active{% else %}Inactive{% endif %}</span></div><details class="checkpoint-edit" {% if edit_site_id == site.id|string %}open{% endif %}><summary class="btn ghost">View / Edit Site</summary><form method="post" action="/admin/site/update" class="stack compact"><input type="hidden" name="site_id" value="{{ site.id }}"><div class="row-2"><label>Site Name<input name="name" value="{{ site.name }}" required></label><label>Client<select name="client_id" required>{% for client in clients %}<option value="{{ client.id }}" {% if site.client_id == client.id %}selected{% endif %}>{{ client.name }}</option>{% endfor %}</select></label></div><h4>Physical Site Address — Guard Reporting Location</h4><p class="small-muted">Enter the physical address where guards report for duty.</p><label>Address Line 1<input name="address_line1" value="{{ site.address_line1 or '' }}"></label><label>Address Line 2 <span class="small-muted">(optional)</span><input name="address_line2" value="{{ site.address_line2 or '' }}"></label><div class="row-3"><label>City<input name="city" value="{{ site.city or '' }}"></label><label>State<input name="state" value="{{ site.state or '' }}"></label><label>ZIP Code<input name="zip_code" value="{{ site.zip_code or '' }}"></label></div>{% if site.address and not site.address_line1 %}<div class="small-muted">Legacy address: {{ site.address }}</div>{% endif %}<div class="row-2"><label>Notes<textarea name="notes" rows="2">{{ site.notes or '' }}</textarea></label><label>Status<select name="active"><option value="1" {% if site.active %}selected{% endif %}>Active</option><option value="0" {% if not site.active %}selected{% endif %}>Inactive</option></select></label></div><button class="btn primary" type="submit">Save Site</button></form></details></section>{% else %}<section class="card"><div class="empty">No sites added yet.</div></section>{% endfor %}{% endblock %}'''
 
 CLOCK_IN_REQUESTS_HTML = r'''{% extends "app_shell.html" %}{% block page_content %}<section class="card" id="manual-clock-in-requests"><div class="section-head"><h3>Manual Clock-In Approval Requests</h3><span>{{ pending_manual_clock_in_count }} pending</span></div><div class="table-wrap"><table><thead><tr><th>Guard</th><th>Site</th><th>Requested</th><th>Reason</th><th>Status</th><th>Actions</th></tr></thead><tbody>{% for item in manual_clock_in_requests %}<tr><td>{{ item.guard_name }}</td><td>{{ item.site_name }}</td><td>{{ item.requested_clock_in }}</td><td>{{ item.reason or '—' }}{% if item.comments %}<div class="small-muted">{{ item.comments }}</div>{% endif %}</td><td><span class="badge {{ item.status|lower }}">{{ item.status }}</span></td><td>{% if item.status|lower == 'pending' %}<form method="post" action="/manual-clock-in/approve" class="inline-form"><input type="hidden" name="request_id" value="{{ item.id }}"><button class="btn" name="decision" value="approved">Approve</button><button class="btn ghost" name="decision" value="denied">Decline</button></form>{% else %}{{ item.reviewed_at or 'Reviewed' }}{% endif %}</td></tr>{% else %}<tr><td colspan="6">No clock-in requests.</td></tr>{% endfor %}</tbody></table></div></section>{% endblock %}'''
 
@@ -7372,7 +7427,10 @@ def application(environ, start_response):
             return redirect_with_feedback(start_response, '/dashboard', error='Only company admins can manage clients and sites.')
         template_name = 'clients.html' if path == '/clients' else 'sites.html'
         page_title = 'Clients' if path == '/clients' else 'Sites'
-        return app_page(environ, start_response, user, template_name, active_path=path, title=page_title)
+        management_context = client_site_management_context(user['company_id'])
+        management_context['selected_client_id'] = (query.get('client_id') or '').strip()
+        management_context['edit_site_id'] = (query.get('edit_site_id') or '').strip()
+        return app_page(environ, start_response, user, template_name, active_path=path, title=page_title, **management_context)
     if path == '/profile':
         user, response = require_login(environ, start_response)
         if response: return response
@@ -7807,10 +7865,14 @@ def application(environ, start_response):
     if path == '/admin/client/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
-        data, _ = parse_post(environ); conn = db(); conn.execute('INSERT INTO clients (company_id, name, contact_name, contact_email, contact_phone, notes, active, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)', (user['company_id'], data.get('name'), data.get('contact_name'), data.get('contact_email'), data.get('contact_phone'), data.get('notes'), utc_now_str())); conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='client', target_id=data.get('name'), message='client created', environ=environ); return redirect(start_response, '/clients')
+        if user['role'] not in {'company_admin', 'superadmin', 'admin'}: return forbidden(start_response, 'Only company admins can manage clients and sites.')
+        data, _ = parse_post(environ); client_name = (data.get('name') or '').strip()
+        if not client_name: return bad_request(start_response, 'Client name is required')
+        conn = db(); conn.execute('''INSERT INTO clients (company_id, name, contact_name, contact_email, contact_phone, address_line1, address_line2, city, state, zip_code, notes, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)''', (user['company_id'], client_name, data.get('contact_name'), data.get('contact_email'), data.get('contact_phone'), data.get('address_line1'), data.get('address_line2'), data.get('city'), data.get('state'), data.get('zip_code'), data.get('notes'), utc_now_str())); conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='client', target_id=client_name, message='client created', environ=environ); return redirect(start_response, '/clients')
     if path == '/admin/client/update' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
+        if user['role'] not in {'company_admin', 'superadmin', 'admin'}: return forbidden(start_response, 'Only company admins can manage clients and sites.')
         data, _ = parse_post(environ)
         client_name = (data.get('name') or '').strip()
         if not client_name:
@@ -7819,20 +7881,42 @@ def application(environ, start_response):
         client = conn.execute('SELECT id FROM clients WHERE id=? AND company_id=?', (data.get('client_id'), user['company_id'])).fetchone()
         if not client:
             conn.close(); return bad_request(start_response, 'Client not found')
-        conn.execute('''UPDATE clients SET name=?, contact_name=?, contact_email=?, contact_phone=?, notes=? WHERE id=?''', (client_name, data.get('contact_name'), data.get('contact_email'), data.get('contact_phone'), data.get('notes'), client['id']))
+        conn.execute('''UPDATE clients SET name=?, contact_name=?, contact_email=?, contact_phone=?, address_line1=?, address_line2=?, city=?, state=?, zip_code=?, notes=? WHERE id=?''', (client_name, data.get('contact_name'), data.get('contact_email'), data.get('contact_phone'), data.get('address_line1'), data.get('address_line2'), data.get('city'), data.get('state'), data.get('zip_code'), data.get('notes'), client['id']))
         conn.execute('UPDATE sites SET client_company_name=? WHERE client_id=? AND company_id=?', (client_name, client['id'], user['company_id']))
         conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='client', target_id=client['id'], message='client updated', environ=environ); return redirect(start_response, '/clients')
     if path == '/admin/site/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
-        data, _ = parse_post(environ); conn = db(); client_id = data.get('client_id') or None; client_name = data.get('client_company_name') or '';
-        if client_id:
-            client_row = conn.execute('SELECT id, name FROM clients WHERE id=? AND company_id=?', (client_id, user['company_id'])).fetchone();
-            if client_row:
-                client_id = client_row['id']; client_name = client_row['name']
-            else:
-                client_id = None
-        conn.execute('INSERT INTO sites (company_id, client_id, name, client_company_name, address, notes, active) VALUES (?, ?, ?, ?, ?, ?, 1)', (user['company_id'], client_id, data.get('name'), client_name, data.get('address'), data.get('notes'))); conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='site', target_id=data.get('name'), message='site created', environ=environ); return redirect(start_response, '/sites')
+        if user['role'] not in {'company_admin', 'superadmin', 'admin'}: return forbidden(start_response, 'Only company admins can manage clients and sites.')
+        data, _ = parse_post(environ); site_name = (data.get('name') or '').strip(); client_id = data.get('client_id')
+        if not site_name or not client_id: return bad_request(start_response, 'Site name and client are required')
+        conn = db(); client_row = conn.execute('SELECT id, name FROM clients WHERE id=? AND company_id=?', (client_id, user['company_id'])).fetchone()
+        if not client_row:
+            conn.close(); return bad_request(start_response, 'Client not found')
+        address_parts = [data.get('address_line1'), data.get('address_line2')]
+        locality = ', '.join(value for value in (data.get('city'), data.get('state')) if value)
+        if data.get('zip_code'): locality = f"{locality} {data.get('zip_code')}".strip()
+        if locality: address_parts.append(locality)
+        address = ', '.join(value for value in address_parts if value)
+        conn.execute('''INSERT INTO sites (company_id, client_id, name, client_company_name, address, address_line1, address_line2, city, state, zip_code, notes, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)''', (user['company_id'], client_row['id'], site_name, client_row['name'], address, data.get('address_line1'), data.get('address_line2'), data.get('city'), data.get('state'), data.get('zip_code'), data.get('notes'))); conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='site', target_id=site_name, message='site created', environ=environ); return redirect(start_response, '/sites')
+    if path == '/admin/site/update' and method == 'POST':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        if user['role'] not in {'company_admin', 'superadmin', 'admin'}: return forbidden(start_response, 'Only company admins can manage clients and sites.')
+        data, _ = parse_post(environ); site_name = (data.get('name') or '').strip(); client_id = data.get('client_id')
+        if not site_name or not client_id: return bad_request(start_response, 'Site name and client are required')
+        conn = db()
+        site = conn.execute('SELECT id FROM sites WHERE id=? AND company_id=?', (data.get('site_id'), user['company_id'])).fetchone()
+        client = conn.execute('SELECT id, name FROM clients WHERE id=? AND company_id=?', (client_id, user['company_id'])).fetchone()
+        if not site or not client:
+            conn.close(); return bad_request(start_response, 'Site or client not found')
+        address_parts = [data.get('address_line1'), data.get('address_line2')]
+        locality = ', '.join(value for value in (data.get('city'), data.get('state')) if value)
+        if data.get('zip_code'): locality = f"{locality} {data.get('zip_code')}".strip()
+        if locality: address_parts.append(locality)
+        address = ', '.join(value for value in address_parts if value)
+        conn.execute('''UPDATE sites SET client_id=?, client_company_name=?, name=?, address=?, address_line1=?, address_line2=?, city=?, state=?, zip_code=?, notes=?, active=? WHERE id=? AND company_id=?''', (client['id'], client['name'], site_name, address, data.get('address_line1'), data.get('address_line2'), data.get('city'), data.get('state'), data.get('zip_code'), data.get('notes'), 1 if data.get('active') == '1' else 0, site['id'], user['company_id']))
+        conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='site', target_id=site['id'], message='site updated', environ=environ); return redirect(start_response, f'/sites?edit_site_id={site["id"]}#site-{site["id"]}')
     if path == '/patrol/checkpoint/qr' and method == 'GET':
         user, response = require_login(environ, start_response)
         if response: return response
