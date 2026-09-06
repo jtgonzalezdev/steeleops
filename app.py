@@ -3842,17 +3842,6 @@ def application(environ, start_response):
             conn.close()
         return redirect(start_response, '/dashboard')
 
-    if path == '/admin/site/new' and method == 'POST':
-        user, response = require_admin(environ, start_response)
-        if response:
-            return response
-        data, _ = parse_post(environ)
-        conn = db()
-        conn.execute('''INSERT INTO sites (company_id, name, client_company_name, address, notes, active) VALUES (?, ?, ?, ?, ?, 1)''',
-                     (user['company_id'], data.get('name'), data.get('client_company_name'), data.get('address'), data.get('notes')))
-        conn.commit(); conn.close()
-        return redirect(start_response, '/dashboard')
-
     if path == '/admin/shift/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response:
@@ -4588,6 +4577,20 @@ DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
           <label>Notes<textarea name="notes" rows="2"></textarea></label>
           <button class="btn" type="submit">Add Client</button>
         </form>
+        {% if clients %}
+        <hr>
+        <h4>Edit Clients</h4>
+        {% for client in clients %}
+        <form method="post" action="/admin/client/update" class="stack compact">
+          <input type="hidden" name="client_id" value="{{ client.id }}">
+          <div class="row-2"><label>Client Name<input type="text" name="name" value="{{ client.name }}" required></label><label>Contact Name<input type="text" name="contact_name" value="{{ client.contact_name or '' }}"></label></div>
+          <div class="row-2"><label>Contact Email<input type="email" name="contact_email" value="{{ client.contact_email or '' }}"></label><label>Contact Phone<input type="text" name="contact_phone" value="{{ client.contact_phone or '' }}"></label></div>
+          <label>Notes<textarea name="notes" rows="2">{{ client.notes or '' }}</textarea></label>
+          <button class="btn ghost" type="submit">Save {{ client.name }}</button>
+        </form>
+        {% if not loop.last %}<hr>{% endif %}
+        {% endfor %}
+        {% endif %}
         <hr>
         <form method="post" action="/admin/site/new" class="stack compact">
           <h4>Create Site</h4>
@@ -6318,6 +6321,46 @@ def render_page(environ, template_name, **context):
 
 _old_init_db = init_db
 
+
+def backfill_site_clients(conn):
+    """Link legacy site client names to company-scoped client records.
+
+    Existing links are never replaced. Blank names and sites without a company
+    are deliberately skipped so the migration is safe to run at every startup.
+    """
+    if not table_exists(conn, 'clients') or not table_exists(conn, 'sites'):
+        return
+    legacy_sites = conn.execute('''
+        SELECT id, company_id, TRIM(client_company_name) AS client_name
+        FROM sites
+        WHERE client_id IS NULL
+          AND company_id IS NOT NULL
+          AND TRIM(COALESCE(client_company_name, '')) <> ''
+        ORDER BY id
+    ''').fetchall()
+    for site in legacy_sites:
+        client = conn.execute('''
+            SELECT id, name FROM clients
+            WHERE company_id=? AND LOWER(TRIM(name))=LOWER(?)
+            ORDER BY id LIMIT 1
+        ''', (site['company_id'], site['client_name'])).fetchone()
+        if not client:
+            conn.execute('''
+                INSERT INTO clients
+                    (company_id, name, contact_name, contact_email, contact_phone, notes, active, created_at)
+                VALUES (?, ?, '', '', '', '', 1, ?)
+            ''', (site['company_id'], site['client_name'], utc_now_str()))
+            client = conn.execute('''
+                SELECT id, name FROM clients
+                WHERE company_id=? AND LOWER(TRIM(name))=LOWER(?)
+                ORDER BY id LIMIT 1
+            ''', (site['company_id'], site['client_name'])).fetchone()
+        conn.execute(
+            'UPDATE sites SET client_id=?, client_company_name=? WHERE id=? AND client_id IS NULL',
+            (client['id'], client['name'], site['id']),
+        )
+
+
 def init_db():
     if APP_ENV == 'production' and not USE_POSTGRES:
         raise RuntimeError('Production requires PostgreSQL via DATABASE_URL.')
@@ -6672,6 +6715,7 @@ def init_db():
     conn.execute(f'''CREATE TABLE IF NOT EXISTS patrol_tour_run_events (id {patrol_event_pk}, company_id INTEGER NOT NULL, tour_run_id INTEGER NOT NULL, event_type TEXT NOT NULL, event_label TEXT NOT NULL, event_note TEXT, reason TEXT, actor_user_id INTEGER, created_at TEXT NOT NULL)''')
     if table_exists(conn, 'sites'):
         ensure_column(conn, 'sites', 'client_id INTEGER')
+        backfill_site_clients(conn)
     if table_exists(conn, 'payroll_guard_records'):
         ensure_column(conn, 'payroll_guard_records', 'manual_override_used INTEGER DEFAULT 0')
         ensure_column(conn, 'payroll_guard_records', 'manual_override_reason TEXT')
@@ -8219,6 +8263,20 @@ def application(environ, start_response):
         user, response = require_admin(environ, start_response)
         if response: return response
         data, _ = parse_post(environ); conn = db(); conn.execute('INSERT INTO clients (company_id, name, contact_name, contact_email, contact_phone, notes, active, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)', (user['company_id'], data.get('name'), data.get('contact_name'), data.get('contact_email'), data.get('contact_phone'), data.get('notes'), utc_now_str())); conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='client', target_id=data.get('name'), message='client created', environ=environ); return redirect(start_response, '/dashboard')
+    if path == '/admin/client/update' and method == 'POST':
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        data, _ = parse_post(environ)
+        client_name = (data.get('name') or '').strip()
+        if not client_name:
+            return bad_request(start_response, 'Client name is required')
+        conn = db()
+        client = conn.execute('SELECT id FROM clients WHERE id=? AND company_id=?', (data.get('client_id'), user['company_id'])).fetchone()
+        if not client:
+            conn.close(); return bad_request(start_response, 'Client not found')
+        conn.execute('''UPDATE clients SET name=?, contact_name=?, contact_email=?, contact_phone=?, notes=? WHERE id=?''', (client_name, data.get('contact_name'), data.get('contact_email'), data.get('contact_phone'), data.get('notes'), client['id']))
+        conn.execute('UPDATE sites SET client_company_name=? WHERE client_id=? AND company_id=?', (client_name, client['id'], user['company_id']))
+        conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='client', target_id=client['id'], message='client updated', environ=environ); return redirect(start_response, '/dashboard')
     if path == '/admin/site/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
