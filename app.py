@@ -2062,12 +2062,17 @@ def sidebar_nav_items(user, active_path):
             {'label': 'Monthly Schedule', 'href': '/monthly-schedule', 'active': active_path == '/monthly-schedule'},
             {'label': 'My Profile', 'href': '/profile', 'active': active_path == '/profile'},
         ])
-    if user['role'] in {'company_admin', 'superadmin', 'supervisor'}:
+    if user['role'] in {'company_admin', 'superadmin', 'admin', 'supervisor'}:
         items.extend([
             {'label': 'Guards', 'href': '/guards', 'active': active_path == '/guards'},
             {'label': 'Reports', 'href': '/reports', 'active': active_path == '/reports'},
             {'label': 'Clock-In Requests', 'href': '/clock-in-requests', 'active': active_path == '/clock-in-requests'},
         ])
+        if user['role'] in {'company_admin', 'superadmin', 'admin'}:
+            items.extend([
+                {'label': 'Clients', 'href': '/clients', 'active': active_path == '/clients'},
+                {'label': 'Sites', 'href': '/sites', 'active': active_path == '/sites'},
+            ])
         if user['role'] in {'company_admin', 'superadmin'}:
             items.extend([
                 {'label': 'Payroll', 'href': '/payroll', 'active': active_path == '/payroll'},
@@ -3208,6 +3213,7 @@ def get_dashboard_context(user, view='week', shift_form_values=None):
     conn.close()
     return {
         'stats': stats,
+        'today_iso': today.isoformat(),
         **patrol_data,
         'shifts': shifts,
         'my_shifts': my_shifts if user['role'] == 'guard' else [],
@@ -4161,513 +4167,36 @@ ADMIN_COMPANY_LOGO_HTML = r'''{% extends "app_shell.html" %}
 
 DASHBOARD_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
-    {% if patrol_issue_alert %}
-    <section class="patrol-alert patrol-alert-{{ patrol_issue_alert.severity }}" role="alert" aria-live="polite">
-      <div>
-        <div class="eyebrow">SteeleOps Patrol Monitoring</div>
-        <strong>{{ patrol_issue_alert.message }}</strong>
-        <div class="small-muted">{{ patrol_issue_alert.incomplete_count }} incomplete · {{ patrol_issue_alert.missed_count }} missed · {{ '%.1f'|format(patrol_issue_alert.completion_percentage|float) }}% completion</div>
-      </div>
-      <a class="btn primary" href="{{ patrol_issue_alert.href }}">View Patrol Issues</a>
-    </section>
-    {% endif %}
-
-    {% if user.role == 'guard' %}
-    <section class="card guard-action-dashboard">
-      <div class="section-head">
-        <div>
-          <div class="eyebrow">Guard Dashboard</div>
-          <h2>{{ guard_dashboard_summary.assigned_site }}</h2>
-          <span>Fast actions for your assigned post.</span>
-        </div>
-      </div>
-      <div class="guard-action-grid">
-        {% set current_shift = guard_dashboard_summary.current_shift %}
-        {% if current_shift and current_shift.user_id and not current_shift.clock_in_time %}
-        <form method="post" action="/clock-in" class="guard-action-form"><input type="hidden" name="shift_id" value="{{ current_shift.id }}"><button class="guard-action-btn primary" type="submit"><span>Clock In</span><small>{{ current_shift.start_time }} - {{ current_shift.end_time }}</small></button></form>
-        {% elif current_shift and current_shift.user_id and current_shift.clock_in_time and not current_shift.clock_out_time %}
-        <form method="post" action="/clock-out" class="guard-action-form"><input type="hidden" name="shift_id" value="{{ current_shift.id }}"><button class="guard-action-btn primary" type="submit"><span>Clock Out</span><small>Clocked in {{ current_shift.clock_in_time }}</small></button></form>
-        {% else %}
-        <button class="guard-action-btn primary" type="button" onclick="document.getElementById('manual-clock-in-request-form').hidden=false; this.hidden=true;"><span>No Shift Scheduled</span><strong>Request Clock-In Approval</strong><small>You are assigned to this site but no active shift is scheduled.</small></button>
-        <form id="manual-clock-in-request-form" method="post" action="/manual-clock-in/request" class="guard-action-form stack compact" hidden>
-          <h4>Request Clock-In Approval</h4>
-          <label>Reason<select name="reason" id="manual-clock-in-reason" required onchange="document.getElementById('manual-clock-in-comments').required=this.value==='Other';"><option value="">Select reason</option><option>Covering another officer</option><option>Supervisor instructed me to report</option><option>Emergency replacement</option><option>Schedule missing</option><option>Forgot to schedule shift</option><option>Other</option></select></label>
-          <label>Comments<textarea id="manual-clock-in-comments" name="comments" rows="3" placeholder="Required when Other is selected"></textarea></label>
-          <div class="actions"><button class="btn primary" type="submit">Submit Approval Request</button><button class="btn ghost" type="button" onclick="document.getElementById('manual-clock-in-request-form').hidden=true; document.querySelector('.guard-action-btn.primary[hidden]').hidden=false;">Cancel</button></div>
-        </form>
-        {% endif %}
-        <a class="guard-action-btn" href="/patrols{% if guard_dashboard_summary.assigned_site_id %}?site_id={{ guard_dashboard_summary.assigned_site_id }}{% endif %}"><span>Start Patrol</span><small>Open assigned patrol tools</small></a>
-        <a class="guard-action-btn" href="/guard/daily-activity-reports{% if guard_dashboard_summary.assigned_site_id %}?site_id={{ guard_dashboard_summary.assigned_site_id }}{% endif %}"><span>Submit DAR</span><small>Daily activity report</small></a>
-        <a class="guard-action-btn" href="/guard/incident-reports{% if guard_dashboard_summary.assigned_site_id %}?site_id={{ guard_dashboard_summary.assigned_site_id }}{% endif %}"><span>Incident Report</span><small>Report an incident</small></a>
-      </div>
-    </section>
-    {% endif %}
-
-    {% if user.role != 'client' %}
-    <section class="grid stats-grid">
-      {% if user.role == 'guard' %}
-      <div class="stat card guard-stat-highlight">
-        <div class="stat-label">My Current Shift</div>
-        <div class="stat-text">{% if guard_dashboard_summary.current_shift %}{{ guard_dashboard_summary.current_shift.shift_date }} · {{ guard_dashboard_summary.current_shift.start_time }} - {{ guard_dashboard_summary.current_shift.end_time }}{% else %}No shift today{% endif %}</div>
-      </div>
-      <div class="stat card">
-        <div class="stat-label">My Assigned Site</div>
-        <div class="stat-text">{{ guard_dashboard_summary.assigned_site }}</div>
-      </div>
-      <div class="stat card">
-        <div class="stat-label">Hours Worked This Week</div>
-        <div class="stat-number">{{ '%.2f'|format(guard_dashboard_summary.hours_worked_week|float) }}</div>
-      </div>
-      <div class="stat card">
-        <div class="stat-label">My Open Reports</div>
-        <div class="stat-number">{{ guard_dashboard_summary.open_reports }}</div>
-      </div>
-      <div class="stat card"><div class="stat-label">Active Patrols{% if patrol_issue_alert and patrol_issue_alert.active_count %}<span class="issue-badge warning">{{ patrol_issue_alert.active_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.active_patrols }}</div></div>
-      <div class="stat card"><div class="stat-label">Completed Tours</div><div class="stat-number">{{ stats.completed_tours }}</div></div>
-      <div class="stat card"><div class="stat-label">Excused Patrols</div><div class="stat-number">{{ stats.excused_patrols or 0 }}</div></div>
-      <div class="stat card"><div class="stat-label">Missed Patrols{% if patrol_issue_alert and patrol_issue_alert.missed_count %}<span class="issue-badge danger">{{ patrol_issue_alert.missed_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.missed_checkpoints }}</div></div>
-      {% else %}
-      <div class="stat card"><div class="stat-label">Guards On Duty</div><div class="stat-number">{{ stats.guards_on_duty }}</div></div>
-      <div class="stat card"><div class="stat-label">Company-wide Open Incidents</div><div class="stat-number">{{ stats.open_incidents }}</div></div>
-      <div class="stat card"><div class="stat-label">Sites Active Today</div><div class="stat-number">{{ stats.sites_active_today }}</div></div>
-      <a class="stat card stat-link" href="#manual-clock-in-requests"><div class="stat-label">Pending Clock-In Requests</div><div class="stat-number">{{ pending_manual_clock_in_count }}</div></a>
-      <div class="stat card"><div class="stat-label">Active Patrols{% if patrol_issue_alert and patrol_issue_alert.active_count %}<span class="issue-badge warning">{{ patrol_issue_alert.active_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.active_patrols }}</div></div>
-      <div class="stat card"><div class="stat-label">Completed Tours</div><div class="stat-number">{{ stats.completed_tours }}</div></div>
-      <div class="stat card"><div class="stat-label">Excused Patrols</div><div class="stat-number">{{ stats.excused_patrols or 0 }}</div></div>
-      <div class="stat card"><div class="stat-label">Missed Patrols{% if patrol_issue_alert and patrol_issue_alert.missed_count %}<span class="issue-badge danger">{{ patrol_issue_alert.missed_count }}</span>{% endif %}</div><div class="stat-number">{{ stats.missed_checkpoints }}</div></div>
-      {% endif %}
-    </section>
-
-    {% if user.role in ['company_admin', 'superadmin', 'supervisor', 'admin'] %}
-    <section class="card">
-      <div class="section-head">
-        <div><h3>Patrol Analytics Dashboard</h3><span>Completion rates, excused patrols, missed patrols, guard and site performance</span></div>
-        <div class="actions">
-          <a class="btn ghost" href="/admin/patrol/export/history.csv">Export Patrol History CSV</a>
-          <a class="btn ghost" href="/admin/patrol/export/missed-checkpoints.csv">Export Missed Checkpoints CSV</a>
-        </div>
-      </div>
-      <div class="grid stats-grid">
-        <div class="stat card"><div class="stat-label">Total Tours Assigned</div><div class="stat-number">{{ patrol_completion_summary.total_assigned }}</div></div>
-        <div class="stat card"><div class="stat-label">Total Tours Completed</div><div class="stat-number">{{ patrol_completion_summary.total_completed }}</div></div>
-        <div class="stat card"><div class="stat-label">Excused Patrols</div><div class="stat-number">{{ patrol_completion_summary.total_excused }}</div></div>
-        <div class="stat card"><div class="stat-label">Missed Patrols</div><div class="stat-number">{{ patrol_completion_summary.total_missed }}</div></div>
-        <div class="stat card"><div class="stat-label">Patrol Completion Rate</div><div class="stat-number">{{ '%.1f'|format(patrol_completion_summary.completion_percentage|float) }}%</div></div>
-        <div class="stat card"><div class="stat-label">Patrols Today</div><div class="stat-number">{{ patrol_dashboard_widgets.patrols_today }}</div></div>
-        <div class="stat card"><div class="stat-label">Completed Tours Today</div><div class="stat-number">{{ patrol_dashboard_widgets.completed_today }}</div></div>
-        <div class="stat card"><div class="stat-label">Excused Patrols Today</div><div class="stat-number">{{ patrol_dashboard_widgets.excused_today }}</div></div>
-        <div class="stat card"><div class="stat-label">Missed Patrols Today{% if patrol_issue_alert and patrol_issue_alert.missed_count %}<span class="issue-badge danger">{{ patrol_issue_alert.missed_count }}</span>{% endif %}</div><div class="stat-number">{{ patrol_dashboard_widgets.missed_today }}</div></div>
-      </div>
-      <div class="grid two-col">
-        <div class="card compact-card">
-          <div class="section-head"><h4>Top Performing Guards</h4><span>Ranked by completion rate</span></div>
-          {% for guard in top_performing_guards %}
-          <div class="list-item"><strong>{{ guard.guard_name }}</strong><span>{{ '%.1f'|format(guard.completion_percentage|float) }}% · {{ guard.month_completed }} this month · {{ guard.missed_count }} missed</span></div>
-          {% else %}<div class="empty">No patrol performance yet.</div>{% endfor %}
-        </div>
-        <div class="card compact-card">
-          <div class="section-head"><h4>Missed Checkpoints by Guard</h4><span>Recent missed checkpoint totals</span></div>
-          {% for item in missed_checkpoints_by_guard %}
-          <div class="list-item"><strong>{{ item.name }}</strong><span>{{ item.missed_count }} missed</span></div>
-          {% else %}<div class="empty">No missed checkpoints recorded.</div>{% endfor %}
-        </div>
-      </div>
-      <div class="table-wrap">
-        <h4>Guard Performance</h4>
-        <table><thead><tr><th>Guard</th><th>This Week</th><th>This Month</th><th>Avg Completion</th><th>Missed</th></tr></thead><tbody>
-          {% for guard in guard_performance %}<tr><td>{{ guard.guard_name }}</td><td>{{ guard.week_completed }}</td><td>{{ guard.month_completed }}</td><td>{{ '%.1f'|format(guard.average_completion_minutes|float) }} min</td><td>{{ guard.missed_count }}</td></tr>
-          {% else %}<tr><td colspan="5">No guard patrol history.</td></tr>{% endfor %}
-        </tbody></table>
-      </div>
-      <div class="table-wrap">
-        <h4>Site Performance</h4>
-        <table><thead><tr><th>Site</th><th>Completion %</th><th>Last Completed Patrol</th><th>Active Routes</th><th>Assigned / Completed</th></tr></thead><tbody>
-          {% for site in site_performance %}<tr><td>{{ site.site_name }}</td><td>{{ '%.1f'|format(site.completion_percentage|float) }}%</td><td>{{ site.last_completed_patrol or '—' }}</td><td>{{ site.active_routes }}</td><td>{{ site.total_assigned }} / {{ site.total_completed }}</td></tr>
-          {% else %}<tr><td colspan="5">No site patrol history.</td></tr>{% endfor %}
-        </tbody></table>
-      </div>
-      <div class="grid two-col">
-        <div class="card compact-card">
-          <div class="section-head"><h4>Missed Checkpoints by Site</h4><span>Recent missed checkpoint totals</span></div>
-          {% for item in missed_checkpoints_by_site %}<div class="list-item"><strong>{{ item.name }}</strong><span>{{ item.missed_count }} missed</span></div>{% else %}<div class="empty">No missed checkpoints by site.</div>{% endfor %}
-        </div>
-        <div class="card compact-card">
-          <div class="section-head"><h4>Missed Checkpoint History</h4><span>Date/time audit trail</span></div>
-          {% for miss in missed_checkpoint_history %}
-          <div class="list-item detailed"><div><strong>{{ miss.checkpoint_name }}</strong><div class="small-muted">{{ miss.scanned_at }} · {{ miss.guard_name }} · {{ miss.site_name }} · {{ miss.tour_name }}</div></div></div>
-          {% else %}<div class="empty">No missed checkpoint history.</div>{% endfor %}
-        </div>
-      </div>
-    </section>
-
-    <section class="card admin-action-card">
-      <div class="section-head">
-        <div>
-          <h3>Admin · Alert Tools</h3>
-          <div class="small-muted">Trigger the missed clock check and review alert counts without leaving the dashboard.</div>
-        </div>
-      </div>
-      <form id="missed-clock-check-form" class="stack compact">{{ csrf_input|safe }}
-        <div class="actions">
-          <button class="btn primary" type="submit" id="run-missed-clock-check-btn">Run Missed Clock Check</button>
-          <span class="small-muted">Use this to verify alert generation and SMS send attempts.</span>
-        </div>
-      </form>
-      <div id="missed-clock-check-feedback" class="stack compact" hidden></div>
-    </section>
-    <script>
-    (function () {
-      var form = document.getElementById('missed-clock-check-form');
-      if (!form) return;
-      var button = document.getElementById('run-missed-clock-check-btn');
-      var feedback = document.getElementById('missed-clock-check-feedback');
-      function renderMessage(type, html) {
-        feedback.hidden = false;
-        feedback.innerHTML = '<div class="alert ' + type + '">' + html + '</div>';
-      }
-      form.addEventListener('submit', function (event) {
-        event.preventDefault();
-        var csrf = form.querySelector('input[name="csrf_token"]');
-        var originalLabel = button.textContent;
-        button.disabled = true;
-        button.textContent = 'Running...';
-        fetch('/admin/run-missed-clock-check', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-          body: new URLSearchParams({ csrf_token: csrf ? csrf.value : '' }).toString()
-        })
-          .then(function (response) {
-            return response.text().then(function (body) {
-              var data = {};
-              if (body) {
-                try { data = JSON.parse(body); } catch (error) {
-                  if (!response.ok) throw new Error('Request failed.');
-                  throw new Error('Unexpected response from server.');
-                }
-              }
-              if (!response.ok) {
-                throw new Error((data && (data.error || data.message)) || 'Request failed.');
-              }
-              return data;
-            });
-          })
-          .then(function (data) {
-            var alerts = Array.isArray(data.alerts) ? data.alerts : [];
-            var items = alerts.length
-              ? '<ul class="result-list">' + alerts.map(function (alert) { return '<li>' + alert + '</li>'; }).join('') + '</ul>'
-              : '<div class="small-muted">No new missed clock alerts were created.</div>';
-            renderMessage('success',
-              '<strong>Missed clock check completed.</strong>' +
-              '<div class="result-grid">' +
-                '<div><span class="small-muted">Alerts created</span><strong>' + (data.created_count || 0) + '</strong></div>' +
-                '<div><span class="small-muted">SMS sent</span><strong>' + (data.sent_count || 0) + '</strong></div>' +
-                '<div><span class="small-muted">Skipped</span><strong>' + (data.skipped_count || 0) + '</strong></div>' +
-              '</div>' + items
-            );
-          })
-          .catch(function (error) {
-            renderMessage('error', '<strong>Unable to run missed clock check.</strong><div>' + error.message + '</div>');
-          })
-          .finally(function () {
-            button.disabled = false;
-            button.textContent = originalLabel;
-          });
-      });
-    }());
-    </script>
-    {% endif %}
-
-    <section class="grid two-col">
-      <div class="card">
-        <div class="section-head"><h3>{{ schedule_view.title() }} Schedule View</h3><span>{{ range_start }} to {{ range_end }}</span></div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Date</th><th>Time</th><th>Guard</th><th>Site</th><th>Status</th><th>Hours</th></tr></thead>
-            <tbody>
-            {% for shift in schedule_rows %}
-              <tr>
-                <td>{{ shift.shift_date }}</td>
-                <td>{{ shift.start_time }} - {{ shift.end_time }}</td>
-                <td>
-                  {{ shift.full_name or 'Open Shift' }}
-                  {% if shift.has_approved_time_off %}<div class="small-muted">{{ shift.approved_time_off_detail }}</div>{% elif shift.has_overlap_conflict %}<div class="small-muted">{{ shift.overlap_conflict_detail }}</div>{% endif %}
-                </td>
-                <td>{{ shift.site_name }}</td>
-                <td>
-                  <span class="badge {{ shift.status }}">{{ shift.status }}</span>
-                  {% if shift.conflict_status == 'on_leave' %}
-                  <span class="badge conflict-leave" title="{{ shift.approved_time_off_detail }}">On Leave</span>
-                  {% elif shift.conflict_status == 'overlap_conflict' %}
-                  <span class="badge conflict-overlap" title="{{ shift.overlap_conflict_detail }}">Overlap Conflict</span>
-                  {% endif %}
-                </td>
-                <td>{{ shift.worked_hours or shift.scheduled_hours }}</td>
-              </tr>
-            {% else %}<tr><td colspan="6">No schedule rows in this view.</td></tr>{% endfor %}
-            </tbody>
-          </table>
-        </div>
-      </div>
-      <div class="card">
-        <div class="section-head"><h3>Open Shift Alerts</h3><span>Unassigned coverage needs</span></div>
-        {% for shift in open_shift_alerts %}
-          <div class="list-item"><strong>{{ shift.site_name }}</strong><span>{{ shift.shift_date }} · {{ shift.start_time }}-{{ shift.end_time }}</span></div>
-        {% else %}<div class="empty">No open shift alerts.</div>{% endfor %}
-        {% if user.role == 'guard' %}
-        <hr>
-        <form method="post" action="/shift/claim" class="stack compact">
-          <h4>Claim Open Shift</h4>
-          <label>Open Shift<select name="shift_id">{% for shift in my_open_shift_options %}<option value="{{ shift.id }}">{{ shift.shift_date }} · {{ shift.site_name }} · {{ shift.start_time }}-{{ shift.end_time }}</option>{% endfor %}</select></label>
-          <button class="btn" type="submit" {% if not my_open_shift_options %}disabled{% endif %}>Claim Shift</button>
-        </form>
-        {% endif %}
-        {% if user.role in ['company_admin', 'superadmin', 'supervisor'] %}
-        <hr>
-        <form method="post" action="/admin/shift/new" class="stack compact">
-          <h4>Create Shift</h4>
-          <label>Site<select name="site_id">{% for site in sites %}<option value="{{ site.id }}" {% if shift_form.site_id and shift_form.site_id|int == site.id %}selected{% endif %}>{{ site.name }}</option>{% endfor %}</select></label>
-          <label>Assign Guard<select name="user_id"><option value="">Open Shift</option>{% for guard_option in guard_option_rows %}<option value="{{ guard_option.id }}" {% if shift_form.user_id and shift_form.user_id|int == guard_option.id %}selected{% endif %} {% if not guard_option.available %}disabled{% endif %}>{{ guard_option.full_name }}{{ guard_option.label_suffix }}</option>{% endfor %}</select></label>
-          <div class="small-muted">Unavailable guards are disabled when they are on approved leave or already assigned to an overlapping shift.</div>
-          <div class="row-2"><label>Date<input type="date" name="shift_date" value="{{ shift_form.shift_date }}" required></label><label>Start<input type="time" name="start_time" value="{{ shift_form.start_time }}" required></label></div>
-          <div class="row-2"><label>End<input type="time" name="end_time" value="{{ shift_form.end_time }}" required></label><label>Notes<input type="text" name="notes" value="{{ shift_form.notes }}"></label></div>
-          <button class="btn primary" type="submit">Create Shift</button>
-        </form>
-        {% endif %}
-      </div>
-    </section>
-
-    <section class="grid two-col">
-      {% if user.role == 'guard' %}
-      <div class="card compact-card">
-        <div class="section-head"><h3>My Shift Today</h3><span>Assigned shifts for your account</span></div>
-        {% for shift in my_shifts %}
-          <div class="list-item detailed">
-            <div>
-              <strong>{{ shift.site_name }}</strong>
-              <div class="small-muted">Date: {{ shift.shift_date }}</div>
-              <div class="small-muted">Time: {{ shift.start_time }} - {{ shift.end_time }}</div>
-              <div class="small-muted">Status: <span class="badge {{ shift.status }}">{{ shift.status }}</span></div>
-              <div class="small-muted">Clock In: {{ shift.clock_in_time or '—' }} | Clock Out: {{ shift.clock_out_time or '—' }}</div>
-            </div>
-            <div class="actions">
-              {% if not shift.clock_in_time and shift.user_id %}
-              <form method="post" action="/clock-in"><input type="hidden" name="shift_id" value="{{ shift.id }}"><button class="btn">Clock In</button></form>
-              {% elif shift.clock_in_time and not shift.clock_out_time and shift.user_id %}
-              <form method="post" action="/clock-out"><input type="hidden" name="shift_id" value="{{ shift.id }}"><button class="btn primary">Clock Out</button></form>
-              {% endif %}
-            </div>
-          </div>
-        {% else %}<div class="empty">No assigned shifts.</div>{% endfor %}
-      </div>
-      <div class="card">
-        <div class="section-head"><h3>Available Shifts</h3><span>Open same-company shifts you can claim</span></div>
-        {% for shift in available_shifts %}
-          <div class="list-item detailed">
-            <div>
-              <strong>{{ shift.site_name }}</strong>
-              <div class="small-muted">Date: {{ shift.shift_date }}</div>
-              <div class="small-muted">Time: {{ shift.start_time }} - {{ shift.end_time }}</div>
-              <div class="small-muted">Status: <span class="badge {{ shift.status }}">{{ shift.status }}</span></div>
-            </div>
-            <div class="actions">
-              <form method="post" action="/shift/claim"><input type="hidden" name="shift_id" value="{{ shift.id }}"><button class="btn primary" type="submit">Claim Shift</button></form>
-            </div>
-          </div>
-        {% else %}<div class="empty">No available shifts to claim.</div>{% endfor %}
-        <hr>
-        <form method="post" action="/time-correction/request" class="stack compact">
-          <h4>Time Correction Request</h4>
-          <label>Shift<select name="shift_id">{% for shift in my_shifts[:12] if shift.user_id %}<option value="{{ shift.id }}">{{ shift.shift_date }} · {{ shift.site_name }} · {{ shift.start_time }}</option>{% endfor %}</select></label>
-          <div class="row-2"><label>Requested Clock In<input type="datetime-local" name="requested_clock_in" required></label><label>Requested Clock Out<input type="datetime-local" name="requested_clock_out" required></label></div>
-          <label>Reason<textarea name="reason" rows="3"></textarea></label>
-          <button class="btn" type="submit" {% if not my_shifts %}disabled{% endif %}>Submit Request</button>
-        </form>
-        <hr>
-        <form method="post" action="/time-off/request" class="stack compact" onsubmit="this.querySelector('button[type=submit]').disabled=true; this.querySelector('button[type=submit]').textContent='Submitting...';">
-          <h4>Time Off Request</h4>
-          <div class="row-2"><label>Start Date<input type="date" name="start_date" required></label><label>End Date<input type="date" name="end_date" required></label></div>
-          <label>Type<select name="type"><option value="paid">Paid</option><option value="unpaid">Unpaid</option></select></label>
-          <label>Reason<textarea name="reason" rows="2"></textarea></label>
-          <button class="btn primary" type="submit">Submit Time Off Request</button>
-        </form>
-        <hr>
-        <h4>Time Off Request History</h4>
-        {% for item in my_time_off_requests %}
-          <div class="list-item detailed">
-            <div>
-              <strong>{{ item.start_date }} → {{ item.end_date }}</strong>
-              <div class="small-muted">Type: {{ item.type }}</div>
-              {% if item.reason %}<div class="small-muted">Reason: {{ item.reason }}</div>{% endif %}
-              {% if item.reviewed_at %}<div class="small-muted">Reviewed: {{ item.reviewed_at }}{% if item.reviewed_by_name %} by {{ item.reviewed_by_name }}{% if item.reviewed_by_role %} ({{ item.reviewed_by_role }}){% endif %}{% endif %}</div>{% endif %}
-            </div>
-            <div class="actions"><span class="badge {{ item.status }}">{{ item.status }}</span></div>
-          </div>
-        {% else %}<div class="empty">No time off requests yet.</div>{% endfor %}
-      </div>
-      {% else %}
-      <div class="card">
-        <div class="section-head"><h3>Shift Actions & Time Tracking</h3><span>Clock events are tied to shifts</span></div>
-        {% for shift in shifts[:8] %}
-          <div class="list-item detailed">
-            <div>
-              <strong>{{ shift.site_name }}</strong>
-              <div class="small-muted">{{ shift.shift_date }} · {{ shift.start_time }}-{{ shift.end_time }}</div>
-              <div class="small-muted">Clock In: {{ shift.clock_in_time or '—' }} | Clock Out: {{ shift.clock_out_time or '—' }}</div>
-            </div>
-            <div class="actions">
-              <span class="small-muted">Assigned guard self-service only</span>
-            </div>
-          </div>
-        {% else %}<div class="empty">No shifts available.</div>{% endfor %}
-      </div>
-      <div class="card">
-        <div class="section-head"><h3>Overtime Alerts</h3><span>Current weekly watchlist</span></div>
-        {% for row in overtime_alerts %}
-          <div class="list-item"><strong>{{ row.full_name }}</strong><span>{{ row.total_hours }} hrs</span></div>
-        {% else %}<div class="empty">No overtime alerts this week.</div>{% endfor %}
-        <hr>
-        <form method="post" action="/time-correction/request" class="stack compact">
-          <h4>Time Correction Request</h4>
-          <label>Shift<select name="shift_id">{% for shift in shifts[:12] if shift.user_id %}<option value="{{ shift.id }}">{{ shift.shift_date }} · {{ shift.site_name }} · {{ shift.start_time }}</option>{% endfor %}</select></label>
-          <div class="row-2"><label>Requested Clock In<input type="datetime-local" name="requested_clock_in" required></label><label>Requested Clock Out<input type="datetime-local" name="requested_clock_out" required></label></div>
-          <label>Reason<textarea name="reason" rows="3"></textarea></label>
-          <button class="btn" type="submit">Submit Request</button>
-        </form>
-      </div>
-      {% endif %}
-    </section>
-
-
-    {% endif %}
-    {% if user.role in ['company_admin', 'superadmin', 'supervisor', 'admin'] %}
-    <section class="grid two-col">
-      <div class="card">
-        <div class="section-head"><h3>Admin · Guards & Sites</h3><span>Create accounts and posts</span></div>
-        <form method="post" action="/admin/guard/new" class="stack compact">
-          <h4>Create Staff Account</h4>
-          <div class="row-2"><label>Full Name<input type="text" name="full_name" required></label><label>Username<input type="text" name="username" required></label></div>
-          <div class="row-3"><label>Password<input type="text" name="password" value="password123"></label><label>Role<select name="role"><option value="guard">guard</option><option value="supervisor">supervisor</option><option value="admin">admin</option></select></label><label>Hourly Rate<input type="number" step="0.01" name="hourly_rate" value="18.00"></label></div>
-          <div class="row-3"><label>Email<input type="email" name="email"></label><label>Phone<input type="text" name="phone"></label><label>License #<input type="text" name="license_number"></label></div>
-          <button class="btn primary" type="submit">Create User</button>
-        </form>
-        <hr>
-        <h4>Staff / Users</h4>
-        {% for staff_user in staff_users %}
-        <form method="post" action="/admin/user/update" class="list-item detailed">
-          <input type="hidden" name="user_id" value="{{ staff_user.id }}">
-          <div>
-            <strong>{{ staff_user.full_name }}</strong>
-            <div class="small-muted">{{ staff_user.username }}{% if staff_user.email %} · {{ staff_user.email }}{% endif %}</div>
-          </div>
-          <div class="actions">
-            <select name="role">
-              <option value="guard" {% if staff_user.role == 'guard' %}selected{% endif %}>guard</option>
-              <option value="supervisor" {% if staff_user.role == 'supervisor' %}selected{% endif %}>supervisor</option>
-              <option value="admin" {% if staff_user.role in ['admin', 'company_admin', 'superadmin'] %}selected{% endif %}>admin</option>
-            </select>
-            <button class="btn ghost" type="submit">Save</button>
-          </div>
-        </form>
-        {% else %}<div class="empty">No users found.</div>{% endfor %}
-        <hr>
-        <form method="post" action="/admin/client/new" class="stack compact">
-          <h4>Create Client</h4>
-          <div class="row-2"><label>Client Name<input type="text" name="name" required></label><label>Contact Name<input type="text" name="contact_name"></label></div>
-          <div class="row-2"><label>Contact Email<input type="email" name="contact_email"></label><label>Contact Phone<input type="text" name="contact_phone"></label></div>
-          <label>Notes<textarea name="notes" rows="2"></textarea></label>
-          <button class="btn" type="submit">Add Client</button>
-        </form>
-        {% if clients %}
-        <hr>
-        <h4>Edit Clients</h4>
-        {% for client in clients %}
-        <form method="post" action="/admin/client/update" class="stack compact">
-          <input type="hidden" name="client_id" value="{{ client.id }}">
-          <div class="row-2"><label>Client Name<input type="text" name="name" value="{{ client.name }}" required></label><label>Contact Name<input type="text" name="contact_name" value="{{ client.contact_name or '' }}"></label></div>
-          <div class="row-2"><label>Contact Email<input type="email" name="contact_email" value="{{ client.contact_email or '' }}"></label><label>Contact Phone<input type="text" name="contact_phone" value="{{ client.contact_phone or '' }}"></label></div>
-          <label>Notes<textarea name="notes" rows="2">{{ client.notes or '' }}</textarea></label>
-          <button class="btn ghost" type="submit">Save {{ client.name }}</button>
-        </form>
-        {% if not loop.last %}<hr>{% endif %}
-        {% endfor %}
-        {% endif %}
-        <hr>
-        <form method="post" action="/admin/site/new" class="stack compact">
-          <h4>Create Site</h4>
-          <div class="row-2"><label>Site Name<input type="text" name="name" required></label><label>Client<select name="client_id"><option value="">None</option>{% for client in clients %}<option value="{{ client.id }}">{{ client.name }}</option>{% endfor %}</select></label></div>
-          <label>Client Company Name<input type="text" name="client_company_name"></label>
-          <label>Address<input type="text" name="address"></label>
-          <label>Notes<textarea name="notes" rows="2"></textarea></label>
-          <button class="btn" type="submit">Add Site</button>
-        </form>
-      </div>
-      <div class="card">
-        <div class="section-head"><h3>Admin · Branding</h3><span>Company controls</span></div>
-        <form method="post" action="/admin/company/logo" enctype="multipart/form-data" class="stack compact">
-          <label>Upload Company Logo<input type="file" name="logo" accept="image/*"></label>
-          <button class="btn" type="submit">Save Logo</button>
-        </form>
-      </div>
-    </section>
-    {% endif %}
-
-    {% if user.role in ['company_admin', 'superadmin', 'supervisor', 'admin'] %}
-    <section class="card">
-      <div class="section-head"><h3>Pending Time Corrections</h3><span>Approval queue</span></div>
-      {% for item in time_corrections %}
-      <div class="list-item detailed">
-        <div>
-          <strong>{{ item.requested_by_name }}</strong>
-          <div class="small-muted">Shift {{ item.shift_date }} {{ item.start_time }}-{{ item.end_time }}</div>
-          <div class="small-muted">Requested: {{ item.requested_clock_in }} → {{ item.requested_clock_out }}</div>
-        </div>
-        <div class="actions">
-          <span class="badge {{ item.status }}">{{ item.status }}</span>
-          {% if item.status == 'pending' %}
-          <form method="post" action="/time-correction/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="approved"><button class="btn">Approve</button></form>
-          <form method="post" action="/time-correction/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="declined"><button class="btn ghost">Decline</button></form>
-          {% endif %}
-        </div>
-      </div>
-      {% else %}<div class="empty">No pending time corrections.</div>{% endfor %}
-    </section>
-    <section class="card" id="manual-clock-in-requests">
-      <div class="section-head"><h3>Manual Clock-In Approval Requests</h3><span>{{ pending_manual_clock_in_count }} pending</span></div>
-      {% if manual_clock_in_requests %}
-      <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>Guard name</th><th>Site</th><th>Requested time</th><th>Reason</th><th>Comments</th><th>Status</th><th>Actions</th></tr></thead>
-        <tbody>{% for item in manual_clock_in_requests %}
-        <tr>
-          <td>{{ item.guard_name }}</td><td>{{ item.site_name }}</td><td>{{ item.requested_clock_in }}</td><td>{{ item.reason or '—' }}</td><td>{{ item.comments or '—' }}</td>
-          <td><span class="badge {{ item.status|lower }}">{{ item.status }}</span>{% if item.reviewed_at %}<div class="small-muted">{{ item.reviewed_at }}{% if item.reviewed_by_name %} by {{ item.reviewed_by_name }}{% endif %}</div>{% endif %}</td>
-          <td>{% if item.status|lower == 'pending' %}<div class="actions"><form method="post" action="/manual-clock-in/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="approved"><button class="btn">Approve</button></form><form method="post" action="/manual-clock-in/approve"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="denied"><button class="btn ghost">Deny</button></form></div>{% else %}<span class="small-muted">Reviewed</span>{% endif %}</td>
-        </tr>
-        {% endfor %}</tbody>
-      </table></div>
-      {% else %}<div class="empty">No manual clock-in requests.</div>{% endif %}
-    </section>
-    <section class="card">
-      <div class="section-head"><h3>Time Off Requests</h3><span>Guard leave review</span></div>
-      {% for item in admin_time_off_requests %}
-      <div class="list-item detailed">
-        <div>
-          <strong>{{ item.guard_name }}</strong>
-          <div class="small-muted">{{ item.start_date }} → {{ item.end_date }} · {{ item.type }}</div>
-          {% if item.reason %}<div class="small-muted">Reason: {{ item.reason }}</div>{% endif %}
-          {% if item.reviewed_at %}<div class="small-muted">Reviewed: {{ item.reviewed_at }}{% if item.reviewed_by_name %} by {{ item.reviewed_by_name }}{% if item.reviewed_by_role %} ({{ item.reviewed_by_role }}){% endif %}{% endif %}</div>{% endif %}
-        </div>
-        <div class="actions">
-          <span class="badge {{ item.status }}">{{ item.status }}</span>
-          {% if item.status == 'pending' %}
-          <form method="post" action="/time-off/approve" onsubmit="return confirm('Approve this time off request?');"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="approved"><input type="text" name="review_note" placeholder="Review note (optional)"><button class="btn">Approve</button></form>
-          <form method="post" action="/time-off/approve" onsubmit="return confirm('Deny this time off request?');"><input type="hidden" name="request_id" value="{{ item.id }}"><input type="hidden" name="decision" value="denied"><input type="text" name="review_note" placeholder="Review note (optional)"><button class="btn ghost">Deny</button></form>
-          {% endif %}
-        </div>
-      </div>
-      {% else %}<div class="empty">No time off requests.</div>{% endfor %}
-    </section>
-    {% endif %}
+  {% if patrol_issue_alert %}
+  <section class="patrol-alert patrol-alert-{{ patrol_issue_alert.severity }}" role="alert">
+    <div><div class="eyebrow">SteeleOps Patrol Monitoring</div><strong>{{ patrol_issue_alert.message }}</strong></div>
+    <a class="btn primary" href="/patrols#patrol-issues">View Patrol Issues</a>
+  </section>
+  {% endif %}
+  <section class="grid stats-grid" aria-label="Operations summary">
+    <div class="stat card"><div class="stat-label">Guards On Duty</div><div class="stat-number">{{ stats.guards_on_duty }}</div></div>
+    <div class="stat card"><div class="stat-label">Company-wide Open Incidents</div><div class="stat-number">{{ stats.open_incidents }}</div></div>
+    <div class="stat card"><div class="stat-label">Sites Active Today</div><div class="stat-number">{{ stats.sites_active_today }}</div></div>
+    {% if user.role in ['company_admin', 'superadmin', 'admin', 'supervisor'] %}<a class="stat card stat-link" href="/clock-in-requests"><div class="stat-label">Pending Clock-In Requests</div><div class="stat-number">{{ pending_manual_clock_in_count }}</div></a>{% endif %}
+    <a class="stat card stat-link" href="/patrols"><div class="stat-label">Active Patrols</div><div class="stat-number">{{ stats.active_patrols }}</div></a>
+    <div class="stat card"><div class="stat-label">Completed Tours</div><div class="stat-number">{{ stats.completed_tours }}</div></div>
+    <div class="stat card"><div class="stat-label">Excused Patrols</div><div class="stat-number">{{ stats.excused_patrols or 0 }}</div></div>
+    <div class="stat card"><div class="stat-label">Missed Patrols</div><div class="stat-number">{{ stats.missed_checkpoints }}</div></div>
+  </section>
+  <section class="card">
+    <div class="section-head"><div><h3>Today's Operations</h3><span>Current coverage and items needing attention</span></div></div>
+    <div class="grid two-col">
+      <div><h4>Today's Shifts</h4>{% for shift in shifts if shift.shift_date == today_iso %}{% if loop.index <= 5 %}<div class="list-item"><strong>{{ shift.site_name }}</strong><span>{{ shift.start_time }}–{{ shift.end_time }} · {{ shift.full_name or 'Open Shift' }}</span></div>{% endif %}{% else %}<div class="empty">No shifts scheduled today.</div>{% endfor %}</div>
+      <div><h4>Open Coverage</h4>{% for shift in open_shift_alerts[:5] %}<div class="list-item"><strong>{{ shift.site_name }}</strong><span>{{ shift.shift_date }} · {{ shift.start_time }}–{{ shift.end_time }}</span></div>{% else %}<div class="empty">No open shift alerts.</div>{% endfor %}</div>
+    </div>
+    <div class="actions top-gap"><a class="btn primary" href="/weekly-schedule">Open Weekly Schedule</a><a class="btn ghost" href="/patrols">Open Patrols</a>{% if user.role in ['company_admin', 'superadmin', 'admin', 'supervisor'] %}<a class="btn ghost" href="/reports">Open Reports</a>{% endif %}</div>
+  </section>
 {% endblock %}'''
+CLIENTS_HTML = r'''{% extends "app_shell.html" %}{% block page_content %}<section class="card"><div class="section-head"><h3>Clients</h3><span>Manage client records for your company</span></div><form method="post" action="/admin/client/new" class="stack compact"><h4>Create Client</h4><div class="row-2"><label>Client Name<input name="name" required></label><label>Contact Name<input name="contact_name"></label></div><div class="row-2"><label>Contact Email<input type="email" name="contact_email"></label><label>Contact Phone<input name="contact_phone"></label></div><label>Notes<textarea name="notes" rows="2"></textarea></label><button class="btn primary" type="submit">Add Client</button></form><hr>{% for client in clients %}<form method="post" action="/admin/client/update" class="stack compact"><input type="hidden" name="client_id" value="{{ client.id }}"><div class="row-2"><label>Client Name<input name="name" value="{{ client.name }}" required></label><label>Contact Name<input name="contact_name" value="{{ client.contact_name or '' }}"></label></div><div class="row-2"><label>Contact Email<input type="email" name="contact_email" value="{{ client.contact_email or '' }}"></label><label>Contact Phone<input name="contact_phone" value="{{ client.contact_phone or '' }}"></label></div><label>Notes<textarea name="notes" rows="2">{{ client.notes or '' }}</textarea></label><button class="btn ghost" type="submit">Save {{ client.name }}</button></form>{% if not loop.last %}<hr>{% endif %}{% else %}<div class="empty">No clients added yet.</div>{% endfor %}</section>{% endblock %}'''
+
+SITES_HTML = r'''{% extends "app_shell.html" %}{% block page_content %}<section class="card"><div class="section-head"><h3>Sites</h3><span>Manage company posts and client relationships</span></div><form method="post" action="/admin/site/new" class="stack compact"><h4>Create Site</h4><div class="row-2"><label>Site Name<input name="name" required></label><label>Client<select name="client_id"><option value="">None</option>{% for client in clients %}<option value="{{ client.id }}">{{ client.name }}</option>{% endfor %}</select></label></div><label>Client Company Name<input name="client_company_name"></label><label>Address<input name="address"></label><label>Notes<textarea name="notes" rows="2"></textarea></label><button class="btn primary" type="submit">Add Site</button></form><hr><div class="table-wrap"><table><thead><tr><th>Site</th><th>Client</th><th>Address</th><th>Status</th></tr></thead><tbody>{% for site in sites %}<tr><td>{{ site.name }}</td><td>{{ site.client_company_name or '—' }}</td><td>{{ site.address or '—' }}</td><td>{% if site.active %}Active{% else %}Inactive{% endif %}</td></tr>{% else %}<tr><td colspan="4">No sites added yet.</td></tr>{% endfor %}</tbody></table></div></section>{% endblock %}'''
+
+CLOCK_IN_REQUESTS_HTML = r'''{% extends "app_shell.html" %}{% block page_content %}<section class="card" id="manual-clock-in-requests"><div class="section-head"><h3>Manual Clock-In Approval Requests</h3><span>{{ pending_manual_clock_in_count }} pending</span></div><div class="table-wrap"><table><thead><tr><th>Guard</th><th>Site</th><th>Requested</th><th>Reason</th><th>Status</th><th>Actions</th></tr></thead><tbody>{% for item in manual_clock_in_requests %}<tr><td>{{ item.guard_name }}</td><td>{{ item.site_name }}</td><td>{{ item.requested_clock_in }}</td><td>{{ item.reason or '—' }}{% if item.comments %}<div class="small-muted">{{ item.comments }}</div>{% endif %}</td><td><span class="badge {{ item.status|lower }}">{{ item.status }}</span></td><td>{% if item.status|lower == 'pending' %}<form method="post" action="/manual-clock-in/approve" class="inline-form"><input type="hidden" name="request_id" value="{{ item.id }}"><button class="btn" name="decision" value="approved">Approve</button><button class="btn ghost" name="decision" value="denied">Decline</button></form>{% else %}{{ item.reviewed_at or 'Reviewed' }}{% endif %}</td></tr>{% else %}<tr><td colspan="6">No clock-in requests.</td></tr>{% endfor %}</tbody></table></div></section>{% endblock %}'''
 
 SCHEDULE_HTML = r'''{% extends "app_shell.html" %}
 {% block page_content %}
@@ -4801,6 +4330,11 @@ PATROLS_HTML = r'''{% extends "app_shell.html" %}
     </section>
 
     {% if user.role in ['company_admin', 'superadmin', 'admin', 'supervisor'] %}
+    <section class="card">
+      <div class="section-head"><div><h3>Patrol Analytics</h3><span>Completion, guard, and site performance</span></div><div class="actions"><a class="btn ghost" href="/admin/patrol/export/history.csv">Export History CSV</a><a class="btn ghost" href="/admin/patrol/export/missed-checkpoints.csv">Export Missed Checkpoints CSV</a></div></div>
+      <div class="grid stats-grid"><div class="stat card"><div class="stat-label">Tours Assigned</div><div class="stat-number">{{ patrol_completion_summary.total_assigned }}</div></div><div class="stat card"><div class="stat-label">Completion Rate</div><div class="stat-number">{{ '%.1f'|format(patrol_completion_summary.completion_percentage|float) }}%</div></div><div class="stat card"><div class="stat-label">Total Completed</div><div class="stat-number">{{ patrol_completion_summary.total_completed }}</div></div><div class="stat card"><div class="stat-label">Total Missed</div><div class="stat-number">{{ patrol_completion_summary.total_missed }}</div></div></div>
+      <div class="grid two-col"><div><h4>Guard Performance</h4>{% for guard in guard_performance %}<div class="list-item"><strong>{{ guard.guard_name }}</strong><span>{{ guard.week_completed }} this week · {{ guard.missed_count }} missed</span></div>{% else %}<div class="empty">No guard patrol history.</div>{% endfor %}</div><div><h4>Site Performance</h4>{% for site in site_performance %}<div class="list-item"><strong>{{ site.site_name }}</strong><span>{{ '%.1f'|format(site.completion_percentage|float) }}% · {{ site.total_completed }}/{{ site.total_assigned }}</span></div>{% else %}<div class="empty">No site patrol history.</div>{% endfor %}</div></div>
+    </section>
     <section class="grid two-col">
       <div class="card"><div class="section-head"><h3>Patrol Tours</h3><span>Create routes and manage QR/NFC checkpoints</span></div><form method="post" action="/admin/patrol/tour/new" class="stack compact"><h4>Create Patrol Route</h4><div class="row-2"><label>Site<select name="site_id" required>{% for site in sites %}<option value="{{ site.id }}">{{ site.name }}</option>{% endfor %}</select></label><label>Tour Name<input type="text" name="name" placeholder="Perimeter Tour" required></label></div><label>Description<input type="text" name="description"></label><label>Checkpoints<textarea name="checkpoints" rows="5" required>Front Gate
 Loading Dock
@@ -6783,6 +6317,9 @@ def export_reports_pdf(company_id):
 
 LOGIN_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>\n        {{ csrf_input|safe }}', LOGIN_HTML)
 DASHBOARD_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', DASHBOARD_HTML)
+CLIENTS_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', CLIENTS_HTML)
+SITES_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', SITES_HTML)
+CLOCK_IN_REQUESTS_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', CLOCK_IN_REQUESTS_HTML)
 PATROLS_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', PATROLS_HTML)
 SCHEDULE_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', SCHEDULE_HTML)
 GUARDS_HTML = _re.sub(r'<form([^>]*method="post"[^>]*)>', r'<form\1>{{ csrf_input|safe }}', GUARDS_HTML)
@@ -6992,7 +6529,7 @@ def reset_admin_password_once(conn):
 
 def ensure_assets():
     env.cache.clear()
-    templates = {'layout.html': LAYOUT_HTML, 'app_shell.html': APP_SHELL_HTML, 'login.html': LOGIN_HTML, 'dashboard.html': DASHBOARD_HTML, 'admin_company_logo.html': ADMIN_COMPANY_LOGO_HTML, 'patrols.html': PATROLS_HTML, 'schedule.html': SCHEDULE_HTML, 'guards.html': GUARDS_HTML, 'patrol_run.html': PATROL_RUN_HTML, 'patrol_tour.html': PATROL_TOUR_HTML, 'reports.html': REPORTS_HTML, 'payroll.html': PAYROLL_HTML, 'profile.html': PROFILE_HTML, 'admin_paystub_upload.html': ADMIN_PAYSTUB_UPLOAD_HTML, 'guard_paystubs.html': GUARD_PAYSTUBS_HTML,
+    templates = {'layout.html': LAYOUT_HTML, 'app_shell.html': APP_SHELL_HTML, 'login.html': LOGIN_HTML, 'dashboard.html': DASHBOARD_HTML, 'clients.html': CLIENTS_HTML, 'sites.html': SITES_HTML, 'clock_in_requests.html': CLOCK_IN_REQUESTS_HTML, 'admin_company_logo.html': ADMIN_COMPANY_LOGO_HTML, 'patrols.html': PATROLS_HTML, 'schedule.html': SCHEDULE_HTML, 'guards.html': GUARDS_HTML, 'patrol_run.html': PATROL_RUN_HTML, 'patrol_tour.html': PATROL_TOUR_HTML, 'reports.html': REPORTS_HTML, 'payroll.html': PAYROLL_HTML, 'profile.html': PROFILE_HTML, 'admin_paystub_upload.html': ADMIN_PAYSTUB_UPLOAD_HTML, 'guard_paystubs.html': GUARD_PAYSTUBS_HTML,
         'guard_daily_activity_reports.html': GUARD_DAILY_ACTIVITY_REPORTS_HTML,
         'guard_incident_reports.html': GUARD_INCIDENT_REPORTS_HTML,
         'guard_my_reports.html': GUARD_MY_REPORTS_HTML, 'guard_my_report_detail.html': GUARD_MY_REPORT_DETAIL_HTML, 'password_reset_request.html': PASSWORD_RESET_REQUEST_HTML, 'password_reset_form.html': PASSWORD_RESET_FORM_HTML, 'guard_login_list.html': GUARD_LOGIN_LIST_HTML, 'guard_login_assigned_sites.html': GUARD_LOGIN_ASSIGNED_SITES_HTML, 'guard_login_site_list.html': GUARD_LOGIN_SITE_LIST_HTML, 'guard_login_guard_list.html': GUARD_LOGIN_GUARD_LIST_HTML, 'guard_login_password.html': GUARD_LOGIN_PASSWORD_HTML}
@@ -7827,7 +7364,15 @@ def application(environ, start_response):
     if path == '/clock-in-requests':
         user, response = require_admin(environ, start_response)
         if response: return response
-        return redirect(start_response, '/dashboard#manual-clock-in-requests')
+        return app_page(environ, start_response, user, 'clock_in_requests.html', active_path='/clock-in-requests', title='Clock-In Requests')
+    if path in {'/clients', '/sites'}:
+        user, response = require_admin(environ, start_response)
+        if response: return response
+        if user['role'] not in {'company_admin', 'superadmin', 'admin'}:
+            return redirect_with_feedback(start_response, '/dashboard', error='Only company admins can manage clients and sites.')
+        template_name = 'clients.html' if path == '/clients' else 'sites.html'
+        page_title = 'Clients' if path == '/clients' else 'Sites'
+        return app_page(environ, start_response, user, template_name, active_path=path, title=page_title)
     if path == '/profile':
         user, response = require_login(environ, start_response)
         if response: return response
@@ -7887,7 +7432,7 @@ def application(environ, start_response):
         if not ok:
             return bad_request(start_response, message)
         log_audit('manual_clock_in_review', actor_user_id=user['id'], company_id=user['company_id'], target_type='shift', target_id=target_shift_id or data.get('request_id'), message=message, environ=environ)
-        return redirect(start_response, '/dashboard')
+        return redirect(start_response, '/clock-in-requests')
     if path == '/shift/claim' and method == 'POST':
         user, response = require_login(environ, start_response)
         if response: return response
@@ -8262,7 +7807,7 @@ def application(environ, start_response):
     if path == '/admin/client/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
-        data, _ = parse_post(environ); conn = db(); conn.execute('INSERT INTO clients (company_id, name, contact_name, contact_email, contact_phone, notes, active, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)', (user['company_id'], data.get('name'), data.get('contact_name'), data.get('contact_email'), data.get('contact_phone'), data.get('notes'), utc_now_str())); conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='client', target_id=data.get('name'), message='client created', environ=environ); return redirect(start_response, '/dashboard')
+        data, _ = parse_post(environ); conn = db(); conn.execute('INSERT INTO clients (company_id, name, contact_name, contact_email, contact_phone, notes, active, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)', (user['company_id'], data.get('name'), data.get('contact_name'), data.get('contact_email'), data.get('contact_phone'), data.get('notes'), utc_now_str())); conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='client', target_id=data.get('name'), message='client created', environ=environ); return redirect(start_response, '/clients')
     if path == '/admin/client/update' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
@@ -8276,7 +7821,7 @@ def application(environ, start_response):
             conn.close(); return bad_request(start_response, 'Client not found')
         conn.execute('''UPDATE clients SET name=?, contact_name=?, contact_email=?, contact_phone=?, notes=? WHERE id=?''', (client_name, data.get('contact_name'), data.get('contact_email'), data.get('contact_phone'), data.get('notes'), client['id']))
         conn.execute('UPDATE sites SET client_company_name=? WHERE client_id=? AND company_id=?', (client_name, client['id'], user['company_id']))
-        conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='client', target_id=client['id'], message='client updated', environ=environ); return redirect(start_response, '/dashboard')
+        conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='client', target_id=client['id'], message='client updated', environ=environ); return redirect(start_response, '/clients')
     if path == '/admin/site/new' and method == 'POST':
         user, response = require_admin(environ, start_response)
         if response: return response
@@ -8287,7 +7832,7 @@ def application(environ, start_response):
                 client_id = client_row['id']; client_name = client_row['name']
             else:
                 client_id = None
-        conn.execute('INSERT INTO sites (company_id, client_id, name, client_company_name, address, notes, active) VALUES (?, ?, ?, ?, ?, ?, 1)', (user['company_id'], client_id, data.get('name'), client_name, data.get('address'), data.get('notes'))); conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='site', target_id=data.get('name'), message='site created', environ=environ); return redirect(start_response, '/dashboard')
+        conn.execute('INSERT INTO sites (company_id, client_id, name, client_company_name, address, notes, active) VALUES (?, ?, ?, ?, ?, ?, 1)', (user['company_id'], client_id, data.get('name'), client_name, data.get('address'), data.get('notes'))); conn.commit(); conn.close(); log_audit('admin_action', actor_user_id=user['id'], company_id=user['company_id'], target_type='site', target_id=data.get('name'), message='site created', environ=environ); return redirect(start_response, '/sites')
     if path == '/patrol/checkpoint/qr' and method == 'GET':
         user, response = require_login(environ, start_response)
         if response: return response
