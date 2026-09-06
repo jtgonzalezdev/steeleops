@@ -2089,10 +2089,7 @@ def sidebar_nav_items(user, active_path):
             {'label': 'Clock-In Requests', 'href': '/clock-in-requests', 'active': active_path == '/clock-in-requests'},
         ])
         if user['role'] in {'company_admin', 'superadmin', 'admin'}:
-            items.extend([
-                {'label': 'Clients', 'href': '/clients', 'active': active_path == '/clients'},
-                {'label': 'Sites', 'href': '/sites', 'active': active_path == '/sites'},
-            ])
+            items.append({'label': 'Clients', 'href': '/clients', 'active': active_path == '/clients'})
         if user['role'] in {'company_admin', 'superadmin'}:
             items.extend([
                 {'label': 'Payroll', 'href': '/payroll', 'active': active_path == '/payroll'},
@@ -5028,9 +5025,9 @@ input, select, textarea { width: 100%; padding: 12px 14px; border-radius: 14px; 
 button, .btn { display: inline-flex; justify-content: center; align-items: center; gap: 8px; padding: 11px 16px; border-radius: 14px; border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.04); color: var(--text); cursor: pointer; }
 .btn.primary { background: linear-gradient(145deg, #ef4444, #991b1b); border-color: rgba(255,255,255,.06); color: white; }
 .btn.ghost { background: transparent; }
-.app-shell { min-height: 100vh; display: grid; grid-template-columns: 280px 1fr; }
-.sidebar { border-right: 1px solid var(--line); padding: 24px; background: linear-gradient(180deg, rgba(5,5,5,.96), rgba(12,12,12,.94)); position: sticky; top: 0; height: 100vh; }
-.sidebar-brand { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 26px; }
+.app-shell { height: 100vh; display: grid; grid-template-columns: 280px minmax(0, 1fr); overflow: hidden; }
+.sidebar { border-right: 1px solid var(--line); padding: 24px; background: linear-gradient(180deg, rgba(5,5,5,.96), rgba(12,12,12,.94)); position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+.sidebar-brand { display: flex; flex: 0 0 auto; gap: 14px; align-items: flex-start; margin-bottom: 26px; }
 .sidebar-brand-copy { min-width: 0; padding-top: 3px; }
 .sidebar-brand-copy h2 { margin: 3px 0 4px; font-size: 18px; line-height: 1.15; overflow-wrap: anywhere; }
 .company-logo { width: 56px; height: 70px; flex: 0 0 56px; object-fit: contain; border-radius: 14px; padding: 4px; border: 1px solid rgba(192,192,192,.24); background: rgba(0,0,0,.28); }
@@ -5044,11 +5041,11 @@ button, .btn { display: inline-flex; justify-content: center; align-items: cente
 .brand-shield-form { width: 74px; height: 92px; margin: 0 auto; }
 .brand-shield-sidebar { width: 56px; height: 70px; flex-basis: 56px; }
 .brand-shield-topbar { width: 38px; height: 48px; }
-.nav-links { display: grid; gap: 8px; }
+.nav-links { display: grid; gap: 8px; min-height: 0; overflow-x: hidden; overflow-y: auto; }
 .nav-links a { padding: 12px 14px; border-radius: 14px; color: #f5f5f5; }
 .nav-links a:hover { background: rgba(255,255,255,.05); }
 .nav-links a.active { background: rgba(220,38,38,.22); color: #fff; box-shadow: inset 0 0 0 1px rgba(248,113,113,.45); }
-.content { padding: 20px; display: grid; gap: 14px; }
+.content { min-width: 0; height: 100vh; padding: 20px; display: grid; gap: 14px; overflow-y: auto; }
 .card { background: linear-gradient(180deg, rgba(20,20,20,.96), rgba(8,8,8,.96)); border: 1px solid var(--line); border-radius: 20px; padding: 16px; box-shadow: var(--shadow); }
 .topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .user-chip { padding: 10px 14px; border: 1px solid var(--line); border-radius: 999px; color: #f5f5f5; }
@@ -5111,10 +5108,12 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
 
 @media (max-width: 1040px) {
   .login-card, .app-shell, .stats-grid, .two-col, .row-2, .row-3 { grid-template-columns: 1fr; }
+  .app-shell { height: auto; min-height: 100vh; overflow: visible; }
   .sidebar { position: static; height: auto; }
+  .nav-links { overflow: visible; }
   .topbar, .section-head, .list-item, .simple-header, .patrol-alert { flex-direction: column; align-items: flex-start; }
   .availability-row { grid-template-columns: 1fr; }
-  .content { padding: 14px; gap: 10px; }
+  .content { height: auto; padding: 14px; gap: 10px; overflow: visible; }
   .card { padding: 14px; border-radius: 16px; }
   .stat-number { font-size: 28px; }
   .stat-text { font-size: 15px; }
