@@ -5017,8 +5017,8 @@ button, .btn { display: inline-flex; justify-content: center; align-items: cente
 .brand-shield { display: block; flex: 0 0 auto; object-fit: contain; filter: drop-shadow(0 16px 32px rgba(220,38,38,.24)); }
 .brand-shield-large { width: 190px; height: 132px; }
 .brand-shield-form { width: 150px; height: 104px; margin: 0 auto; }
-.brand-shield-sidebar { width: 72px; height: 50px; flex-basis: 72px; }
-.brand-shield-topbar { width: 58px; height: 40px; }
+.brand-shield-sidebar { width: 96px; height: 66px; flex-basis: 96px; }
+.brand-shield-topbar { width: 88px; height: 61px; }
 .nav-links { display: grid; gap: 8px; min-height: 0; overflow-x: hidden; overflow-y: auto; }
 .nav-links a { padding: 12px 14px; border-radius: 14px; color: #f5f5f5; }
 .nav-links a:hover { background: rgba(255,255,255,.05); }
