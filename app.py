@@ -4039,10 +4039,10 @@ APP_SHELL_HTML = r'''{% extends "layout.html" %}
 <div class="app-shell">
   <aside class="sidebar">
     <div class="sidebar-brand">
-      {% if user.company_logo_url %}<img src="{{ user.company_logo_url }}" alt="{{ user.company_name or provider_brand_name }} logo" class="company-logo">{% else %}<img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-sidebar">{% endif %}
+      <img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} logo" class="brand-shield brand-shield-sidebar">
       <div class="sidebar-brand-copy">
         <div class="eyebrow">{{ product_short_name }} Platform</div>
-        <h2>{{ user.company_name or provider_brand_name }}</h2>
+        <h2>{{ provider_brand_name }}</h2>
         <div class="small-muted">{{ product_full_name }}</div>
       </div>
     </div>
@@ -4055,19 +4055,21 @@ APP_SHELL_HTML = r'''{% extends "layout.html" %}
 
   <main class="content">
     <section class="topbar card">
-      {% if user.company_logo_url %}<img src="{{ user.company_logo_url }}" alt="{{ user.company_name or provider_brand_name }} logo" class="company-logo topbar-logo">{% else %}<img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-topbar">{% endif %}
-      <div>
+      <img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} logo" class="brand-shield brand-shield-topbar">
+      <div class="topbar-brand-copy">
         <div class="eyebrow">{{ product_short_name }} Platform</div>
-        <h1>{{ page_title or product_full_name }}</h1>
+        <h1>{{ product_full_name }}</h1>
         <p class="small-muted">{{ brand_subtitle }}</p>
       </div>
       <div class="user-chip">{{ user.full_name }} · {{ user.role.replace('_', ' ').title() }}</div>
     </section>
-    {% if flash_message %}<div class="alert success">{{ flash_message }}</div>{% endif %}
-    {% if flash_error %}<div class="alert error">{{ flash_error }}</div>{% endif %}
-    {% if user.role == 'guard' %}<div id="offline-sync-status" class="offline-sync-status" aria-live="polite">Sync status loading…</div>{% endif %}
+    <div class="page-scroll">
+      {% if flash_message %}<div class="alert success">{{ flash_message }}</div>{% endif %}
+      {% if flash_error %}<div class="alert error">{{ flash_error }}</div>{% endif %}
+      {% if user.role == 'guard' %}<div id="offline-sync-status" class="offline-sync-status" aria-live="polite">Sync status loading…</div>{% endif %}
 
-    {% block page_content %}{% endblock %}
+      {% block page_content %}{% endblock %}
+    </div>
   {% if user.role == 'guard' %}
   <script>
   (function () {
@@ -5004,10 +5006,10 @@ button, .btn { display: inline-flex; justify-content: center; align-items: cente
 .btn.primary { background: linear-gradient(145deg, #ef4444, #991b1b); border-color: rgba(255,255,255,.06); color: white; }
 .btn.ghost { background: transparent; }
 .app-shell { height: 100vh; display: grid; grid-template-columns: 280px minmax(0, 1fr); overflow: hidden; }
-.sidebar { border-right: 1px solid var(--line); padding: 24px; background: linear-gradient(180deg, rgba(5,5,5,.96), rgba(12,12,12,.94)); position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
-.sidebar-brand { display: flex; flex: 0 0 auto; gap: 14px; align-items: flex-start; margin-bottom: 26px; }
-.sidebar-brand-copy { min-width: 0; padding-top: 3px; }
-.sidebar-brand-copy h2 { margin: 3px 0 4px; font-size: 18px; line-height: 1.15; overflow-wrap: anywhere; }
+.sidebar { border-right: 1px solid var(--line); padding: 20px 20px 16px; background: linear-gradient(180deg, rgba(5,5,5,.96), rgba(12,12,12,.94)); position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+.sidebar-brand { display: flex; flex: 0 0 auto; flex-direction: column; gap: 12px; align-items: stretch; margin-bottom: 20px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+.sidebar-brand-copy { min-width: 0; text-align: center; }
+.sidebar-brand-copy h2 { margin: 5px 0 5px; font-size: 20px; line-height: 1.08; overflow-wrap: anywhere; }
 .company-logo { width: 56px; height: 70px; flex: 0 0 56px; object-fit: contain; border-radius: 14px; padding: 4px; border: 1px solid rgba(192,192,192,.24); background: rgba(0,0,0,.28); }
 .company-logo.topbar-logo { width: 38px; height: 48px; flex-basis: 38px; border-radius: 10px; }
 .company-logo-auth { object-fit: contain; border-radius: 16px; padding: 6px; border: 1px solid rgba(192,192,192,.24); background: rgba(0,0,0,.24); }
@@ -5017,15 +5019,19 @@ button, .btn { display: inline-flex; justify-content: center; align-items: cente
 .brand-shield { display: block; flex: 0 0 auto; object-fit: contain; filter: drop-shadow(0 16px 32px rgba(220,38,38,.24)); }
 .brand-shield-large { width: 190px; height: 132px; }
 .brand-shield-form { width: 150px; height: 104px; margin: 0 auto; }
-.brand-shield-sidebar { width: 96px; height: 66px; flex-basis: 96px; }
-.brand-shield-topbar { width: 88px; height: 61px; }
+.brand-shield-sidebar { width: 100%; height: 160px; }
+.brand-shield-topbar { width: 184px; height: 127px; }
 .nav-links { display: grid; gap: 8px; min-height: 0; overflow-x: hidden; overflow-y: auto; }
 .nav-links a { padding: 12px 14px; border-radius: 14px; color: #f5f5f5; }
 .nav-links a:hover { background: rgba(255,255,255,.05); }
 .nav-links a.active { background: rgba(220,38,38,.22); color: #fff; box-shadow: inset 0 0 0 1px rgba(248,113,113,.45); }
-.content { min-width: 0; height: 100vh; padding: 20px; display: grid; gap: 14px; overflow-y: auto; }
+.content { min-width: 0; height: 100vh; padding: 20px; display: flex; flex-direction: column; gap: 14px; overflow: hidden; }
+.page-scroll { min-height: 0; overflow-x: hidden; overflow-y: auto; display: grid; gap: 14px; align-content: start; padding-right: 2px; }
 .card { background: linear-gradient(180deg, rgba(20,20,20,.96), rgba(8,8,8,.96)); border: 1px solid var(--line); border-radius: 20px; padding: 16px; box-shadow: var(--shadow); }
-.topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.topbar { display: flex; flex: 0 0 auto; min-height: 167px; justify-content: flex-start; align-items: center; gap: 26px; padding: 18px 24px; }
+.topbar-brand-copy { min-width: 0; flex: 1 1 auto; }
+.topbar-brand-copy h1 { margin: 6px 0; font-size: clamp(1.65rem, 2.6vw, 2.35rem); }
+.topbar-brand-copy p { margin: 0; }
 .user-chip { padding: 10px 14px; border: 1px solid var(--line); border-radius: 999px; color: #f5f5f5; }
 .grid { display: grid; gap: 12px; }
 .stats-grid { grid-template-columns: repeat(4, 1fr); }
@@ -5088,10 +5094,17 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
   .login-card, .app-shell, .stats-grid, .two-col, .row-2, .row-3 { grid-template-columns: 1fr; }
   .app-shell { height: auto; min-height: 100vh; overflow: visible; }
   .sidebar { position: static; height: auto; }
+  .sidebar-brand { align-items: center; }
+  .brand-shield-sidebar { width: min(240px, 100%); height: 150px; }
   .nav-links { overflow: visible; }
   .topbar, .section-head, .list-item, .simple-header, .patrol-alert { flex-direction: column; align-items: flex-start; }
+  .topbar { min-height: 0; gap: 14px; }
+  .brand-shield-topbar { width: min(184px, 70vw); height: auto; max-height: 127px; align-self: center; }
+  .topbar-brand-copy { width: 100%; text-align: center; }
+  .user-chip { align-self: center; max-width: 100%; white-space: normal; text-align: center; }
   .availability-row { grid-template-columns: 1fr; }
   .content { height: auto; padding: 14px; gap: 10px; overflow: visible; }
+  .page-scroll { overflow: visible; gap: 10px; padding-right: 0; }
   .card { padding: 14px; border-radius: 16px; }
   .stat-number { font-size: 28px; }
   .stat-text { font-size: 15px; }
