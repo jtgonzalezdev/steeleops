@@ -70,6 +70,26 @@ class BrandingTests(unittest.TestCase):
         self.assertGreaterEqual(response['body'].count(b'/static/steele-security-logo.png'), 2)
         self.assertNotIn(b'steele-security-shield.svg', response['body'])
 
+    def test_authenticated_shell_separates_fixed_branding_from_scroll_regions(self):
+        conn = app.db()
+        user = conn.execute(
+            "SELECT id FROM users WHERE role IN ('company_admin', 'admin') ORDER BY id LIMIT 1"
+        ).fetchone()
+        conn.close()
+        session_id = app.create_session(user['id'])
+
+        response = self.request('/dashboard', f'{app.SESSION_COOKIE_NAME}={session_id}')
+        body = response['body'].decode('utf-8')
+
+        self.assertEqual('200 OK', response['status'])
+        self.assertIn('class="sidebar-brand"', body)
+        self.assertIn('class="nav-links"', body)
+        self.assertIn('class="topbar card"', body)
+        self.assertIn('class="page-scroll"', body)
+        self.assertIn('.brand-shield-sidebar { width: 100%; height: 160px; }', app.STYLES_CSS)
+        self.assertIn('.brand-shield-topbar { width: 184px; height: 127px; }', app.STYLES_CSS)
+        self.assertIn('object-fit: contain', app.STYLES_CSS)
+
     def test_official_logo_is_served_unchanged(self):
         expected_path = os.path.join(app.STATIC_DIR, app.PROVIDER_LOGO_FILENAME)
         with open(expected_path, 'rb') as image_file:
