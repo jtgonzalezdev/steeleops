@@ -77,8 +77,8 @@ PRODUCT_FULL_NAME = os.getenv('PRODUCT_FULL_NAME', 'SteeleOps Control Center').s
 PROVIDER_BRAND_NAME = os.getenv('PROVIDER_BRAND_NAME', 'Steele Security Services').strip() or 'Steele Security Services'
 BRAND_SUBTITLE = os.getenv('BRAND_SUBTITLE', f'Built for {PROVIDER_BRAND_NAME}').strip() or f'Built for {PROVIDER_BRAND_NAME}'
 
-PROVIDER_SHIELD_LOGO_FILENAME = 'steele-security-shield.svg'
-PROVIDER_SHIELD_LOGO_URL = f'/static/{PROVIDER_SHIELD_LOGO_FILENAME}'
+PROVIDER_LOGO_FILENAME = 'steele-security-logo.png'
+PROVIDER_LOGO_URL = f'/static/{PROVIDER_LOGO_FILENAME}'
 PROVIDER_SHIELD_LOGO_SVG = r'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 160" role="img" aria-labelledby="title desc">
   <title id="title">Steele Security Services shield logo</title>
   <desc id="desc">Black, red, and silver shield mark with an S monogram.</desc>
@@ -333,10 +333,6 @@ def ensure_assets():
             f.write(content)
     with open(os.path.join(STATIC_DIR, 'styles.css'), 'w', encoding='utf-8') as f:
         f.write(STYLES_CSS)
-    with open(os.path.join(STATIC_DIR, PROVIDER_SHIELD_LOGO_FILENAME), 'w', encoding='utf-8') as f:
-        f.write(PROVIDER_SHIELD_LOGO_SVG)
-
-
 
 def normalize_sql(sql):
     return sql.replace('INTEGER PRIMARY KEY AUTOINCREMENT', 'SERIAL PRIMARY KEY').replace('AUTOINCREMENT', '')
@@ -1906,7 +1902,7 @@ def render(template_name, **context):
     context.setdefault('product_full_name', PRODUCT_FULL_NAME)
     context.setdefault('provider_brand_name', PROVIDER_BRAND_NAME)
     context.setdefault('brand_subtitle', BRAND_SUBTITLE)
-    context.setdefault('provider_logo_url', PROVIDER_SHIELD_LOGO_URL)
+    context.setdefault('provider_logo_url', PROVIDER_LOGO_URL)
     template = env.get_template(template_name)
     return template.render(**context).encode('utf-8')
 
@@ -5037,10 +5033,10 @@ button, .btn { display: inline-flex; justify-content: center; align-items: cente
 .logo-preview-card { padding: 16px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.03); text-align: center; }
 .company-logo-preview { width: 160px; height: 160px; object-fit: contain; margin: 12px auto; border-radius: 18px; padding: 8px; border: 1px solid rgba(192,192,192,.24); background: rgba(0,0,0,.28); }
 .brand-shield { display: block; flex: 0 0 auto; object-fit: contain; filter: drop-shadow(0 16px 32px rgba(220,38,38,.24)); }
-.brand-shield-large { width: 82px; height: 102px; }
-.brand-shield-form { width: 74px; height: 92px; margin: 0 auto; }
-.brand-shield-sidebar { width: 56px; height: 70px; flex-basis: 56px; }
-.brand-shield-topbar { width: 38px; height: 48px; }
+.brand-shield-large { width: 190px; height: 132px; }
+.brand-shield-form { width: 150px; height: 104px; margin: 0 auto; }
+.brand-shield-sidebar { width: 72px; height: 50px; flex-basis: 72px; }
+.brand-shield-topbar { width: 58px; height: 40px; }
 .nav-links { display: grid; gap: 8px; min-height: 0; overflow-x: hidden; overflow-y: auto; }
 .nav-links a { padding: 12px 14px; border-radius: 14px; color: #f5f5f5; }
 .nav-links a:hover { background: rgba(255,255,255,.05); }
@@ -5901,7 +5897,7 @@ def render_page(environ, template_name, **context):
     context.setdefault('product_full_name', PRODUCT_FULL_NAME)
     context.setdefault('provider_brand_name', PROVIDER_BRAND_NAME)
     context.setdefault('brand_subtitle', BRAND_SUBTITLE)
-    context.setdefault('provider_logo_url', PROVIDER_SHIELD_LOGO_URL)
+    context.setdefault('provider_logo_url', PROVIDER_LOGO_URL)
     context.setdefault('default_company_name', company_branding['name'])
     context.setdefault('default_company_logo_url', company_branding['logo_url'])
     return render(template_name, **context)
@@ -6592,10 +6588,6 @@ def ensure_assets():
             f.write(content)
     with open(os.path.join(STATIC_DIR, 'styles.css'), 'w', encoding='utf-8') as f:
         f.write(STYLES_CSS)
-    with open(os.path.join(STATIC_DIR, PROVIDER_SHIELD_LOGO_FILENAME), 'w', encoding='utf-8') as f:
-        f.write(PROVIDER_SHIELD_LOGO_SVG)
-
-
 def login_page(environ, start_response, error=None, message=None, reset_link=None):
     return html_response(start_response, render_page(environ, 'login.html', title=PRODUCT_FULL_NAME, error=error, message=message, reset_link=reset_link), extra_headers=csrf_headers(environ))
 
