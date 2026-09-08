@@ -79,29 +79,6 @@ BRAND_SUBTITLE = os.getenv('BRAND_SUBTITLE', f'Built for {PROVIDER_BRAND_NAME}')
 
 PROVIDER_LOGO_FILENAME = 'steele-security-logo.png'
 PROVIDER_LOGO_URL = f'/static/{PROVIDER_LOGO_FILENAME}'
-PROVIDER_SHIELD_LOGO_SVG = r'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 160" role="img" aria-labelledby="title desc">
-  <title id="title">Steele Security Services shield logo</title>
-  <desc id="desc">Black, red, and silver shield mark with an S monogram.</desc>
-  <defs>
-    <linearGradient id="shield" x1="18" y1="8" x2="110" y2="148" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ef4444"/>
-      <stop offset="0.45" stop-color="#b91c1c"/>
-      <stop offset="1" stop-color="#111111"/>
-    </linearGradient>
-    <linearGradient id="edge" x1="25" y1="15" x2="103" y2="139" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.9"/>
-      <stop offset="1" stop-color="#c0c0c0" stop-opacity="0.58"/>
-    </linearGradient>
-    <filter id="shadow" x="-20%" y="-15%" width="140%" height="135%">
-      <feDropShadow dx="0" dy="10" stdDeviation="8" flood-color="#000000" flood-opacity="0.36"/>
-    </filter>
-  </defs>
-  <path d="M64 6 112 22l-7 73c-3 31-22 45-41 59-19-14-38-28-41-59l-7-73L64 6Z" fill="url(#shield)" filter="url(#shadow)"/>
-  <path d="M64 16 101 29l-6 63c-2 24-16 36-31 47-15-11-29-23-31-47l-6-63 37-13Z" fill="none" stroke="url(#edge)" stroke-width="6" stroke-linejoin="round"/>
-  <path d="M76 54c-4-5-10-8-18-8-11 0-19 6-19 15 0 22 49 10 49 39 0 14-12 24-29 24-13 0-24-5-31-14l11-10c5 7 12 10 21 10 8 0 14-4 14-10 0-15-49-8-49-38 0-18 15-29 34-29 12 0 22 4 29 12L76 54Z" fill="#ffffff"/>
-  <path d="M64 26v107" stroke="#c0c0c0" stroke-width="4" stroke-linecap="round" opacity="0.28"/>
-</svg>
-'''
 
 env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=select_autoescape(['html']))
 
@@ -1999,7 +1976,12 @@ def get_current_user(environ):
     for key in ('company_id', 'site_id', 'role'):
         if key in session:
             user_data[f'session_{key}'] = session.get(key)
-    user_data['company_logo_url'] = public_asset_url(user_data.get('company_logo'))
+    # A legacy company upload must never override Steele Security's official
+    # bundled brand asset. Other tenant companies retain their custom logos.
+    if (user_data.get('company_name') or '').strip().casefold() == PROVIDER_BRAND_NAME.casefold():
+        user_data['company_logo_url'] = PROVIDER_LOGO_URL
+    else:
+        user_data['company_logo_url'] = public_asset_url(user_data.get('company_logo'))
     return user_data
 
 
@@ -4014,7 +3996,7 @@ LOGIN_HTML = r'''{% extends "layout.html" %}
 <div class="login-shell">
   <div class="login-card">
     <div class="brand-panel">
-      {% if default_company_logo_url %}<img src="{{ default_company_logo_url }}" alt="{{ default_company_name }} logo" class="brand-shield brand-shield-large company-logo-auth">{% else %}<img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-large">{% endif %}
+      <img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} logo" class="brand-shield brand-shield-large">
       <div>
         <div class="eyebrow">{{ product_short_name }}</div>
         <h1>{{ product_full_name }}</h1>
@@ -4030,7 +4012,7 @@ LOGIN_HTML = r'''{% extends "layout.html" %}
     </div>
     <div class="form-panel">
       <div class="logo-placeholder">
-        {% if default_company_logo_url %}<img src="{{ default_company_logo_url }}" alt="{{ default_company_name }} logo" class="brand-shield brand-shield-form company-logo-auth">{% else %}<img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} shield logo" class="brand-shield brand-shield-form">{% endif %}
+        <img src="{{ provider_logo_url }}" alt="{{ provider_brand_name }} logo" class="brand-shield brand-shield-form">
       </div>
       <h2>Sign in</h2>
       <p class="small-muted">Access the {{ product_full_name }}</p>
@@ -5183,24 +5165,8 @@ def first_uploaded_file(files, field_name):
 
 
 def default_company_branding():
-    try:
-        conn = db()
-        row = conn.execute(
-            '''
-            SELECT name, logo_path
-            FROM companies
-            WHERE logo_path IS NOT NULL AND TRIM(logo_path) <> ''
-            ORDER BY CASE WHEN name=? THEN 0 ELSE 1 END, id
-            LIMIT 1
-            ''',
-            (PROVIDER_BRAND_NAME,),
-        ).fetchone()
-        conn.close()
-    except Exception:
-        return {'name': PROVIDER_BRAND_NAME, 'logo_url': ''}
-    if not row:
-        return {'name': PROVIDER_BRAND_NAME, 'logo_url': ''}
-    return {'name': row['name'] or PROVIDER_BRAND_NAME, 'logo_url': public_asset_url(row['logo_path'])}
+    """Return the immutable provider branding used before tenant selection."""
+    return {'name': PROVIDER_BRAND_NAME, 'logo_url': PROVIDER_LOGO_URL}
 
 
 def is_allowed_company_logo(file_info):
