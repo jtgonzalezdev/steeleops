@@ -5022,6 +5022,11 @@ button, .btn { display: inline-flex; justify-content: center; align-items: cente
 .brand-shield-sidebar { width: 100%; height: 160px; }
 .brand-shield-topbar { width: 184px; height: 127px; }
 .nav-links { display: grid; gap: 8px; min-height: 0; overflow-x: hidden; overflow-y: auto; }
+.nav-links, .page-scroll { scrollbar-width: thin; scrollbar-color: var(--accent) #050505; }
+.nav-links::-webkit-scrollbar, .page-scroll::-webkit-scrollbar { width: 10px; }
+.nav-links::-webkit-scrollbar-track, .page-scroll::-webkit-scrollbar-track { background: #050505; border-radius: 999px; }
+.nav-links::-webkit-scrollbar-thumb, .page-scroll::-webkit-scrollbar-thumb { background: var(--accent); border: 2px solid #050505; border-radius: 999px; }
+.nav-links::-webkit-scrollbar-thumb:hover, .page-scroll::-webkit-scrollbar-thumb:hover { background: var(--accent-2); }
 .nav-links a { padding: 12px 14px; border-radius: 14px; color: #f5f5f5; }
 .nav-links a:hover { background: rgba(255,255,255,.05); }
 .nav-links a.active { background: rgba(220,38,38,.22); color: #fff; box-shadow: inset 0 0 0 1px rgba(248,113,113,.45); }
